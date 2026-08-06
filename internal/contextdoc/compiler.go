@@ -23,11 +23,17 @@ var absoluteUserPathPatterns = []*regexp.Regexp{
 }
 
 type Manifest struct {
-	ID                string   `yaml:"id"`
-	Profiles          []string `yaml:"profiles"`
-	RequiredPolicies  []string `yaml:"required_policies"`
-	RequiredStandards []string `yaml:"required_standards"`
-	RequiredChecks    []string `yaml:"required_checks"`
+	ID                  string               `yaml:"id"`
+	Profiles            []string             `yaml:"profiles"`
+	RequiredPolicies    []string             `yaml:"required_policies"`
+	RequiredStandards   []string             `yaml:"required_standards"`
+	RequiredChecks      []string             `yaml:"required_checks"`
+	PathAuditExceptions []PathAuditException `yaml:"path_audit_exceptions,omitempty"`
+}
+
+type PathAuditException struct {
+	Path   string `yaml:"path"`
+	Reason string `yaml:"reason"`
 }
 
 type Policy struct {
@@ -171,7 +177,7 @@ func (c *Compiler) Check(all bool, ids []string) (Result, error) {
 			}
 			result.Artifacts++
 		}
-		if err := auditPaths(repoPath); err != nil {
+		if err := auditPaths(repoPath, manifest.PathAuditExceptions); err != nil {
 			return result, fmt.Errorf("%s: %w", id, err)
 		}
 		if err := c.checkRequiredPaths(repoPath, manifest); err != nil {
@@ -322,7 +328,22 @@ func loadYAML[T any](path string) (T, error) {
 	return value, nil
 }
 
-func auditPaths(root string) error {
+func auditPaths(root string, exceptions []PathAuditException) error {
+	excluded := map[string]bool{}
+	for _, exception := range exceptions {
+		clean := filepath.Clean(filepath.FromSlash(exception.Path))
+		if exception.Path == "" || exception.Reason == "" || filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("invalid path audit exception %q", exception.Path)
+		}
+		info, err := os.Stat(filepath.Join(root, clean))
+		if err != nil {
+			return fmt.Errorf("path audit exception %q: %w", exception.Path, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("path audit exception must be a file: %q", exception.Path)
+		}
+		excluded[filepath.ToSlash(clean)] = true
+	}
 	var violations []string
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -338,13 +359,19 @@ func auditPaths(root string) error {
 		if !isOperational(path) {
 			return nil
 		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if excluded[filepath.ToSlash(relative)] {
+			return nil
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		for _, pattern := range absoluteUserPathPatterns {
 			if pattern.Match(data) {
-				relative, _ := filepath.Rel(root, path)
 				violations = append(violations, relative)
 				break
 			}

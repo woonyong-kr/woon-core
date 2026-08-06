@@ -16,6 +16,18 @@
     "profiles": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "required_policies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "required_standards": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-    "required_checks": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+    "required_checks": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "path_audit_exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "reason"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
   }
 }

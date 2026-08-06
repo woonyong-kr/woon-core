@@ -82,7 +82,7 @@ func TestAuditPathsRejectsUnixAndWindowsHomes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			mustWrite(t, filepath.Join(root, "config.yaml"), "path: "+content+"\n")
-			if err := auditPaths(root); err == nil {
+			if err := auditPaths(root, nil); err == nil {
 				t.Fatal("expected absolute path violation")
 			}
 		})
@@ -92,8 +92,20 @@ func TestAuditPathsRejectsUnixAndWindowsHomes(t *testing.T) {
 func TestAuditPathsIgnoresDiscardedLocalFiles(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "_to_delete", "legacy.md"), "/Users/example/legacy\n")
-	if err := auditPaths(root); err != nil {
+	if err := auditPaths(root, nil); err != nil {
 		t.Fatalf("discarded local files must not fail path audit: %v", err)
+	}
+}
+
+func TestAuditPathsAllowsExactDocumentedException(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "history", "verification.md"), "/Users/example/legacy\n")
+	exceptions := []PathAuditException{{Path: "history/verification.md", Reason: "append-only history"}}
+	if err := auditPaths(root, exceptions); err != nil {
+		t.Fatalf("documented file exception failed: %v", err)
+	}
+	if err := auditPaths(root, []PathAuditException{{Path: "history", Reason: "too broad"}}); err == nil {
+		t.Fatal("directory exception was accepted")
 	}
 }
 
