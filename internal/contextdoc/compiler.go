@@ -246,15 +246,21 @@ func (c *Compiler) checkRequiredPaths(repoPath string, manifest Manifest) error 
 func (c *Compiler) selectIDs(all bool, ids []string) ([]string, error) {
 	if all {
 		ids = ids[:0]
-		for id := range c.registry.Repositories {
-			ids = append(ids, id)
+		for id, repo := range c.registry.Repositories {
+			if !repo.Output {
+				ids = append(ids, id)
+			}
 		}
 	}
 	seen := map[string]bool{}
 	selected := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if _, ok := c.registry.Repositories[id]; !ok {
+		repo, ok := c.registry.Repositories[id]
+		if !ok {
 			return nil, fmt.Errorf("unknown repository %q", id)
+		}
+		if repo.Output {
+			return nil, fmt.Errorf("repository %q is output-only and has no generated context", id)
 		}
 		if !seen[id] {
 			selected = append(selected, id)

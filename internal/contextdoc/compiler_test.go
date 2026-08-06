@@ -74,6 +74,23 @@ func TestGenerateRefusesUnmanagedInstruction(t *testing.T) {
 	}
 }
 
+func TestSelectIDsExcludesOutputRepositories(t *testing.T) {
+	compiler := &Compiler{registry: registry.Registry{Version: 1, Repositories: map[string]registry.Repository{
+		"core":   {Remote: "https://github.com/example/core.git", Directory: "core"},
+		"output": {Remote: "https://github.com/example/output.git", Directory: "output", Output: true},
+	}}}
+	ids, err := compiler.selectIDs(true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != "core" {
+		t.Fatalf("selected IDs = %v, want [core]", ids)
+	}
+	if _, err := compiler.selectIDs(false, []string{"output"}); err == nil {
+		t.Fatal("explicit output repository selection was accepted")
+	}
+}
+
 func TestAuditPathsRejectsUnixAndWindowsHomes(t *testing.T) {
 	for name, content := range map[string]string{
 		"unix":    "/" + "Users/example/project",
