@@ -3,6 +3,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -47,7 +48,13 @@ func TestDiscoverRejectsAmbiguousRoots(t *testing.T) {
 
 func TestInitializePersistsPortableRoot(t *testing.T) {
 	config := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", config)
+	configPath := filepath.Join(config, "woon", "config.yaml")
+	if runtime.GOOS == "windows" {
+		t.Setenv("APPDATA", config)
+		configPath = filepath.Join(config, "Woon", "config.yaml")
+	} else {
+		t.Setenv("XDG_CONFIG_HOME", config)
+	}
 	root := filepath.Join(t.TempDir(), "path with spaces", "woon")
 	initialized, err := Initialize(root)
 	if err != nil {
@@ -59,7 +66,7 @@ func TestInitializePersistsPortableRoot(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, markerName)); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(config, "woon", "config.yaml"))
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
