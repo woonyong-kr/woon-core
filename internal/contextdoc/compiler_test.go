@@ -51,6 +51,35 @@ func TestGenerateThenCheckIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestGenerateNormalizesWindowsTemplateLineEndings(t *testing.T) {
+	root := t.TempDir()
+	core := filepath.Join(root, "woon-core")
+	repo := filepath.Join(root, "target")
+	mustWrite(t, filepath.Join(core, "config", "budgets.yaml"), "global_bootstrap_bytes: 2048\nrepository_instruction_bytes: 6144\n")
+	mustWrite(t, filepath.Join(core, "policies", "safety.yaml"), "id: safety\nrules: [verify]\n")
+	mustWrite(t, filepath.Join(core, "standards", "code.yaml"), "id: code\nrules: [clear]\n")
+	mustWrite(t, filepath.Join(core, "templates", "context", "instruction.md.tmpl"), "{{.Header}}\r\n{{.Manifest.ID}}\r\n")
+	mustWrite(t, filepath.Join(repo, "woon.yaml"), "id: target\nprofiles: [core]\nrequired_policies: [safety]\nrequired_standards: [code]\nrequired_checks: [unit]\n")
+	reg := registry.Registry{Version: 1, Repositories: map[string]registry.Repository{
+		"core":   {Remote: "https://github.com/example/core.git", Directory: "woon-core"},
+		"target": {Remote: "https://github.com/example/target.git", Directory: "target"},
+	}}
+	compiler, err := New(root, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compiler.Generate(false, []string{"target"}); err != nil {
+		t.Fatal(err)
+	}
+	generated, err := os.ReadFile(filepath.Join(repo, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(generated) != generatedHeader+"\ntarget\n" {
+		t.Fatalf("generated instructions use unstable line endings: %q", generated)
+	}
+}
+
 func TestGenerateRefusesUnmanagedInstruction(t *testing.T) {
 	root := t.TempDir()
 	core := filepath.Join(root, "woon-core")

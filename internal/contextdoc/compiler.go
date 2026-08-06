@@ -104,7 +104,11 @@ func New(root string, reg registry.Registry) (*Compiler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read context template: %w", err)
 	}
-	tmpl, err := template.New("instruction").Parse(string(templateBytes))
+	// Git may check text files out with CRLF on Windows. Normalize compiler
+	// inputs so the same repository state always produces byte-identical docs.
+	templateText := strings.ReplaceAll(string(templateBytes), "\r\n", "\n")
+	templateText = strings.ReplaceAll(templateText, "\r", "\n")
+	tmpl, err := template.New("instruction").Parse(templateText)
 	if err != nil {
 		return nil, fmt.Errorf("parse context template: %w", err)
 	}
