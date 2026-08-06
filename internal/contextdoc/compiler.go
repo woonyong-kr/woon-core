@@ -28,6 +28,7 @@ type Manifest struct {
 	RequiredPolicies    []string             `yaml:"required_policies"`
 	RequiredStandards   []string             `yaml:"required_standards"`
 	RequiredChecks      []string             `yaml:"required_checks"`
+	GeneratedPaths      []string             `yaml:"generated_paths,omitempty"`
 	PathAuditExceptions []PathAuditException `yaml:"path_audit_exceptions,omitempty"`
 }
 
@@ -177,7 +178,7 @@ func (c *Compiler) Check(all bool, ids []string) (Result, error) {
 			}
 			result.Artifacts++
 		}
-		if err := auditPaths(repoPath, manifest.PathAuditExceptions); err != nil {
+		if err := auditPaths(repoPath, manifest.GeneratedPaths, manifest.PathAuditExceptions); err != nil {
 			return result, fmt.Errorf("%s: %w", id, err)
 		}
 		if err := c.checkRequiredPaths(repoPath, manifest); err != nil {
@@ -328,7 +329,15 @@ func loadYAML[T any](path string) (T, error) {
 	return value, nil
 }
 
-func auditPaths(root string, exceptions []PathAuditException) error {
+func auditPaths(root string, generatedPaths []string, exceptions []PathAuditException) error {
+	generated := map[string]bool{}
+	for _, generatedPath := range generatedPaths {
+		clean := filepath.Clean(filepath.FromSlash(generatedPath))
+		if generatedPath == "" || filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("invalid generated path %q", generatedPath)
+		}
+		generated[filepath.ToSlash(clean)] = true
+	}
 	excluded := map[string]bool{}
 	for _, exception := range exceptions {
 		clean := filepath.Clean(filepath.FromSlash(exception.Path))
@@ -349,6 +358,17 @@ func auditPaths(root string, exceptions []PathAuditException) error {
 		if err != nil {
 			return err
 		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if generated[relative] {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if entry.IsDir() {
 			name := entry.Name()
 			if name == ".git" || name == "node_modules" || name == "vendor" || name == "generated" || name == "_archive" || name == "_to_delete" || name == ".legacy-backup" {
@@ -359,11 +379,7 @@ func auditPaths(root string, exceptions []PathAuditException) error {
 		if !isOperational(root, path) {
 			return nil
 		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		if excluded[filepath.ToSlash(relative)] {
+		if excluded[relative] {
 			return nil
 		}
 		data, err := os.ReadFile(path)

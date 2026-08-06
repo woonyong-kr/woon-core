@@ -82,7 +82,7 @@ func TestAuditPathsRejectsUnixAndWindowsHomes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			mustWrite(t, filepath.Join(root, "config.yaml"), "path: "+content+"\n")
-			if err := auditPaths(root, nil); err == nil {
+			if err := auditPaths(root, nil, nil); err == nil {
 				t.Fatal("expected absolute path violation")
 			}
 		})
@@ -92,7 +92,7 @@ func TestAuditPathsRejectsUnixAndWindowsHomes(t *testing.T) {
 func TestAuditPathsIgnoresDiscardedLocalFiles(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "_to_delete", "legacy.md"), "/Users/example/legacy\n")
-	if err := auditPaths(root, nil); err != nil {
+	if err := auditPaths(root, nil, nil); err != nil {
 		t.Fatalf("discarded local files must not fail path audit: %v", err)
 	}
 }
@@ -101,10 +101,10 @@ func TestAuditPathsAllowsExactDocumentedException(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "history", "verification.md"), "/Users/example/legacy\n")
 	exceptions := []PathAuditException{{Path: "history/verification.md", Reason: "append-only history"}}
-	if err := auditPaths(root, exceptions); err != nil {
+	if err := auditPaths(root, nil, exceptions); err != nil {
 		t.Fatalf("documented file exception failed: %v", err)
 	}
-	if err := auditPaths(root, []PathAuditException{{Path: "history", Reason: "too broad"}}); err == nil {
+	if err := auditPaths(root, nil, []PathAuditException{{Path: "history", Reason: "too broad"}}); err == nil {
 		t.Fatal("directory exception was accepted")
 	}
 }
@@ -112,12 +112,25 @@ func TestAuditPathsAllowsExactDocumentedException(t *testing.T) {
 func TestAuditPathsSeparatesKnowledgeProseFromAgentInstructions(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "wiki", "historical.md"), "/Users/example/old-source\n")
-	if err := auditPaths(root, nil); err != nil {
+	if err := auditPaths(root, nil, nil); err != nil {
 		t.Fatalf("knowledge prose must not be treated as operational: %v", err)
 	}
 	mustWrite(t, filepath.Join(root, ".claude", "skills", "active", "SKILL.md"), "/Users/example/active\n")
-	if err := auditPaths(root, nil); err == nil {
+	if err := auditPaths(root, nil, nil); err == nil {
 		t.Fatal("active AI instruction path was not audited")
+	}
+}
+
+func TestAuditPathsSkipsDeclaredGeneratedPaths(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "quartz", "public", "index.json"), "/Users/example/generated\n")
+	if err := auditPaths(root, []string{"quartz/public"}, nil); err != nil {
+		t.Fatalf("declared generated path failed: %v", err)
+	}
+	for _, invalid := range []string{".", "../outside", "/absolute"} {
+		if err := auditPaths(root, []string{invalid}, nil); err == nil {
+			t.Fatalf("invalid generated path %q was accepted", invalid)
+		}
 	}
 }
 

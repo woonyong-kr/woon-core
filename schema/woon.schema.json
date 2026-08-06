@@ -17,6 +17,11 @@
     "required_policies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "required_standards": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "required_checks": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "generated_paths": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
     "path_audit_exceptions": {
       "type": "array",
       "items": {
