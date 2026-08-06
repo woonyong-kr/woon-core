@@ -94,6 +94,15 @@ func TestValidateRejectsMissingConflictMember(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsRoutingRegression(t *testing.T) {
+	root, reg := skillsFixture(t)
+	evals := filepath.Join(root, "woon-skills", "evals", "routing.yaml")
+	writeFixture(t, evals, "version: 1\ncases:\n  - id: missing\n    profiles: [core]\n    expect_skills: [personal/missing]\n")
+	if _, err := Validate(root, reg, []string{"core"}); err == nil {
+		t.Fatal("validation accepted a routing regression")
+	}
+}
+
 func skillsFixture(t *testing.T) (string, registry.Registry) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "workspace with spaces")
@@ -102,6 +111,7 @@ func skillsFixture(t *testing.T) (string, registry.Registry) {
 	writeFixture(t, filepath.Join(repo, "conflicts", "effects.yaml"), "version: 1\ndefault: [read]\nskills: {}\n")
 	writeFixture(t, filepath.Join(repo, "conflicts", "conflicts.yaml"), "version: 1\ngroups: []\n")
 	writeFixture(t, filepath.Join(repo, "lock", "sources.yaml"), "version: 1\norigins:\n  personal:\n    path: personal\n    policy: maintained\n")
+	writeFixture(t, filepath.Join(repo, "evals", "routing.yaml"), "version: 1\ncases:\n  - id: core\n    profiles: [core]\n    expect_skills: [personal/demo]\n")
 	writeFixture(t, filepath.Join(repo, "personal", "demo", "SKILL.md"), "---\nname: demo\ndescription: Test skill.\n---\n\n# Demo\n")
 	reg := registry.Registry{Version: 1, Repositories: map[string]registry.Repository{
 		"skills": {Remote: "https://github.com/example/woon-skills.git", Directory: "woon-skills"},

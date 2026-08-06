@@ -60,6 +60,9 @@ func Validate(root string, reg registry.Registry, profiles []string) (PlanResult
 	if err := validateCatalog(resolved.RepoPath); err != nil {
 		return PlanResult{}, err
 	}
+	if err := validateRoutingEvals(resolved.RepoPath); err != nil {
+		return PlanResult{}, err
+	}
 	result := PlanResult{Profiles: resolved.Profiles}
 	for _, skill := range resolved.Skills {
 		result.Items = append(result.Items, PlanItem{Name: skill.Name, Source: skill.Reference, Hash: skill.Hash, Effects: skill.Effects, Action: "selected"})

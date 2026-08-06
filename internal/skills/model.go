@@ -48,6 +48,18 @@ type sourcesFile struct {
 	Origins map[string]sourceOrigin `yaml:"origins"`
 }
 
+type routingEvalFile struct {
+	Version int               `yaml:"version"`
+	Cases   []routingEvalCase `yaml:"cases"`
+}
+
+type routingEvalCase struct {
+	ID           string   `yaml:"id"`
+	Profiles     []string `yaml:"profiles"`
+	ExpectSkills []string `yaml:"expect_skills"`
+	RejectSkills []string `yaml:"reject_skills,omitempty"`
+}
+
 type sourceOrigin struct {
 	Path         string `yaml:"path"`
 	Policy       string `yaml:"policy,omitempty"`
@@ -329,6 +341,45 @@ func validateCatalog(repoPath string) error {
 	for reference := range effects.Skills {
 		if !references[reference] {
 			return fmt.Errorf("effects reference missing skill %q", reference)
+		}
+	}
+	return nil
+}
+
+func validateRoutingEvals(repoPath string) error {
+	evals, err := loadYAML[routingEvalFile](filepath.Join(repoPath, "evals", "routing.yaml"))
+	if err != nil {
+		return err
+	}
+	if evals.Version != 1 || len(evals.Cases) == 0 {
+		return fmt.Errorf("routing evals require version 1 and at least one case")
+	}
+	seenCases := map[string]bool{}
+	for _, testCase := range evals.Cases {
+		if testCase.ID == "" || seenCases[testCase.ID] {
+			return fmt.Errorf("routing eval case IDs must be non-empty and unique: %q", testCase.ID)
+		}
+		seenCases[testCase.ID] = true
+		if len(testCase.Profiles) == 0 {
+			return fmt.Errorf("routing eval %q requires profiles", testCase.ID)
+		}
+		_, references, _, err := resolveProfiles(repoPath, testCase.Profiles)
+		if err != nil {
+			return fmt.Errorf("routing eval %q: %w", testCase.ID, err)
+		}
+		selected := map[string]bool{}
+		for _, reference := range references {
+			selected[reference] = true
+		}
+		for _, expected := range testCase.ExpectSkills {
+			if !selected[expected] {
+				return fmt.Errorf("routing eval %q expected missing skill %q", testCase.ID, expected)
+			}
+		}
+		for _, rejected := range testCase.RejectSkills {
+			if selected[rejected] {
+				return fmt.Errorf("routing eval %q selected rejected skill %q", testCase.ID, rejected)
+			}
 		}
 	}
 	return nil
