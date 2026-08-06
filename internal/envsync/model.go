@@ -57,9 +57,16 @@ type jetbrainsKeymap struct {
 }
 
 type jetbrainsActions struct {
-	Version         int                 `yaml:"version"`
-	Intents         map[string][]string `yaml:"intents"`
-	RemoveConflicts map[string][]string `yaml:"remove_conflicts"`
+	Version             int                                 `yaml:"version"`
+	KeyOverrides        map[string]string                   `yaml:"key_overrides,omitempty"`
+	Intents             map[string][]string                 `yaml:"intents"`
+	RemoveConflicts     map[string][]string                 `yaml:"remove_conflicts"`
+	AdditionalShortcuts map[string][]jetbrainsShortcutInput `yaml:"additional_shortcuts,omitempty"`
+}
+
+type jetbrainsShortcutInput struct {
+	First  string `yaml:"first"`
+	Second string `yaml:"second,omitempty"`
 }
 
 type overlay struct {
@@ -168,6 +175,11 @@ func validateModel(env environment, vs vscodeAdapter, vsActions vscodeActions, j
 	for name := range jbActions.Intents {
 		if _, ok := env.Keybindings[name]; !ok {
 			return fmt.Errorf("JetBrains adapter has undeclared intent %q", name)
+		}
+	}
+	for name := range jbActions.KeyOverrides {
+		if _, ok := env.Keybindings[name]; !ok {
+			return fmt.Errorf("JetBrains adapter overrides undeclared intent %q", name)
 		}
 	}
 	seen := map[string]bool{}

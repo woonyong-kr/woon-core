@@ -409,7 +409,7 @@ func normalizeKeymap(value xmlKeymap) xmlKeymap {
 		sort.Slice(value.Actions[index].Shortcuts, func(i, j int) bool {
 			left := value.Actions[index].Shortcuts[i]
 			right := value.Actions[index].Shortcuts[j]
-			return left.First+left.Remove < right.First+right.Remove
+			return left.First+left.Second+left.Remove < right.First+right.Second+right.Remove
 		})
 	}
 	sort.Slice(value.Actions, func(i, j int) bool { return value.Actions[i].ID < value.Actions[j].ID })

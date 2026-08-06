@@ -43,6 +43,7 @@ type xmlAction struct {
 
 type xmlShortcut struct {
 	First  string `xml:"first-keystroke,attr"`
+	Second string `xml:"second-keystroke,attr,omitempty"`
 	Remove string `xml:"remove,attr,omitempty"`
 }
 
@@ -299,6 +300,9 @@ func renderJetBrainsKeymap(env environment, adapter jetbrainsAdapter, actions je
 	byAction := map[string][]xmlShortcut{}
 	for _, intent := range sortedKeys(env.Keybindings) {
 		key := jetbrainsKey(env.Keybindings[intent])
+		if override := actions.KeyOverrides[intent]; override != "" {
+			key = override
+		}
 		for _, action := range actions.Intents[intent] {
 			byAction[action] = append(byAction[action], xmlShortcut{First: key})
 		}
@@ -308,15 +312,20 @@ func renderJetBrainsKeymap(env environment, adapter jetbrainsAdapter, actions je
 			byAction[action] = append(byAction[action], xmlShortcut{First: key, Remove: "true"})
 		}
 	}
+	for action, shortcuts := range actions.AdditionalShortcuts {
+		for _, shortcut := range shortcuts {
+			byAction[action] = append(byAction[action], xmlShortcut{First: shortcut.First, Second: shortcut.Second})
+		}
+	}
 	ids := sortedKeys(byAction)
 	output := xmlKeymap{Version: "1", Name: adapter.Keymap.Name, Parent: adapter.Keymap.Parents[target]}
 	for _, id := range ids {
 		shortcuts := byAction[id]
 		sort.SliceStable(shortcuts, func(i, j int) bool {
-			if shortcuts[i].First == shortcuts[j].First {
+			if shortcuts[i].First == shortcuts[j].First && shortcuts[i].Second == shortcuts[j].Second {
 				return shortcuts[i].Remove < shortcuts[j].Remove
 			}
-			return shortcuts[i].First < shortcuts[j].First
+			return shortcuts[i].First+shortcuts[i].Second < shortcuts[j].First+shortcuts[j].Second
 		})
 		output.Actions = append(output.Actions, xmlAction{ID: id, Shortcuts: shortcuts})
 	}
