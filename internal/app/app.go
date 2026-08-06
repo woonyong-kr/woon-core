@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/woonyong-kr/woon-core/internal/buildinfo"
 	"github.com/woonyong-kr/woon-core/internal/contextdoc"
 	"github.com/woonyong-kr/woon-core/internal/envsync"
 	"github.com/woonyong-kr/woon-core/internal/registry"
+	"github.com/woonyong-kr/woon-core/internal/skills"
 	"github.com/woonyong-kr/woon-core/internal/workspace"
 )
 
@@ -46,8 +48,107 @@ func Run(rawArgs []string, stdout, stderr io.Writer) error {
 		return runContext(opts, args[1:], stdout)
 	case "env":
 		return runEnv(opts, args[1:], stdout)
+	case "skills":
+		return runSkills(opts, args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func runSkills(opts options, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: woon skills <plan|validate|install|doctor> [--profile <names>] [--target <codex|claude>]")
+	}
+	profiles, target, remaining, err := parseSkillsOptions(args[1:])
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("unexpected skills arguments: %s", strings.Join(remaining, " "))
+	}
+	if args[0] == "doctor" {
+		targets, err := skills.Doctor()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "status: ok")
+		for _, name := range []string{"codex", "claude"} {
+			fmt.Fprintf(out, "%s: %s\n", name, targets[name])
+		}
+		return nil
+	}
+	ws, reg, err := load(opts)
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "validate":
+		result, err := skills.Validate(ws.Root, reg, profiles)
+		if err != nil {
+			return err
+		}
+		printSkillsPlan(out, result)
+		return nil
+	case "plan":
+		result, err := skills.Plan(ws.Root, reg, profiles, target)
+		if err != nil {
+			return err
+		}
+		printSkillsPlan(out, result)
+		return nil
+	case "install":
+		result, err := skills.Install(ws.Root, reg, profiles, target)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\ntarget: %s\ninstalled: %d\nupdated: %d\nretired: %d\nunchanged: %d\n", result.Target, result.Installed, result.Updated, result.Retired, result.Unchanged)
+		if result.Backup != "" {
+			fmt.Fprintf(out, "backup: %s\n", result.Backup)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown skills command %q", args[0])
+	}
+}
+
+func parseSkillsOptions(args []string) ([]string, string, []string, error) {
+	var profiles []string
+	var target string
+	var remaining []string
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--profile":
+			if index+1 >= len(args) {
+				return nil, "", nil, fmt.Errorf("--profile requires a comma-separated value")
+			}
+			for _, profile := range strings.Split(args[index+1], ",") {
+				profile = strings.TrimSpace(profile)
+				if profile != "" {
+					profiles = append(profiles, profile)
+				}
+			}
+			index++
+		case "--target":
+			if index+1 >= len(args) {
+				return nil, "", nil, fmt.Errorf("--target requires codex or claude")
+			}
+			target = args[index+1]
+			index++
+		default:
+			remaining = append(remaining, args[index])
+		}
+	}
+	sort.Strings(profiles)
+	return profiles, target, remaining, nil
+}
+
+func printSkillsPlan(out io.Writer, result skills.PlanResult) {
+	fmt.Fprintf(out, "status: ok\nprofiles: %s\nskills: %d\n", strings.Join(result.Profiles, ","), len(result.Items))
+	if result.Target != "" {
+		fmt.Fprintf(out, "target: %s\n", result.Target)
+	}
+	for _, item := range result.Items {
+		fmt.Fprintf(out, "  - %s: %s [%s]\n", item.Name, item.Action, strings.Join(item.Effects, ","))
 	}
 }
 
@@ -311,6 +412,10 @@ Usage:
   woon env plan [--all]
   woon env apply [--all]
   woon env verify [--all]
+  woon skills plan --profile <names> [--target <codex|claude>]
+  woon skills validate --profile <names>
+  woon skills install --profile <names> --target <codex|claude>
+  woon skills doctor
   woon env check [--target <macos|windows|linux>]
   woon version`)
 }
