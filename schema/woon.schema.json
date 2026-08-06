@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/woonyong-kr/woon-core/schema/woon.schema.json",
+  "title": "Woon repository manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "profiles",
+    "required_policies",
+    "required_standards",
+    "required_checks"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "profiles": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "required_policies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "required_standards": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "required_checks": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+  }
+}

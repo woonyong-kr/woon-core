@@ -1,0 +1,5 @@
+id: side-effects
+rules:
+  - 작업 범위 안의 read-only 검사는 허용한다.
+  - push, deploy, delete, visibility 변경은 명시된 작업 권한 안에서만 수행한다.
+  - atomic update, backup, rollback과 의미 기준 검증을 우선한다.

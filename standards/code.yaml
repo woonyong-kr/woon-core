@@ -1,0 +1,8 @@
+id: code
+rules:
+  - 설명적인 이름, 작고 응집된 함수, early return, 불변 데이터 흐름과 명시적 오류를 우선한다.
+  - 설정은 검증된 manifest와 adapter에 두고 저장소 이름, 경로, action ID와 환경별 값을 코드에 흩어 놓지 않는다.
+  - copy-paste, 성급한 추상화, 죽은 코드, 조용한 fallback과 숨은 side effect를 허용하지 않는다.
+  - 완료 전에 언어 표준 도구로 format, lint, type check와 test를 실행한다.
+  - 버그에는 회귀 테스트를, generator, serializer, resolver와 compiler에는 결정성 테스트를 추가한다.
+  - 주석은 의도와 trade-off를 설명하고 public API는 입력, 출력, 오류와 side effect를 문서화한다.

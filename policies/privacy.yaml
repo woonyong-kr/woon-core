@@ -1,0 +1,5 @@
+id: privacy
+rules:
+  - secret, token, 개인 경로와 local credential을 Git에 넣지 않는다.
+  - 명시적으로 공개가 승인되지 않은 private 원자료는 비공개로 취급한다.
+  - 로그와 생성물에서 민감한 값을 제거한다.

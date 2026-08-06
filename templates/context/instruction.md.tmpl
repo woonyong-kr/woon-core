@@ -1,0 +1,20 @@
+{{.Header}}
+# Woon 지침: {{.Manifest.ID}}
+
+대상: `{{.Target}}`
+Profiles: {{range $index, $profile := .Manifest.Profiles}}{{if $index}}, {{end}}`{{$profile}}`{{end}}
+
+## 필수 작업 순서
+
+1. `woon.yaml`을 읽고 교차 저장소 링크는 `woon resolve`로 해석한다.
+2. 관련 없는 변경을 보존하고 정본 파일만 편집한다.
+3. `required_checks`에 선언된 검증을 실행한다.
+4. 생성 파일을 직접 편집하지 않고 정본에서 다시 생성한다.
+5. 검증을 통과하기 전에는 완료로 보고하지 않는다.
+{{range .Policies}}
+## 정책: {{.ID}}
+{{range .Rules}}- {{.}}
+{{end}}{{end}}{{range .Standards}}
+## 표준: {{.ID}}
+{{range .Rules}}- {{.}}
+{{end}}{{end -}}

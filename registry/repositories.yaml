@@ -1,0 +1,32 @@
+version: 1
+repositories:
+  core:
+    remote: https://github.com/woonyong-kr/woon-core.git
+    directory: woon-core
+    role: control-plane
+  skills:
+    remote: https://github.com/woonyong-kr/woon-skills.git
+    directory: woon-skills
+    role: skill-catalog
+  env:
+    remote: https://github.com/woonyong-kr/woon-env.git
+    directory: woon-env
+    role: environment
+  knowledge:
+    remote: https://github.com/woonyong-kr/woon-knowledge.git
+    directory: woon-knowledge
+    role: knowledge
+  site:
+    remote: https://github.com/woonyong-kr/woon-site.git
+    directory: woon-site
+    role: publishing-source
+  profile-output:
+    remote: https://github.com/woonyong-kr/woonyong-kr.git
+    directory: woonyong-kr
+    role: generated-profile
+    output: true
+  pages-output:
+    remote: https://github.com/woonyong-kr/woonyong-kr.github.io.git
+    directory: woonyong-kr.github.io
+    role: generated-pages
+    output: true

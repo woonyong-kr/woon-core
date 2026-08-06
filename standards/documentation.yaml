@@ -1,0 +1,7 @@
+id: documentation
+rules:
+  - README는 목적, 주요 기능, 설치, 사용법, 설정, 검증과 소유 경계를 필요한 순서로 설명한다.
+  - GitHub 예약 파일을 제외한 Markdown 파일명은 kebab-case를 사용한다.
+  - 사실을 먼저 쓰고 생성 문서를 표시하며 같은 설명을 복사하지 않고 하나의 정본에 연결한다.
+  - 명령 예시는 완전하고 실행 가능해야 하며 개인 경로, token과 private data를 포함하지 않는다.
+  - interface, 폴더 구조, workflow 또는 소유 경계가 바뀌면 같은 변경에서 문서도 갱신한다.
