@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -255,6 +256,79 @@ func validateSources(repoPath string) error {
 		}
 		if origin.Upstream != "" && (len(origin.Commit) != 40 || origin.UpdatePolicy != "review-pr") {
 			return fmt.Errorf("vendor origin %q requires a commit lock and review-pr policy", name)
+		}
+	}
+	return nil
+}
+
+func validateCatalog(repoPath string) error {
+	sources, err := loadYAML[sourcesFile](filepath.Join(repoPath, "lock", "sources.yaml"))
+	if err != nil {
+		return err
+	}
+	references := map[string]bool{}
+	names := map[string]string{}
+	for _, originName := range sortedKeys(sources.Origins) {
+		origin := sources.Origins[originName]
+		entries, err := os.ReadDir(filepath.Join(repoPath, filepath.FromSlash(origin.Path)))
+		if err != nil {
+			return fmt.Errorf("read origin %q: %w", originName, err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			reference := filepath.ToSlash(filepath.Join(origin.Path, entry.Name()))
+			metadata, err := readFrontmatter(filepath.Join(repoPath, filepath.FromSlash(reference), "SKILL.md"))
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("%s: %w", reference, err)
+			}
+			if metadata.Name != entry.Name() {
+				return fmt.Errorf("%s frontmatter name %q does not match directory", reference, metadata.Name)
+			}
+			if previous, duplicate := names[metadata.Name]; duplicate {
+				return fmt.Errorf("duplicate catalog skill name %q: %s and %s", metadata.Name, previous, reference)
+			}
+			names[metadata.Name] = reference
+			references[reference] = true
+		}
+	}
+
+	conflicts, err := loadYAML[conflictFile](filepath.Join(repoPath, "conflicts", "conflicts.yaml"))
+	if err != nil {
+		return err
+	}
+	seenGroups := map[string]bool{}
+	for _, group := range conflicts.Groups {
+		if group.ID == "" || seenGroups[group.ID] {
+			return fmt.Errorf("conflict group IDs must be non-empty and unique: %q", group.ID)
+		}
+		seenGroups[group.ID] = true
+		if len(group.Members) < 2 {
+			return fmt.Errorf("conflict group %q requires at least two members", group.ID)
+		}
+		memberSet := map[string]bool{}
+		for _, reference := range group.Members {
+			if !references[reference] {
+				return fmt.Errorf("conflict group %q references missing skill %q", group.ID, reference)
+			}
+			memberSet[reference] = true
+		}
+		if group.Preferred != "" && !memberSet[group.Preferred] {
+			return fmt.Errorf("conflict group %q preferred skill is not a member", group.ID)
+		}
+	}
+
+	effects, err := loadYAML[effectsFile](filepath.Join(repoPath, "conflicts", "effects.yaml"))
+	if err != nil {
+		return err
+	}
+	for reference := range effects.Skills {
+		if !references[reference] {
+			return fmt.Errorf("effects reference missing skill %q", reference)
 		}
 	}
 	return nil

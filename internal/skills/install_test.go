@@ -85,6 +85,15 @@ func TestInstallRefusesUnmanagedSkill(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMissingConflictMember(t *testing.T) {
+	root, reg := skillsFixture(t)
+	conflicts := filepath.Join(root, "woon-skills", "conflicts", "conflicts.yaml")
+	writeFixture(t, conflicts, "version: 1\ngroups:\n  - id: stale\n    mode: exclusive\n    members: [personal/demo, personal/missing]\n")
+	if _, err := Validate(root, reg, []string{"core"}); err == nil {
+		t.Fatal("validation accepted a missing conflict member")
+	}
+}
+
 func skillsFixture(t *testing.T) (string, registry.Registry) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "workspace with spaces")
