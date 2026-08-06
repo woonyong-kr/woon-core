@@ -356,7 +356,7 @@ func auditPaths(root string, exceptions []PathAuditException) error {
 			}
 			return nil
 		}
-		if !isOperational(path) {
+		if !isOperational(root, path) {
 			return nil
 		}
 		relative, err := filepath.Rel(root, path)
@@ -388,11 +388,21 @@ func auditPaths(root string, exceptions []PathAuditException) error {
 	return nil
 }
 
-func isOperational(path string) bool {
+func isOperational(root, path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".go", ".py", ".sh", ".ps1", ".yaml", ".yml", ".json", ".toml", ".xml", ".md", ".tmpl":
+	case ".go", ".py", ".sh", ".ps1", ".yaml", ".yml", ".json", ".toml", ".xml", ".tmpl":
 		return true
+	case ".md":
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return true
+		}
+		relative = filepath.ToSlash(relative)
+		base := filepath.Base(path)
+		return relative == "README.md" || base == "AGENTS.md" || base == "CLAUDE.md" ||
+			strings.HasPrefix(relative, ".claude/") || strings.HasPrefix(relative, ".cursor/") ||
+			strings.HasPrefix(relative, ".github/") || strings.HasPrefix(relative, "docs/")
 	default:
 		return false
 	}

@@ -109,6 +109,18 @@ func TestAuditPathsAllowsExactDocumentedException(t *testing.T) {
 	}
 }
 
+func TestAuditPathsSeparatesKnowledgeProseFromAgentInstructions(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "wiki", "historical.md"), "/Users/example/old-source\n")
+	if err := auditPaths(root, nil); err != nil {
+		t.Fatalf("knowledge prose must not be treated as operational: %v", err)
+	}
+	mustWrite(t, filepath.Join(root, ".claude", "skills", "active", "SKILL.md"), "/Users/example/active\n")
+	if err := auditPaths(root, nil); err == nil {
+		t.Fatal("active AI instruction path was not audited")
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
