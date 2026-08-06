@@ -1,3 +1,4 @@
 package buildinfo
 
-const Version = "0.4.1"
+// Version is "dev" unless a release build injects the Git tag with -ldflags.
+var Version = "dev"
