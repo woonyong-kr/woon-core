@@ -89,6 +89,14 @@ func TestAuditPathsRejectsUnixAndWindowsHomes(t *testing.T) {
 	}
 }
 
+func TestAuditPathsIgnoresDiscardedLocalFiles(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "_to_delete", "legacy.md"), "/Users/example/legacy\n")
+	if err := auditPaths(root); err != nil {
+		t.Fatalf("discarded local files must not fail path audit: %v", err)
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

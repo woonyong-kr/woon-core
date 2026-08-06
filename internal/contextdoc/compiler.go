@@ -330,7 +330,7 @@ func auditPaths(root string) error {
 		}
 		if entry.IsDir() {
 			name := entry.Name()
-			if name == ".git" || name == "node_modules" || name == "vendor" || name == "generated" || name == "_archive" || name == ".legacy-backup" {
+			if name == ".git" || name == "node_modules" || name == "vendor" || name == "generated" || name == "_archive" || name == "_to_delete" || name == ".legacy-backup" {
 				return filepath.SkipDir
 			}
 			return nil
