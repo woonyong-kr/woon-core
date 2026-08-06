@@ -6,13 +6,12 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/woonyong-kr/woon-core/internal/buildinfo"
 	"github.com/woonyong-kr/woon-core/internal/contextdoc"
 	"github.com/woonyong-kr/woon-core/internal/envsync"
 	"github.com/woonyong-kr/woon-core/internal/registry"
 	"github.com/woonyong-kr/woon-core/internal/workspace"
 )
-
-const version = "0.2.0"
 
 type options struct {
 	root string
@@ -30,7 +29,7 @@ func Run(rawArgs []string, stdout, stderr io.Writer) error {
 
 	switch args[0] {
 	case "version", "--version", "-v":
-		fmt.Fprintln(stdout, version)
+		fmt.Fprintln(stdout, buildinfo.Version)
 		return nil
 	case "help", "--help", "-h":
 		printUsage(stdout)

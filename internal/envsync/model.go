@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/woonyong-kr/woon-core/internal/buildinfo"
 	"gopkg.in/yaml.v3"
 )
 
@@ -80,7 +81,28 @@ type generatedManifest struct {
 	Files   map[string]string `json:"files"`
 }
 
+type toolchainLock struct {
+	Version       int               `yaml:"version"`
+	Generator     string            `yaml:"generator"`
+	Schema        string            `yaml:"schema"`
+	Serialization serializationLock `yaml:"serialization"`
+}
+
+type serializationLock struct {
+	JSONIndent   int    `yaml:"json_indent"`
+	JSONKeyOrder string `yaml:"json_key_order"`
+	XMLIndent    int    `yaml:"xml_indent"`
+	LineEnding   string `yaml:"line_ending"`
+}
+
 func loadModel(repoPath, target string) (environment, vscodeAdapter, vscodeActions, jetbrainsAdapter, jetbrainsActions, overlay, error) {
+	lock, err := loadYAML[toolchainLock](filepath.Join(repoPath, "lock", "toolchain.yaml"))
+	if err != nil {
+		return environment{}, vscodeAdapter{}, vscodeActions{}, jetbrainsAdapter{}, jetbrainsActions{}, overlay{}, err
+	}
+	if err := validateToolchain(lock); err != nil {
+		return environment{}, vscodeAdapter{}, vscodeActions{}, jetbrainsAdapter{}, jetbrainsActions{}, overlay{}, err
+	}
 	env, err := loadYAML[environment](filepath.Join(repoPath, "config", "env.yaml"))
 	if err != nil {
 		return environment{}, vscodeAdapter{}, vscodeActions{}, jetbrainsAdapter{}, jetbrainsActions{}, overlay{}, err
@@ -116,6 +138,17 @@ func loadModel(repoPath, target string) (environment, vscodeAdapter, vscodeActio
 		return environment{}, vscodeAdapter{}, vscodeActions{}, jetbrainsAdapter{}, jetbrainsActions{}, overlay{}, err
 	}
 	return env, vs, vsActions, jb, jbActions, platformOverlay, nil
+}
+
+func validateToolchain(lock toolchainLock) error {
+	if lock.Version != 1 || lock.Generator != "woon-core@"+buildinfo.Version || lock.Schema != "env.schema.json@1" {
+		return fmt.Errorf("toolchain lock does not match woon-core %s and env schema 1", buildinfo.Version)
+	}
+	serialization := lock.Serialization
+	if serialization.JSONIndent != 2 || serialization.JSONKeyOrder != "lexical" || serialization.XMLIndent != 2 || serialization.LineEnding != "lf" {
+		return fmt.Errorf("unsupported serialization lock")
+	}
+	return nil
 }
 
 func validateModel(env environment, vs vscodeAdapter, vsActions vscodeActions, jb jetbrainsAdapter, jbActions jetbrainsActions, platformOverlay overlay, target string) error {
