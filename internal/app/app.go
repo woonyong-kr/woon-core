@@ -3,9 +3,11 @@ package app
 import (
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 
 	"github.com/woonyong-kr/woon-core/internal/contextdoc"
+	"github.com/woonyong-kr/woon-core/internal/envsync"
 	"github.com/woonyong-kr/woon-core/internal/registry"
 	"github.com/woonyong-kr/woon-core/internal/workspace"
 )
@@ -43,9 +45,118 @@ func Run(rawArgs []string, stdout, stderr io.Writer) error {
 		return runRepo(opts, args[1:], stdout)
 	case "context":
 		return runContext(opts, args[1:], stdout)
+	case "env":
+		return runEnv(opts, args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func runEnv(opts options, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: woon env <doctor|plan|generate|check|apply|verify> [--all] [--target <os>]")
+	}
+	target, remaining, err := parseTarget(args[1:])
+	if err != nil {
+		return err
+	}
+	if len(remaining) == 1 && remaining[0] == "--all" {
+		remaining = nil
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("unexpected env arguments: %s", strings.Join(remaining, " "))
+	}
+	ws, reg, err := load(opts)
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "doctor":
+		statuses, err := envsync.Doctor(ws.Root, reg, target)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\ntarget: %s\ninstallations: %d\n", target, len(statuses))
+		for _, status := range statuses {
+			fmt.Fprintf(out, "  - name: %s\n    path: %s\n    running: %t\n", status.Name, status.Path, status.Running)
+			if status.ExtensionCommand != "" {
+				fmt.Fprintf(out, "    extension_command: %s\n    extension_command_available: %t\n", status.ExtensionCommand, status.CommandAvailable)
+			}
+		}
+		return nil
+	case "plan":
+		result, err := envsync.Plan(ws.Root, reg, target)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\ntarget: %s\noperations: %d\nchanges: %d\n", result.Target, len(result.Operations), result.Changes)
+		for _, operation := range result.Operations {
+			if operation.Changed {
+				fmt.Fprintf(out, "  - %s/%s: %s\n", operation.Target, operation.Kind, operation.Destination)
+			}
+		}
+		return nil
+	case "generate":
+		result, err := envsync.Generate(ws.Root, reg, target)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\ntarget: %s\nartifacts: %d\nhash: %s\n", result.Target, result.Artifacts, result.Hash)
+		return nil
+	case "check":
+		result, err := envsync.Check(ws.Root, reg, target)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\ntarget: %s\nartifacts: %d\nhash: %s\n", result.Target, result.Artifacts, result.Hash)
+		return nil
+	case "apply":
+		result, err := envsync.Apply(ws.Root, reg, target)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\ntarget: %s\napplied: %d\n", result.Target, result.Applied)
+		if result.BackupPath != "" {
+			fmt.Fprintf(out, "backup: %s\n", result.BackupPath)
+		}
+		return nil
+	case "verify":
+		result, err := envsync.Verify(ws.Root, reg, target)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\ntarget: %s\nverified: %d\n", result.Target, len(result.Operations))
+		return nil
+	default:
+		return fmt.Errorf("unknown env command %q", args[0])
+	}
+}
+
+func parseTarget(args []string) (string, []string, error) {
+	target := runtime.GOOS
+	switch target {
+	case "darwin":
+		target = "macos"
+	case "windows", "linux":
+	default:
+		return "", nil, fmt.Errorf("unsupported runtime OS %q", runtime.GOOS)
+	}
+	remaining := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] != "--target" {
+			remaining = append(remaining, args[i])
+			continue
+		}
+		if i+1 >= len(args) {
+			return "", nil, fmt.Errorf("--target requires macos, windows, or linux")
+		}
+		target = args[i+1]
+		i++
+	}
+	if target != "macos" && target != "windows" && target != "linux" {
+		return "", nil, fmt.Errorf("unsupported target %q", target)
+	}
+	return target, remaining, nil
 }
 
 func parseGlobal(args []string) (options, []string, error) {
@@ -196,5 +307,11 @@ Usage:
   woon resolve <repo-id|repo://id/path> [--root <path>]
   woon context generate [--all|repo-id...] [--root <path>]
   woon context check [--all|repo-id...] [--root <path>]
+  woon env generate [--target <macos|windows|linux>]
+  woon env doctor [--all]
+  woon env plan [--all]
+  woon env apply [--all]
+  woon env verify [--all]
+  woon env check [--target <macos|windows|linux>]
   woon version`)
 }

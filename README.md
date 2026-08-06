@@ -40,6 +40,16 @@ repo://knowledge/wiki/os/page-fault.md
 
 공유 registry에는 Git URL과 상대 폴더만 기록한다. 머신 경로는 local Woon config에만 저장하고 Git에 커밋하지 않는다.
 
+IDE 설정은 같은 바이너리에서 관리한다.
+
+```bash
+woon env doctor --all
+woon env plan --all
+woon env generate
+woon env apply --all
+woon env verify --all
+```
+
 ## 저장소 구성
 
 - `woon-core`: policy and orchestration
