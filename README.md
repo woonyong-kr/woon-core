@@ -28,6 +28,8 @@ woon doctor
 woon repo sync
 woon context generate --all
 woon context check --all
+woon knowledge watch
+woon knowledge status
 ```
 
 root 후보가 서로 다르면 임의로 선택하지 않고 실패한다. `--root`, `WOON_HOME`, platform config, 상위 `.woon-root`, 기본 workspace 순서로 확인한다.
@@ -39,6 +41,8 @@ repo://knowledge/wiki/os/page-fault.md
 ```
 
 공유 registry에는 Git URL과 상대 폴더만 기록한다. 머신 경로는 local Woon config에만 저장하고 Git에 커밋하지 않는다.
+
+`woon knowledge`는 `woon-knowledge/config/knowledge-workflow.yaml`을 읽어 drop 폴더를 감시한다. 원본 hash와 가공물 계보는 Git 정본에 남고 LLM Wiki는 선택형 adapter이므로, 데스크톱 앱 없이도 수집·중복 검사·충돌 차단·삭제 검토가 동작한다.
 
 IDE 설정은 같은 바이너리에서 관리한다.
 

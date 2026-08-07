@@ -6,10 +6,12 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/woonyong-kr/woon-core/internal/buildinfo"
 	"github.com/woonyong-kr/woon-core/internal/contextdoc"
 	"github.com/woonyong-kr/woon-core/internal/envsync"
+	"github.com/woonyong-kr/woon-core/internal/knowledge"
 	"github.com/woonyong-kr/woon-core/internal/registry"
 	"github.com/woonyong-kr/woon-core/internal/skills"
 	"github.com/woonyong-kr/woon-core/internal/workspace"
@@ -50,9 +52,160 @@ func Run(rawArgs []string, stdout, stderr io.Writer) error {
 		return runEnv(opts, args[1:], stdout)
 	case "skills":
 		return runSkills(opts, args[1:], stdout)
+	case "knowledge":
+		return runKnowledge(opts, args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func runKnowledge(opts options, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: woon knowledge <scan|watch|status|context|link|trace|retire>")
+	}
+	ws, reg, err := load(opts)
+	if err != nil {
+		return err
+	}
+	repo, err := reg.Resolve(ws.Root, "knowledge")
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "scan":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: woon knowledge scan")
+		}
+		result, err := knowledge.Scan(repo)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\nfiles: %d\nsources: %d\nreview_items: %d\n", result.Files, result.Sources, result.ReviewItems)
+		return nil
+	case "watch":
+		cfg, err := knowledge.LoadConfig(repo)
+		if err != nil {
+			return err
+		}
+		interval, err := knowledgeWatchInterval(args, time.Duration(cfg.PollSeconds)*time.Second)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: watching\ninterval: %s\n", interval)
+		return knowledge.Watch(repo, interval, func(result knowledge.ScanResult) {
+			fmt.Fprintf(out, "scan: files=%d sources=%d review_items=%d\n", result.Files, result.Sources, result.ReviewItems)
+		})
+	case "status":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: woon knowledge status")
+		}
+		status, err := knowledge.GetStatus(repo)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\nactive_sources: %d\nmissing_sources: %d\nquarantined_sources: %d\nretracted_sources: %d\nartifacts: %d\nreview_items: %d\n", status.ActiveSources, status.MissingSources, status.QuarantinedSources, status.RetractedSources, status.Artifacts, status.ReviewItems)
+		return nil
+	case "context":
+		scope := ""
+		if len(args) == 3 && args[1] == "--scope" {
+			scope = args[2]
+		} else if len(args) != 1 {
+			return fmt.Errorf("usage: woon knowledge context [--scope <scope>]")
+		}
+		claims, err := knowledge.Context(repo, scope)
+		if err != nil {
+			return err
+		}
+		data, err := knowledge.EncodeContext(claims)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, string(data))
+		return nil
+	case "link":
+		artifactPath, kind, sourceIDs, err := parseKnowledgeLink(args[1:])
+		if err != nil {
+			return err
+		}
+		artifact, err := knowledge.Link(repo, artifactPath, kind, sourceIDs)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\nartifact: %s\nstate: %s\nsources: %d\n", artifact.ID, artifact.State, len(artifact.SourceIDs))
+		return nil
+	case "trace":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: woon knowledge trace <source-id-or-prefix>")
+		}
+		source, artifacts, err := knowledge.Trace(repo, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\nsource: %s\nstate: %s\n", source.ID, source.State)
+		for _, path := range source.Paths {
+			fmt.Fprintf(out, "  raw: %s\n", path)
+		}
+		for _, artifact := range artifacts {
+			fmt.Fprintf(out, "  derived: %s [%s]\n", artifact.Path, artifact.State)
+		}
+		return nil
+	case "retire":
+		if len(args) != 4 || args[2] != "--reason" {
+			return fmt.Errorf("usage: woon knowledge retire <source-id-or-prefix> --reason <text>")
+		}
+		source, artifacts, err := knowledge.Retire(repo, args[1], args[3])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\nsource: %s\nstate: %s\naffected_artifacts: %d\nhard_deleted: 0\n", source.ID, source.State, len(artifacts))
+		return nil
+	default:
+		return fmt.Errorf("unknown knowledge command %q", args[0])
+	}
+}
+
+func knowledgeWatchInterval(args []string, defaultInterval time.Duration) (time.Duration, error) {
+	interval := defaultInterval
+	if len(args) == 3 && args[1] == "--interval" {
+		parsed, err := time.ParseDuration(args[2])
+		if err != nil {
+			return 0, fmt.Errorf("parse watch interval: %w", err)
+		}
+		interval = parsed
+	} else if len(args) != 1 {
+		return 0, fmt.Errorf("usage: woon knowledge watch [--interval <duration>]")
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("watch interval must be positive")
+	}
+	return interval, nil
+}
+
+func parseKnowledgeLink(args []string) (string, string, []string, error) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return "", "", nil, fmt.Errorf("usage: woon knowledge link <artifact-path> --kind <kind> --source <source-id> [--source <source-id>...]")
+	}
+	artifactPath := args[0]
+	kind := ""
+	var sourceIDs []string
+	for i := 1; i < len(args); i++ {
+		if i+1 >= len(args) {
+			return "", "", nil, fmt.Errorf("%s requires a value", args[i])
+		}
+		switch args[i] {
+		case "--kind":
+			kind = args[i+1]
+		case "--source":
+			sourceIDs = append(sourceIDs, args[i+1])
+		default:
+			return "", "", nil, fmt.Errorf("unknown link option %q", args[i])
+		}
+		i++
+	}
+	if kind == "" || len(sourceIDs) == 0 {
+		return "", "", nil, fmt.Errorf("link requires --kind and at least one --source")
+	}
+	return artifactPath, kind, sourceIDs, nil
 }
 
 func runSkills(opts options, args []string, out io.Writer) error {
@@ -416,6 +569,13 @@ Usage:
   woon skills validate --profile <names>
   woon skills install --profile <names> --target <codex|claude>
   woon skills doctor
+  woon knowledge scan
+  woon knowledge watch [--interval <duration>]
+  woon knowledge status
+  woon knowledge context [--scope <scope>]
+  woon knowledge link <artifact-path> --kind <kind> --source <source-id>...
+  woon knowledge trace <source-id-or-prefix>
+  woon knowledge retire <source-id-or-prefix> --reason <text>
   woon env check [--target <macos|windows|linux>]
   woon version`)
 }

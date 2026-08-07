@@ -1,0 +1,275 @@
+package knowledge
+
+import (
+	"fmt"
+	"io/fs"
+	"mime"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+var secretPatterns = []struct {
+	name    string
+	pattern *regexp.Regexp
+}{
+	{"aws-access-key", regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`)},
+	{"github-token", regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`)},
+	{"openai-key", regexp.MustCompile(`sk-[A-Za-z0-9_-]{20,}`)},
+	{"private-key", regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`)},
+}
+
+type ScanResult struct {
+	Files       int
+	Sources     int
+	ReviewItems int
+}
+
+func Scan(repo string) (ScanResult, error) {
+	cfg, err := LoadConfig(repo)
+	if err != nil {
+		return ScanResult{}, err
+	}
+	catalog, err := loadCatalog(repo, cfg)
+	if err != nil {
+		return ScanResult{}, err
+	}
+
+	previous := make(map[string]Source, len(catalog.Sources))
+	for _, source := range catalog.Sources {
+		previous[source.ID] = source
+	}
+	found := make(map[string]Source)
+	ignored := make(map[string]bool, len(cfg.IgnoreNames))
+	for _, name := range cfg.IgnoreNames {
+		ignored[name] = true
+	}
+	var items []ReviewItem
+	files := 0
+
+	for _, relativeRoot := range cfg.InboxRoots {
+		root, _ := safePath(repo, relativeRoot)
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return ScanResult{}, fmt.Errorf("create inbox %s: %w", root, err)
+		}
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == root {
+				return nil
+			}
+			if ignored[entry.Name()] {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			relative, err := filepath.Rel(repo, path)
+			if err != nil {
+				return err
+			}
+			relative = filepath.ToSlash(relative)
+			if info.Mode()&os.ModeSymlink != 0 {
+				items = append(items, newReview("unsupported-link", "심볼릭 링크는 원본으로 수집하지 않음", nil, []string{relative}, nil))
+				return nil
+			}
+			if info.Size() > cfg.MaxFileBytes {
+				items = append(items, newReview("oversized-source", fmt.Sprintf("파일 크기가 제한 %d bytes를 초과함", cfg.MaxFileBytes), nil, []string{relative}, nil))
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			files++
+			sha := digest(data)
+			id := "src-" + sha
+			source, exists := found[id]
+			if !exists {
+				source = Source{
+					ID: id, SHA256: sha, NormalizedSHA256: normalizedDigest(data),
+					MediaType: mime.TypeByExtension(strings.ToLower(filepath.Ext(path))), State: "active",
+				}
+				if old, ok := previous[id]; ok && old.State == "retracted" {
+					source.State = old.State
+					source.RetireReason = old.RetireReason
+				}
+			}
+			source.Paths = append(source.Paths, relative)
+			for _, candidate := range secretPatterns {
+				if candidate.pattern.Match(data) {
+					source.Findings = appendUnique(source.Findings, candidate.name)
+				}
+			}
+			if len(source.Findings) > 0 && source.State != "retracted" {
+				source.State = "quarantined"
+			}
+			hintPath, err := filepath.Rel(root, filepath.Dir(path))
+			if err != nil {
+				return err
+			}
+			if hintPath != "." {
+				source.InputHints = appendUnique(source.InputHints, filepath.ToSlash(hintPath))
+			}
+			found[id] = source
+			return nil
+		})
+		if err != nil {
+			return ScanResult{}, fmt.Errorf("scan inbox %s: %w", relativeRoot, err)
+		}
+	}
+
+	for id, old := range previous {
+		if _, ok := found[id]; ok {
+			continue
+		}
+		if old.State != "retracted" {
+			old.State = "missing"
+		}
+		found[id] = old
+	}
+
+	catalog.Sources = make([]Source, 0, len(found))
+	if catalog.Artifacts == nil {
+		catalog.Artifacts = []Artifact{}
+	}
+	for _, source := range found {
+		sort.Strings(source.Paths)
+		sort.Strings(source.Findings)
+		sort.Strings(source.InputHints)
+		catalog.Sources = append(catalog.Sources, source)
+		if len(source.Paths) > 1 {
+			items = append(items, newReview("exact-duplicate", "동일한 bytes의 원본이 여러 경로에 있음", []string{source.ID}, source.Paths, nil))
+		}
+		if source.State == "quarantined" {
+			items = append(items, newReview("secret-detected", "비밀 값 후보가 있어 수집과 검색을 차단함", []string{source.ID}, source.Paths, nil))
+		}
+		if source.State == "missing" {
+			paths := append([]string(nil), source.Paths...)
+			for _, artifact := range catalog.Artifacts {
+				if contains(artifact.SourceIDs, source.ID) {
+					paths = append(paths, artifact.Path)
+				}
+			}
+			items = append(items, newReview("source-missing", "원본이 사라져 연결된 가공물의 사용을 중지하고 삭제 여부를 검토해야 함", []string{source.ID}, paths, nil))
+		}
+		if source.State == "retracted" {
+			paths := append([]string(nil), source.Paths...)
+			for _, artifact := range catalog.Artifacts {
+				if contains(artifact.SourceIDs, source.ID) {
+					paths = append(paths, artifact.Path)
+				}
+			}
+			items = append(items, newReview("source-retracted", "불필요하다고 표시한 원본과 연결된 가공물의 보존 또는 삭제를 검토해야 함", []string{source.ID}, paths, nil))
+		}
+	}
+	sort.Slice(catalog.Sources, func(i, j int) bool { return catalog.Sources[i].ID < catalog.Sources[j].ID })
+
+	normalizedGroups := map[string][]Source{}
+	for _, source := range catalog.Sources {
+		if source.NormalizedSHA256 != "" && source.State != "missing" && source.State != "retracted" {
+			normalizedGroups[source.NormalizedSHA256] = append(normalizedGroups[source.NormalizedSHA256], source)
+		}
+	}
+	for _, group := range normalizedGroups {
+		if len(group) < 2 {
+			continue
+		}
+		ids, paths := []string{}, []string{}
+		for _, source := range group {
+			ids = append(ids, source.ID)
+			paths = append(paths, source.Paths...)
+		}
+		items = append(items, newReview("normalized-duplicate", "공백과 줄바꿈을 제외하면 같은 원본 후보임", ids, paths, nil))
+	}
+
+	claims, err := loadClaims(repo, cfg)
+	if err != nil {
+		return ScanResult{}, err
+	}
+	items = append(items, evaluateClaims(claims.Claims, catalog.Sources)...)
+	applyArtifactAvailability(&catalog)
+	sort.Slice(catalog.Artifacts, func(i, j int) bool { return catalog.Artifacts[i].ID < catalog.Artifacts[j].ID })
+	items = deduplicateReviews(items)
+
+	catalogPath, _ := safePath(repo, cfg.CatalogPath)
+	reviewPath, _ := safePath(repo, cfg.ReviewPath)
+	if err := writeJSON(catalogPath, catalog); err != nil {
+		return ScanResult{}, fmt.Errorf("write catalog: %w", err)
+	}
+	if err := writeJSON(reviewPath, Review{Version: 1, Items: items}); err != nil {
+		return ScanResult{}, fmt.Errorf("write review: %w", err)
+	}
+	return ScanResult{Files: files, Sources: len(catalog.Sources), ReviewItems: len(items)}, nil
+}
+
+func newReview(kind, summary string, sourceIDs, paths, claimIDs []string) ReviewItem {
+	sort.Strings(sourceIDs)
+	sort.Strings(paths)
+	sort.Strings(claimIDs)
+	parts := append(append(append([]string{}, sourceIDs...), paths...), claimIDs...)
+	return ReviewItem{ID: stableID(kind, parts...), Kind: kind, Summary: summary, SourceIDs: sourceIDs, Paths: paths, ClaimIDs: claimIDs}
+}
+
+func deduplicateReviews(items []ReviewItem) []ReviewItem {
+	byID := make(map[string]ReviewItem, len(items))
+	for _, item := range items {
+		byID[item.ID] = item
+	}
+	result := make([]ReviewItem, 0, len(byID))
+	for _, item := range byID {
+		result = append(result, item)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+
+func appendUnique(values []string, value string) []string {
+	if !contains(values, value) {
+		return append(values, value)
+	}
+	return values
+}
+
+func contains(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func applyArtifactAvailability(catalog *Catalog) {
+	states := make(map[string]string, len(catalog.Sources))
+	for _, source := range catalog.Sources {
+		states[source.ID] = source.State
+	}
+	for i := range catalog.Artifacts {
+		if catalog.Artifacts[i].State == "retracted" {
+			continue
+		}
+		available := true
+		for _, sourceID := range catalog.Artifacts[i].SourceIDs {
+			if states[sourceID] != "active" {
+				available = false
+				break
+			}
+		}
+		if available && catalog.Artifacts[i].State == "review-required" {
+			catalog.Artifacts[i].State = "candidate"
+		} else if !available {
+			catalog.Artifacts[i].State = "review-required"
+		}
+	}
+}
