@@ -62,18 +62,18 @@ func (s EmbeddingSpec) Fingerprint() (string, error) {
 }
 
 type Chunk struct {
-	ID            string
-	SourceID      string
-	Path          string
-	Ordinal       int
-	Text          string
-	ContentSHA256 string
-	Metadata      map[string]string
+	ID            string            `json:"id"`
+	SourceID      string            `json:"source_id"`
+	Path          string            `json:"path"`
+	Ordinal       int               `json:"ordinal"`
+	Text          string            `json:"text"`
+	ContentSHA256 string            `json:"content_sha256"`
+	Metadata      map[string]string `json:"metadata"`
 }
 
 type Embedding struct {
-	ChunkID string
-	Values  []float32
+	ChunkID string    `json:"chunk_id"`
+	Values  []float32 `json:"values"`
 }
 
 // EmbeddingAdapter converts canonical chunks into vectors. Implementations may
@@ -86,13 +86,13 @@ type EmbeddingAdapter interface {
 type EmbeddingAdapterFactory func(map[string]string) (EmbeddingAdapter, error)
 
 type VectorRecord struct {
-	ID            string
-	SourceID      string
-	Path          string
-	Ordinal       int
-	ContentSHA256 string
-	Metadata      map[string]string
-	Vector        []float32
+	ID            string            `json:"id"`
+	SourceID      string            `json:"source_id"`
+	Path          string            `json:"path"`
+	Ordinal       int               `json:"ordinal"`
+	ContentSHA256 string            `json:"content_sha256"`
+	Metadata      map[string]string `json:"metadata"`
+	Vector        []float32         `json:"vector"`
 }
 
 type VectorIndexSpec struct {
@@ -119,19 +119,19 @@ func (s VectorIndexSpec) Validate() error {
 }
 
 type VectorPage struct {
-	Records    []VectorRecord
-	NextCursor string
+	Records    []VectorRecord `json:"records"`
+	NextCursor string         `json:"next_cursor"`
 }
 
 type VectorQuery struct {
-	Vector   []float32
-	Limit    int
-	Metadata map[string]string
+	Vector   []float32         `json:"vector"`
+	Limit    int               `json:"limit"`
+	Metadata map[string]string `json:"metadata"`
 }
 
 type VectorMatch struct {
-	Record VectorRecord
-	Score  float32
+	Record VectorRecord `json:"record"`
+	Score  float32      `json:"score"`
 }
 
 // VectorStoreAdapter owns persistence and similarity search. CreateIndex must

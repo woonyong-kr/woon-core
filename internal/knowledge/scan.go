@@ -172,6 +172,9 @@ func Scan(repo string) (ScanResult, error) {
 			}
 			items = append(items, newReview("source-retracted", "불필요하다고 표시한 원본과 연결된 가공물의 보존 또는 삭제를 검토해야 함", []string{source.ID}, paths, nil))
 		}
+		if source.NormalizedSHA256 == "" && source.State == "active" {
+			items = append(items, newReview("unsupported-text-source", "UTF-8 텍스트가 아닌 원본은 자동 정제하지 않음", []string{source.ID}, source.Paths, nil))
+		}
 	}
 	sort.Slice(catalog.Sources, func(i, j int) bool { return catalog.Sources[i].ID < catalog.Sources[j].ID })
 

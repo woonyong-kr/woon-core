@@ -27,3 +27,17 @@ func TestKnowledgeWatchIntervalAcceptsDefaultAndOverride(t *testing.T) {
 		t.Fatalf("override interval rejected: interval=%s err=%v", interval, err)
 	}
 }
+
+func TestKnowledgeProcessLimitValidatesConfiguredBatchSize(t *testing.T) {
+	if limit, err := knowledgeProcessLimit([]string{"process"}, 10); err != nil || limit != 10 {
+		t.Fatalf("default process limit rejected: limit=%d err=%v", limit, err)
+	}
+	if limit, err := knowledgeProcessLimit([]string{"process", "--limit", "3"}, 10); err != nil || limit != 3 {
+		t.Fatalf("explicit process limit rejected: limit=%d err=%v", limit, err)
+	}
+	for _, args := range [][]string{{"process", "--limit", "0"}, {"process", "--limit", "11"}, {"process", "unexpected"}} {
+		if _, err := knowledgeProcessLimit(args, 10); err == nil {
+			t.Fatalf("invalid process limit was accepted: %v", args)
+		}
+	}
+}

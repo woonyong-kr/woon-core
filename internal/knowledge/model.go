@@ -34,6 +34,20 @@ type Config struct {
 	Deletion       DeletionPolicy       `yaml:"deletion"`
 	Classification ClassificationPolicy `yaml:"classification"`
 	Retrieval      RetrievalConfig      `yaml:"retrieval"`
+	Processing     ProcessingConfig     `yaml:"processing"`
+}
+
+type ProcessingConfig struct {
+	ExecutionMode          string `yaml:"execution_mode"`
+	AllowPersistentProcess bool   `yaml:"allow_persistent_process"`
+	Adapter                string `yaml:"adapter"`
+	Model                  string `yaml:"model"`
+	ReasoningEffort        string `yaml:"reasoning_effort"`
+	BatchSize              int    `yaml:"batch_size"`
+	OutputRoot             string `yaml:"output_root"`
+	VoiceProfilePath       string `yaml:"voice_profile_path"`
+	SchemaPath             string `yaml:"schema_path"`
+	CommandPath            string `yaml:"command_path"`
 }
 
 type RetrievalConfig struct {
@@ -200,6 +214,29 @@ func (c Config) validate(repo string) error {
 			return errors.New("retrieval persistent processes are not allowed")
 		}
 	}
+	if c.Processing.Adapter != "" && c.Processing.Adapter != "disabled" {
+		if c.Processing.ExecutionMode != "on-demand" || c.Processing.AllowPersistentProcess {
+			return errors.New("processing requires on-demand execution without persistent processes")
+		}
+		if c.Processing.Adapter != "codex-cli" {
+			return fmt.Errorf("unsupported processing adapter %q", c.Processing.Adapter)
+		}
+		if strings.TrimSpace(c.Processing.Model) == "" || c.Processing.BatchSize <= 0 {
+			return errors.New("processing model and positive batch_size are required")
+		}
+		for _, path := range []string{c.Processing.OutputRoot, c.Processing.VoiceProfilePath, c.Processing.SchemaPath} {
+			if _, err := safePath(repo, path); err != nil {
+				return err
+			}
+		}
+		if filepath.IsAbs(c.Processing.CommandPath) {
+			if info, err := os.Stat(c.Processing.CommandPath); err != nil || !info.Mode().IsRegular() {
+				return fmt.Errorf("processing command_path is not a regular file: %q", c.Processing.CommandPath)
+			}
+		} else if strings.TrimSpace(c.Processing.CommandPath) == "" {
+			return errors.New("processing command_path is required")
+		}
+	}
 	return nil
 }
 
@@ -272,6 +309,38 @@ func writeJSON(path string, value any) error {
 		return err
 	}
 	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".knowledge-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func writeYAML(path string, value any) error {
+	data, err := yaml.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(path, data)
+}
+
+func writeAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

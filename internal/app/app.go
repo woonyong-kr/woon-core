@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,7 +63,7 @@ func Run(rawArgs []string, stdout, stderr io.Writer) error {
 
 func runKnowledge(opts options, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: woon knowledge <scan|watch|status|context|link|trace|retire>")
+		return fmt.Errorf("usage: woon knowledge <scan|process|index|search|status|context|link|trace|retire>")
 	}
 	ws, reg, err := load(opts)
 	if err != nil {
@@ -87,6 +89,9 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if !cfg.Processing.AllowPersistentProcess {
+			return fmt.Errorf("knowledge watch is disabled: persistent processes are not allowed; use woon knowledge process")
+		}
 		interval, err := knowledgeWatchInterval(args, time.Duration(cfg.PollSeconds)*time.Second)
 		if err != nil {
 			return err
@@ -95,6 +100,57 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		return knowledge.Watch(repo, interval, func(result knowledge.ScanResult) {
 			fmt.Fprintf(out, "scan: files=%d sources=%d review_items=%d\n", result.Files, result.Sources, result.ReviewItems)
 		})
+	case "process":
+		cfg, err := knowledge.LoadConfig(repo)
+		if err != nil {
+			return err
+		}
+		limit, err := knowledgeProcessLimit(args, cfg.Processing.BatchSize)
+		if err != nil {
+			return err
+		}
+		processor, err := knowledge.NewConfiguredProcessor(repo, cfg)
+		if err != nil {
+			return err
+		}
+		result, err := knowledge.ProcessPending(context.Background(), repo, processor, limit)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\nscanned_files: %d\npending_sources: %d\ncreated_candidates: %d\nreview_items: %d\n", result.ScannedFiles, result.Pending, result.Created, result.ReviewItems)
+		return nil
+	case "index":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: woon knowledge index")
+		}
+		registry, err := knowledge.NewDefaultAdapterRegistry(repo)
+		if err != nil {
+			return err
+		}
+		result, err := knowledge.IndexSources(context.Background(), repo, registry)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\nindex: %s\nchunks: %d\nupserted: %d\ndeleted: %d\n", result.Index, result.Chunks, result.Upserted, result.Deleted)
+		return nil
+	case "search":
+		query, limit, err := parseKnowledgeSearch(args[1:])
+		if err != nil {
+			return err
+		}
+		registry, err := knowledge.NewDefaultAdapterRegistry(repo)
+		if err != nil {
+			return err
+		}
+		results, err := knowledge.SearchSources(context.Background(), repo, registry, query, limit)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\nmatches: %d\n", len(results))
+		for _, result := range results {
+			fmt.Fprintf(out, "- score: %.6f\n  source: %s\n  path: %s\n  ordinal: %d\n  text: %s\n", result.Score, result.SourceID, result.Path, result.Ordinal, strings.ReplaceAll(result.Text, "\n", " "))
+		}
+		return nil
 	case "status":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: woon knowledge status")
@@ -162,6 +218,46 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 	default:
 		return fmt.Errorf("unknown knowledge command %q", args[0])
 	}
+}
+
+func parseKnowledgeSearch(args []string) (string, int, error) {
+	limit := 5
+	if len(args) == 0 {
+		return "", 0, fmt.Errorf("usage: woon knowledge search <query> [--limit <count>]")
+	}
+	if len(args) >= 2 && args[len(args)-2] == "--limit" {
+		parsed, err := strconv.Atoi(args[len(args)-1])
+		if err != nil || parsed <= 0 || parsed > 50 {
+			return "", 0, fmt.Errorf("search limit must be between 1 and 50")
+		}
+		limit = parsed
+		args = args[:len(args)-2]
+	}
+	query := strings.TrimSpace(strings.Join(args, " "))
+	if query == "" {
+		return "", 0, fmt.Errorf("search query is required")
+	}
+	return query, limit, nil
+}
+
+func knowledgeProcessLimit(args []string, defaultLimit int) (int, error) {
+	if len(args) == 1 {
+		if defaultLimit <= 0 {
+			return 0, fmt.Errorf("processing batch size must be positive")
+		}
+		return defaultLimit, nil
+	}
+	if len(args) != 3 || args[1] != "--limit" {
+		return 0, fmt.Errorf("usage: woon knowledge process [--limit <count>]")
+	}
+	limit, err := strconv.Atoi(args[2])
+	if err != nil || limit <= 0 {
+		return 0, fmt.Errorf("process limit must be a positive integer")
+	}
+	if limit > defaultLimit {
+		return 0, fmt.Errorf("process limit %d exceeds configured batch size %d", limit, defaultLimit)
+	}
+	return limit, nil
 }
 
 func knowledgeWatchInterval(args []string, defaultInterval time.Duration) (time.Duration, error) {

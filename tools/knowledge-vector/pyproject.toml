@@ -1,0 +1,18 @@
+[project]
+name = "woon-knowledge-vector"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastembed==0.8.0",
+  "lancedb==0.36.0",
+]
+
+[project.scripts]
+woon-knowledge-vector = "woon_knowledge_vector.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/woon_knowledge_vector"]
