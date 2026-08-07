@@ -143,6 +143,14 @@ func TestAuditPathsIgnoresDiscardedLocalFiles(t *testing.T) {
 	}
 }
 
+func TestAuditPathsIgnoresLocalDerivedState(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, ".local", "tool", "receipt.json"), unixUserPath("source"))
+	if err := auditPaths(root, nil, nil); err != nil {
+		t.Fatalf("local derived state must not fail path audit: %v", err)
+	}
+}
+
 func TestAuditPathsAllowsExactDocumentedException(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "history", "verification.md"), unixUserPath("legacy"))

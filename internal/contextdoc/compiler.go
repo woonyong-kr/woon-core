@@ -381,7 +381,7 @@ func auditPaths(root string, generatedPaths []string, exceptions []PathAuditExce
 		}
 		if entry.IsDir() {
 			name := entry.Name()
-			if name == ".git" || name == "node_modules" || name == "vendor" || name == "generated" || name == "_archive" || name == "_to_delete" || name == ".legacy-backup" {
+			if name == ".git" || name == ".local" || name == "node_modules" || name == "vendor" || name == "generated" || name == "_archive" || name == "_to_delete" || name == ".legacy-backup" {
 				return filepath.SkipDir
 			}
 			return nil
