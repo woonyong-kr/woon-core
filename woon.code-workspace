@@ -1,0 +1,35 @@
+{
+  "folders": [
+    {
+      "name": "woon-core",
+      "path": "."
+    },
+    {
+      "name": "woon-skills",
+      "path": "../woon-skills"
+    },
+    {
+      "name": "woon-env",
+      "path": "../woon-env"
+    },
+    {
+      "name": "woon-knowledge",
+      "path": "../woon-knowledge"
+    },
+    {
+      "name": "woon-site",
+      "path": "../woon-site"
+    },
+    {
+      "name": "woonyong-kr [generated profile]",
+      "path": "../woonyong-kr"
+    },
+    {
+      "name": "woonyong-kr.github.io [generated pages]",
+      "path": "../woonyong-kr.github.io"
+    }
+  ],
+  "settings": {
+    "git.autoRepositoryDetection": "subFolders"
+  }
+}
