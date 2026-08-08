@@ -198,16 +198,48 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 	request := ProcessRequest{VoiceProfile: string(voice), AllowedTypes: append([]string(nil), cfg.Classification.AllowedTypes...)}
 	inputHashes := map[string]string{}
 	inputPaths := map[string]string{}
+	var hierarchicalDocuments []ProcessedDocument
+	selectedSources := 0
 	for _, source := range catalog.Sources {
 		if !sourceIsAvailable(source) || linked[source.ID] {
 			continue
 		}
 		result.Pending++
-		if len(request.Documents) >= limit || len(source.Paths) == 0 {
+		if selectedSources >= limit || len(source.Paths) == 0 {
 			continue
 		}
+		selectedSources++
 		readPath := readableSourcePath(source)
 		path, _ := safePath(repo, readPath)
+		isText, textErr := isUTF8TextFile(path)
+		if textErr != nil {
+			return result, fmt.Errorf("inspect source %s: %w", source.ID, textErr)
+		}
+		if !isText {
+			continue
+		}
+		beforeHash, hashErr := hashFile(path)
+		if hashErr != nil {
+			return result, fmt.Errorf("hash source %s: %w", source.ID, hashErr)
+		}
+		inputHashes[source.ID] = beforeHash
+		inputPaths[source.ID] = readPath
+		tokens, countErr := countFileTokensUpTo(path, cfg.Retrieval.ReadFullDocumentUnderTokens)
+		if countErr != nil {
+			return result, fmt.Errorf("count source tokens %s: %w", source.ID, countErr)
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			return result, statErr
+		}
+		if tokens > cfg.Retrieval.ReadFullDocumentUnderTokens || info.Size() > 64*1024*1024 {
+			document, processErr := processLargeSource(ctx, repo, processor, cfg, string(voice), source, readPath)
+			if processErr != nil {
+				return result, fmt.Errorf("hierarchical process source %s: %w", source.ID, processErr)
+			}
+			hierarchicalDocuments = append(hierarchicalDocuments, document)
+			continue
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return result, fmt.Errorf("read source %s: %w", source.ID, err)
@@ -218,32 +250,37 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 		request.Documents = append(request.Documents, ProcessDocument{
 			SourceID: source.ID, Path: source.Paths[0], InputHints: append([]string(nil), source.InputHints...), Text: string(data),
 		})
-		inputHashes[source.ID] = digest(data)
-		inputPaths[source.ID] = readPath
 	}
-	if len(request.Documents) == 0 {
+	if len(request.Documents) == 0 && len(hierarchicalDocuments) == 0 {
 		result.ReviewItems = scan.ReviewItems
 		return result, nil
 	}
-	response, err := processor.Process(ctx, request)
-	if err != nil {
-		return result, err
+	response := ProcessResponse{}
+	if len(request.Documents) > 0 {
+		response, err = processor.Process(ctx, request)
+		if err != nil {
+			return result, err
+		}
 	}
 	if cfg.Ingestion.Stability.VerifyHashBeforeAfterProcessing {
-		for _, document := range request.Documents {
-			path, pathErr := safePath(repo, inputPaths[document.SourceID])
+		for sourceID, readPath := range inputPaths {
+			path, pathErr := safePath(repo, readPath)
 			if pathErr != nil {
 				return result, pathErr
 			}
-			data, readErr := os.ReadFile(path)
-			if readErr != nil || digest(data) != inputHashes[document.SourceID] {
-				return result, fmt.Errorf("source %s changed during processing; discard result and retry", document.SourceID)
+			afterHash, readErr := hashFile(path)
+			if readErr != nil || afterHash != inputHashes[sourceID] {
+				return result, fmt.Errorf("source %s changed during processing; discard result and retry", sourceID)
 			}
 		}
 	}
-	validated, err := validateProcessedDocuments(response.Documents, request, cfg)
-	if err != nil {
-		return result, err
+	validated := append([]ProcessedDocument(nil), hierarchicalDocuments...)
+	if len(request.Documents) > 0 {
+		smallDocuments, validateErr := validateProcessedDocuments(response.Documents, request, cfg)
+		if validateErr != nil {
+			return result, validateErr
+		}
+		validated = append(validated, smallDocuments...)
 	}
 	claimFile, err := loadClaims(repo, cfg)
 	if err != nil {

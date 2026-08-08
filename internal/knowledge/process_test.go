@@ -13,6 +13,28 @@ type fakeDocumentProcessor struct {
 	calls    int
 }
 
+type echoDocumentProcessor struct {
+	calls   int
+	maxDocs int
+}
+
+func (p *echoDocumentProcessor) Name() string  { return "echo" }
+func (p *echoDocumentProcessor) Model() string { return "echo-v1" }
+func (p *echoDocumentProcessor) Process(_ context.Context, request ProcessRequest) (ProcessResponse, error) {
+	p.calls++
+	if len(request.Documents) > p.maxDocs {
+		p.maxDocs = len(request.Documents)
+	}
+	response := ProcessResponse{Documents: make([]ProcessedDocument, 0, len(request.Documents))}
+	for _, document := range request.Documents {
+		response.Documents = append(response.Documents, ProcessedDocument{
+			SourceID: document.SourceID, Title: "계층 정리", Type: "note", Scope: "global",
+			Summary: "부분 내용을 근거로 정리했다.", Body: "부분 내용이 계층적으로 통합되었다.",
+		})
+	}
+	return response, nil
+}
+
 func (p *fakeDocumentProcessor) Name() string  { return "fake" }
 func (p *fakeDocumentProcessor) Model() string { return "fake-v1" }
 func (p *fakeDocumentProcessor) Process(_ context.Context, request ProcessRequest) (ProcessResponse, error) {
@@ -87,6 +109,36 @@ func TestValidateProcessedDocumentsRejectsMissingAndUnsupportedResults(t *testin
 		if _, err := validateProcessedDocuments([]ProcessedDocument{document}, request, cfg); err == nil {
 			t.Fatalf("invalid processed document was accepted: %+v", document)
 		}
+	}
+}
+
+func TestProcessPendingUsesHierarchicalMapReduceForLargeText(t *testing.T) {
+	repo := t.TempDir()
+	writeProcessingFixture(t, repo)
+	configPath := filepath.Join(repo, "config", "knowledge-workflow.yaml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config = append(config, []byte(`
+chunking: {unit: token, tokenizer: unicode-word-v1, target_tokens: 20, max_tokens: 30, overlap_tokens: 3, preserve_headings: true, preserve_code_blocks: true, preserve_tables: true}
+retrieval: {vector_candidates: 10, rerank_limit: 5, neighbor_chunks: 1, read_full_document_under_tokens: 50}
+`)...)
+	writeFixture(t, configPath, string(config))
+	writeFixture(t, filepath.Join(repo, "config", "voice.md"), "원문 근거만 사용한다.\n")
+	writeFixture(t, filepath.Join(repo, "config", "candidate.schema.json"), `{}`)
+	writeFixture(t, filepath.Join(repo, "sources", "imports", "drop", "large.md"), "# 큰 문서\n\n"+strings.Repeat("장애 원인과 해결 근거를 기록한다.\n", 80))
+	processor := &echoDocumentProcessor{}
+	result, err := ProcessPending(context.Background(), repo, processor, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Created != 1 || processor.calls < 3 || processor.maxDocs > 10 {
+		t.Fatalf("hierarchical processing was not bounded: result=%+v calls=%d max_docs=%d", result, processor.calls, processor.maxDocs)
+	}
+	candidates, err := filepath.Glob(filepath.Join(repo, "knowledge-ops", "candidates", "src-*.md"))
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("final source candidate was not created: %v err=%v", candidates, err)
 	}
 }
 
