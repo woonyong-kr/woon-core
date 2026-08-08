@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"sort"
 	"strconv"
@@ -63,7 +64,7 @@ func Run(rawArgs []string, stdout, stderr io.Writer) error {
 
 func runKnowledge(opts options, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: woon knowledge <scan|process|index|search|status|context|link|trace|retire>")
+		return fmt.Errorf("usage: woon knowledge <automation|scan|process|index|search|status|context|link|trace|retire>")
 	}
 	ws, reg, err := load(opts)
 	if err != nil {
@@ -74,6 +75,8 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		return err
 	}
 	switch args[0] {
+	case "automation":
+		return runKnowledgeAutomation(ws.Root, repo, args[1:], out)
 	case "scan":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: woon knowledge scan")
@@ -231,6 +234,61 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 	default:
 		return fmt.Errorf("unknown knowledge command %q", args[0])
 	}
+}
+
+func runKnowledgeAutomation(workspaceRoot, repo string, args []string, out io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: woon knowledge automation <run|install|status|enable|disable|uninstall>")
+	}
+	ctx := context.Background()
+	if args[0] == "run" {
+		result, err := knowledge.RunAutomation(ctx, repo)
+		if err != nil {
+			return err
+		}
+		if result.Skipped {
+			fmt.Fprintln(out, "status: skipped\nreason: already-running")
+			return nil
+		}
+		fmt.Fprintln(out, "status: ok")
+		for _, receipt := range result.ProcessReceipts {
+			fmt.Fprintf(out, "process: scanned=%d pending=%d created=%d review_items=%d\n", receipt.ScannedFiles, receipt.Pending, receipt.Created, receipt.ReviewItems)
+		}
+		fmt.Fprintf(out, "index: name=%s chunks=%d upserted=%d deleted=%d\n", result.Index.Index, result.Index.Chunks, result.Index.Upserted, result.Index.Deleted)
+		fmt.Fprintf(out, "knowledge: active=%d sanitized=%d missing=%d quarantined=%d retracted=%d artifacts=%d review_items=%d\n", result.Status.ActiveSources, result.Status.SanitizedSources, result.Status.MissingSources, result.Status.QuarantinedSources, result.Status.RetractedSources, result.Status.Artifacts, result.Status.ReviewItems)
+		fmt.Fprintf(out, "git: staged=%d lfs=%d blocked=%d committed=%t pushed=%t\n", result.Stage.StagedFiles, result.Stage.LFSFiles, len(result.Stage.BlockedLargeFiles), result.Committed, result.Pushed)
+		if result.CommitSHA != "" {
+			fmt.Fprintf(out, "commit: %s\n", result.CommitSHA)
+		}
+		return nil
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve woon executable: %w", err)
+	}
+	var status knowledge.AutomationTriggerStatus
+	switch args[0] {
+	case "install":
+		status, err = knowledge.InstallAutomation(ctx, workspaceRoot, repo, executable)
+	case "status":
+		status, err = knowledge.GetAutomationStatus(ctx, workspaceRoot, repo, executable)
+	case "enable":
+		status, err = knowledge.EnableAutomation(ctx, workspaceRoot, repo, executable)
+	case "disable":
+		status, err = knowledge.DisableAutomation(ctx, workspaceRoot, repo, executable)
+	case "uninstall":
+		status, err = knowledge.UninstallAutomation(ctx, workspaceRoot, repo, executable)
+	default:
+		return fmt.Errorf("unknown knowledge automation command %q", args[0])
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "status: ok\ntrigger: %s\nlabel: %s\nstate: %s\ninstalled: %t\nenabled: %t\nkeep_alive: %t\nruns: %d\nlast_exit_code: %d\n", status.Kind, status.Label, status.State, status.Installed, status.Enabled, status.KeepAlive, status.Runs, status.LastExitCode)
+	if status.PlistPath != "" {
+		fmt.Fprintf(out, "registration: %s\n", status.PlistPath)
+	}
+	return nil
 }
 
 func parseKnowledgeSearch(args []string) (string, int, error) {
@@ -679,6 +737,7 @@ Usage:
   woon skills install --profile <names> --target <codex|claude>
   woon skills doctor
   woon knowledge scan
+  woon knowledge automation <run|install|status|enable|disable|uninstall>
   woon knowledge watch [--interval <duration>]
   woon knowledge status
   woon knowledge context [--scope <scope>]

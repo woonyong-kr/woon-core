@@ -23,6 +23,7 @@ const (
 
 type Config struct {
 	Version        int                  `yaml:"version"`
+	Automation     AutomationConfig     `yaml:"automation"`
 	InboxRoots     []string             `yaml:"inbox_roots"`
 	CatalogPath    string               `yaml:"catalog_path"`
 	ReviewPath     string               `yaml:"review_path"`
@@ -38,6 +39,18 @@ type Config struct {
 	Classification ClassificationPolicy `yaml:"classification"`
 	Retrieval      RetrievalConfig      `yaml:"retrieval"`
 	Processing     ProcessingConfig     `yaml:"processing"`
+}
+
+type AutomationConfig struct {
+	Trigger              string   `yaml:"trigger"`
+	Label                string   `yaml:"label"`
+	WatchPaths           []string `yaml:"watch_paths"`
+	ThrottleSeconds      int      `yaml:"throttle_seconds"`
+	RunAtLoad            bool     `yaml:"run_at_load"`
+	AutoCommit           bool     `yaml:"auto_commit"`
+	AutoPush             bool     `yaml:"auto_push"`
+	RequirePrivateRemote bool     `yaml:"require_private_remote"`
+	CommitMessage        string   `yaml:"commit_message"`
 }
 
 type ProcessingConfig struct {
@@ -229,6 +242,21 @@ func LoadConfig(repo string) (Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Automation.Trigger == "" {
+		c.Automation.Trigger = "manual"
+	}
+	if c.Automation.Label == "" {
+		c.Automation.Label = "org.woonyong.knowledge-automation"
+	}
+	if len(c.Automation.WatchPaths) == 0 {
+		c.Automation.WatchPaths = append([]string(nil), c.InboxRoots...)
+	}
+	if c.Automation.ThrottleSeconds == 0 {
+		c.Automation.ThrottleSeconds = 30
+	}
+	if c.Automation.CommitMessage == "" {
+		c.Automation.CommitMessage = "chore: 새 지식 원본과 정제 결과를 기록"
+	}
 	if c.PollSeconds == 0 {
 		c.PollSeconds = 5
 	}
@@ -313,6 +341,29 @@ func (c Config) validate(repo string) error {
 	}
 	if len(c.InboxRoots) == 0 {
 		return errors.New("knowledge config requires inbox_roots")
+	}
+	if c.Automation.Trigger != "manual" && c.Automation.Trigger != "macos-launchd" {
+		return fmt.Errorf("unsupported automation trigger %q", c.Automation.Trigger)
+	}
+	if strings.TrimSpace(c.Automation.Label) == "" || strings.ContainsAny(c.Automation.Label, " /\\") {
+		return errors.New("automation label must be a non-empty launchd-safe identifier")
+	}
+	if c.Automation.ThrottleSeconds <= 0 {
+		return errors.New("automation throttle_seconds must be positive")
+	}
+	if c.Automation.AutoPush && !c.Automation.AutoCommit {
+		return errors.New("automation auto_push requires auto_commit")
+	}
+	if c.Automation.AutoCommit && strings.TrimSpace(c.Automation.CommitMessage) == "" {
+		return errors.New("automation auto_commit requires commit_message")
+	}
+	for _, path := range c.Automation.WatchPaths {
+		if _, err := safePath(repo, path); err != nil {
+			return err
+		}
+		if !contains(c.InboxRoots, path) {
+			return fmt.Errorf("automation watch path %q must be an inbox_root", path)
+		}
 	}
 	for _, path := range append(append([]string{}, c.InboxRoots...), c.CatalogPath, c.ReviewPath, c.ClaimsPath) {
 		if _, err := safePath(repo, path); err != nil {
