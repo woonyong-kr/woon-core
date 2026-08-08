@@ -49,6 +49,13 @@ func StageKnowledgeChanges(ctx context.Context, repo string) (StageResult, error
 		if source.State == "sanitized" && source.SanitizedPath != "" {
 			paths[source.SanitizedPath] = true
 		}
+		if source.State == "sanitized" || source.State == "quarantined" {
+			for _, relative := range source.Paths {
+				if err := excludeLocalPath(repo, relative); err != nil {
+					return result, err
+				}
+			}
+		}
 		if source.State != "active" && source.State != "missing" && source.State != "retracted" {
 			continue
 		}
@@ -108,6 +115,46 @@ func StageKnowledgeChanges(ctx context.Context, repo string) (StageResult, error
 	}
 	sort.Strings(result.BlockedLargeFiles)
 	return result, nil
+}
+
+func excludeLocalPath(repo, relative string) error {
+	gitDirectory, err := runGit(context.Background(), repo, "rev-parse", "--git-dir")
+	if err != nil {
+		return err
+	}
+	if !filepath.IsAbs(gitDirectory) {
+		gitDirectory = filepath.Join(repo, gitDirectory)
+	}
+	path := filepath.Join(gitDirectory, "info", "exclude")
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	pattern := "/" + escapeGitPattern(filepath.ToSlash(relative))
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == pattern {
+			return nil
+		}
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	data = append(data, []byte(pattern+"\n")...)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func escapeGitPattern(value string) string {
+	var output strings.Builder
+	for _, r := range value {
+		if strings.ContainsRune("\\*?[]#", r) {
+			output.WriteByte('\\')
+		}
+		output.WriteRune(r)
+	}
+	return output.String()
 }
 
 func ensureLFSTracked(ctx context.Context, repo, relative string) error {

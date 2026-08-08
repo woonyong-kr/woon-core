@@ -115,8 +115,14 @@ func Scan(repo string) (ScanResult, error) {
 				if writeErr := writeAtomic(sanitizedPath, sanitized.Data); writeErr != nil {
 					return fmt.Errorf("write sanitized source %s: %w", source.ID, writeErr)
 				}
+				if preserveErr := preserveQuarantinedSource(repo, cfg, source.ID, path, data); preserveErr != nil {
+					return preserveErr
+				}
 			} else if textSource && !safe && source.State != "retracted" {
 				source.State = "quarantined"
+				if preserveErr := preserveQuarantinedSource(repo, cfg, source.ID, path, data); preserveErr != nil {
+					return preserveErr
+				}
 			} else if !textSource && source.State != "retracted" {
 				for _, candidate := range secretPatterns {
 					if candidate.pattern.Match(data) {
@@ -125,6 +131,9 @@ func Scan(repo string) (ScanResult, error) {
 				}
 				if len(source.Findings) > 0 {
 					source.State = "quarantined"
+					if preserveErr := preserveQuarantinedSource(repo, cfg, source.ID, path, data); preserveErr != nil {
+						return preserveErr
+					}
 				}
 			}
 			hintPath, err := filepath.Rel(root, filepath.Dir(path))

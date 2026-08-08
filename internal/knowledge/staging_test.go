@@ -35,6 +35,14 @@ func TestStageKnowledgeChangesExcludesRawSecret(t *testing.T) {
 	if !strings.Contains(staged, "safe.md") || !strings.Contains(staged, "knowledge-ops/sanitized/") {
 		t.Fatalf("approved paths were not staged:\n%s", staged)
 	}
+	ignored := runTestGit(t, repo, "check-ignore", "sources/imports/drop/unsafe.md")
+	if !strings.Contains(ignored, "unsafe.md") {
+		t.Fatalf("raw secret is not locally excluded: %s", ignored)
+	}
+	quarantined, err := filepath.Glob(filepath.Join(repo, ".knowledge-runtime", "quarantine", "src-*", "unsafe.md"))
+	if err != nil || len(quarantined) != 1 {
+		t.Fatalf("raw secret was not preserved in quarantine: %v err=%v", quarantined, err)
+	}
 }
 
 func TestStageKnowledgeChangesRoutesLargeFileToLFS(t *testing.T) {

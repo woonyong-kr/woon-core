@@ -3,6 +3,8 @@ package knowledge
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"unicode/utf8"
@@ -12,6 +14,25 @@ type secretPattern struct {
 	name             string
 	pattern          *regexp.Regexp
 	rotationRequired bool
+}
+
+func preserveQuarantinedSource(repo string, cfg Config, sourceID, originalPath string, data []byte) error {
+	root, err := safePath(repo, cfg.Secrets.QuarantineRoot)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Join(root, sourceID)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("create quarantine directory: %w", err)
+	}
+	path := filepath.Join(directory, filepath.Base(originalPath))
+	if err := writeAtomic(path, data); err != nil {
+		return fmt.Errorf("preserve quarantined source: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("protect quarantined source: %w", err)
+	}
+	return nil
 }
 
 var secretPatterns = []secretPattern{
