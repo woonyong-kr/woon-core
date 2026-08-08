@@ -73,7 +73,7 @@ woon knowledge automation enable
 woon knowledge automation uninstall
 ```
 
-`automation run`은 manual trigger다. macOS에서는 `automation install`이 사용자 LaunchAgent를 생성하지만 `KeepAlive`를 사용하지 않으며, drop 폴더 변경 시 같은 `woon` 바이너리를 한 번 실행하고 종료한다. Linux·Windows trigger는 실제 필요가 생기기 전까지 구현하지 않는다.
+`run`은 manual one-shot 명령이다. macOS에서는 `automation install`이 사용자 LaunchAgent를 생성하지만 `KeepAlive`를 사용하지 않으며, drop 폴더 변경 시 설치에 사용한 binary의 `run` 명령을 한 번 실행하고 종료한다. 현재 Fullplate 등록은 `fullplate --workspace <knowledge-repository> helm run`을 사용한다. Linux·Windows trigger는 실제 필요가 생기기 전까지 구현하지 않는다.
 
 원본 hash와 가공물 계보는 Git 정본에 남고 LLM Wiki는 선택형 adapter이므로, 데스크톱 앱이나 Codex skill 없이도 수집·중복 검사·충돌 차단·삭제 검토가 동작한다.
 
