@@ -165,15 +165,18 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 	if ctx == nil || processor == nil {
 		return result, fmt.Errorf("context and document processor are required")
 	}
+	cfg, err := LoadConfig(repo)
+	if err != nil {
+		return result, err
+	}
+	if err := WaitForStableSources(ctx, repo, cfg); err != nil {
+		return result, err
+	}
 	scan, err := Scan(repo)
 	if err != nil {
 		return result, err
 	}
 	result.ScannedFiles = scan.Files
-	cfg, err := LoadConfig(repo)
-	if err != nil {
-		return result, err
-	}
 	if limit <= 0 || limit > cfg.Processing.BatchSize {
 		limit = cfg.Processing.BatchSize
 	}
@@ -193,6 +196,7 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 		return result, fmt.Errorf("read voice profile: %w", err)
 	}
 	request := ProcessRequest{VoiceProfile: string(voice), AllowedTypes: append([]string(nil), cfg.Classification.AllowedTypes...)}
+	inputHashes := map[string]string{}
 	for _, source := range catalog.Sources {
 		if source.State != "active" || linked[source.ID] {
 			continue
@@ -212,6 +216,7 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 		request.Documents = append(request.Documents, ProcessDocument{
 			SourceID: source.ID, Path: source.Paths[0], InputHints: append([]string(nil), source.InputHints...), Text: string(data),
 		})
+		inputHashes[source.ID] = digest(data)
 	}
 	if len(request.Documents) == 0 {
 		result.ReviewItems = scan.ReviewItems
@@ -220,6 +225,18 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 	response, err := processor.Process(ctx, request)
 	if err != nil {
 		return result, err
+	}
+	if cfg.Ingestion.Stability.VerifyHashBeforeAfterProcessing {
+		for _, document := range request.Documents {
+			path, pathErr := safePath(repo, document.Path)
+			if pathErr != nil {
+				return result, pathErr
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil || digest(data) != inputHashes[document.SourceID] {
+				return result, fmt.Errorf("source %s changed during processing; discard result and retry", document.SourceID)
+			}
+		}
 	}
 	validated, err := validateProcessedDocuments(response.Documents, request, cfg)
 	if err != nil {

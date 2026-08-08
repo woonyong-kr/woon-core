@@ -46,6 +46,10 @@ func Scan(repo string) (ScanResult, error) {
 	for _, name := range cfg.IgnoreNames {
 		ignored[name] = true
 	}
+	ignore, err := loadKnowledgeIgnore(repo, cfg)
+	if err != nil {
+		return ScanResult{}, err
+	}
 	var items []ReviewItem
 	files := 0
 
@@ -61,7 +65,11 @@ func Scan(repo string) (ScanResult, error) {
 			if path == root {
 				return nil
 			}
-			if ignored[entry.Name()] {
+			relativeToRoot, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			if ignored[entry.Name()] || ignore.matches(relativeToRoot) {
 				if entry.IsDir() {
 					return filepath.SkipDir
 				}
@@ -81,10 +89,6 @@ func Scan(repo string) (ScanResult, error) {
 			relative = filepath.ToSlash(relative)
 			if info.Mode()&os.ModeSymlink != 0 {
 				items = append(items, newReview("unsupported-link", "심볼릭 링크는 원본으로 수집하지 않음", nil, []string{relative}, nil))
-				return nil
-			}
-			if info.Size() > cfg.MaxFileBytes {
-				items = append(items, newReview("oversized-source", fmt.Sprintf("파일 크기가 제한 %d bytes를 초과함", cfg.MaxFileBytes), nil, []string{relative}, nil))
 				return nil
 			}
 			data, err := os.ReadFile(path)
