@@ -6,20 +6,9 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 )
-
-var secretPatterns = []struct {
-	name    string
-	pattern *regexp.Regexp
-}{
-	{"aws-access-key", regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`)},
-	{"github-token", regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`)},
-	{"openai-key", regexp.MustCompile(`sk-[A-Za-z0-9_-]{20,}`)},
-	{"private-key", regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`)},
-}
 
 type ScanResult struct {
 	Files       int
@@ -110,12 +99,20 @@ func Scan(repo string) (ScanResult, error) {
 				}
 			}
 			source.Paths = append(source.Paths, relative)
-			for _, candidate := range secretPatterns {
-				if candidate.pattern.Match(data) {
-					source.Findings = appendUnique(source.Findings, candidate.name)
+			if sanitized, safe := sanitizeSecrets(data); safe && len(sanitized.Findings) > 0 && source.State != "retracted" {
+				source.Findings = append(source.Findings, sanitized.Findings...)
+				source.State = "sanitized"
+				source.RotationRequired = sanitized.RotationRequired
+				source.SanitizedPath = filepath.ToSlash(filepath.Join(cfg.Secrets.SanitizedRoot, source.ID+".txt"))
+				source.SanitizedSHA256 = digest(sanitized.Data)
+				sanitizedPath, pathErr := safePath(repo, source.SanitizedPath)
+				if pathErr != nil {
+					return pathErr
 				}
-			}
-			if len(source.Findings) > 0 && source.State != "retracted" {
+				if writeErr := writeAtomic(sanitizedPath, sanitized.Data); writeErr != nil {
+					return fmt.Errorf("write sanitized source %s: %w", source.ID, writeErr)
+				}
+			} else if !safe && source.State != "retracted" {
 				source.State = "quarantined"
 			}
 			hintPath, err := filepath.Rel(root, filepath.Dir(path))
@@ -155,8 +152,11 @@ func Scan(repo string) (ScanResult, error) {
 		if len(source.Paths) > 1 {
 			items = append(items, newReview("exact-duplicate", "동일한 bytes의 원본이 여러 경로에 있음", []string{source.ID}, source.Paths, nil))
 		}
+		if source.State == "sanitized" {
+			items = append(items, newReview("secret-redacted", "비밀 값 후보를 원본에서 격리하고 안전한 정제본만 처리함; 실제 credential은 폐기·재발급해야 함", []string{source.ID}, append(append([]string(nil), source.Paths...), source.SanitizedPath), nil))
+		}
 		if source.State == "quarantined" {
-			items = append(items, newReview("secret-detected", "비밀 값 후보가 있어 수집과 검색을 차단함", []string{source.ID}, source.Paths, nil))
+			items = append(items, newReview("secret-detected", "안전하게 정제할 수 없어 해당 파일만 수집과 검색을 차단함", []string{source.ID}, source.Paths, nil))
 		}
 		if source.State == "missing" {
 			paths := append([]string(nil), source.Paths...)
@@ -268,7 +268,7 @@ func applyArtifactAvailability(catalog *Catalog) {
 		}
 		available := true
 		for _, sourceID := range catalog.Artifacts[i].SourceIDs {
-			if states[sourceID] != "active" {
+			if states[sourceID] != "active" && states[sourceID] != "sanitized" {
 				available = false
 				break
 			}

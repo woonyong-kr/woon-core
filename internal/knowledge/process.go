@@ -197,15 +197,17 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 	}
 	request := ProcessRequest{VoiceProfile: string(voice), AllowedTypes: append([]string(nil), cfg.Classification.AllowedTypes...)}
 	inputHashes := map[string]string{}
+	inputPaths := map[string]string{}
 	for _, source := range catalog.Sources {
-		if source.State != "active" || linked[source.ID] {
+		if !sourceIsAvailable(source) || linked[source.ID] {
 			continue
 		}
 		result.Pending++
 		if len(request.Documents) >= limit || len(source.Paths) == 0 {
 			continue
 		}
-		path, _ := safePath(repo, source.Paths[0])
+		readPath := readableSourcePath(source)
+		path, _ := safePath(repo, readPath)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return result, fmt.Errorf("read source %s: %w", source.ID, err)
@@ -217,6 +219,7 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 			SourceID: source.ID, Path: source.Paths[0], InputHints: append([]string(nil), source.InputHints...), Text: string(data),
 		})
 		inputHashes[source.ID] = digest(data)
+		inputPaths[source.ID] = readPath
 	}
 	if len(request.Documents) == 0 {
 		result.ReviewItems = scan.ReviewItems
@@ -228,7 +231,7 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 	}
 	if cfg.Ingestion.Stability.VerifyHashBeforeAfterProcessing {
 		for _, document := range request.Documents {
-			path, pathErr := safePath(repo, document.Path)
+			path, pathErr := safePath(repo, inputPaths[document.SourceID])
 			if pathErr != nil {
 				return result, pathErr
 			}

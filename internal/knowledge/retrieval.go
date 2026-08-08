@@ -201,10 +201,11 @@ func sourceChunks(repo string, cfg Config) ([]Chunk, error) {
 	}
 	var chunks []Chunk
 	for _, source := range catalog.Sources {
-		if source.State != "active" || len(source.Paths) == 0 {
+		if !sourceIsAvailable(source) || len(source.Paths) == 0 {
 			continue
 		}
-		path, _ := safePath(repo, source.Paths[0])
+		readPath := readableSourcePath(source)
+		path, _ := safePath(repo, readPath)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("read source for indexing %s: %w", source.ID, err)
@@ -212,7 +213,14 @@ func sourceChunks(repo string, cfg Config) ([]Chunk, error) {
 		if !utf8.Valid(data) || strings.IndexByte(string(data), 0) >= 0 {
 			continue
 		}
-		chunks = append(chunks, chunkDocument(source.ID, source.Paths[0], string(data), cfg.Chunking)...)
+		generated := chunkDocument(source.ID, source.Paths[0], string(data), cfg.Chunking)
+		for i := range generated {
+			generated[i].Metadata["read_path"] = readPath
+			if source.State == "sanitized" {
+				generated[i].Metadata["kind"] = "sanitized"
+			}
+		}
+		chunks = append(chunks, generated...)
 	}
 	sortChunksByOrdinal(chunks)
 	return chunks, nil
@@ -247,7 +255,11 @@ func expandChunkContext(repo string, hit Chunk, sourceChunks []Chunk, cfg Config
 		total += chunk.TokenCount
 	}
 	if total <= cfg.Retrieval.ReadFullDocumentUnderTokens {
-		path, err := safePath(repo, hit.Path)
+		readPath := hit.Metadata["read_path"]
+		if readPath == "" {
+			readPath = hit.Path
+		}
+		path, err := safePath(repo, readPath)
 		if err == nil {
 			if data, readErr := os.ReadFile(path); readErr == nil {
 				return string(data), "full-document"

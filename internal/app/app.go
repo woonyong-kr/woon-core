@@ -159,7 +159,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "status: ok\nactive_sources: %d\nmissing_sources: %d\nquarantined_sources: %d\nretracted_sources: %d\nartifacts: %d\nreview_items: %d\n", status.ActiveSources, status.MissingSources, status.QuarantinedSources, status.RetractedSources, status.Artifacts, status.ReviewItems)
+		fmt.Fprintf(out, "status: ok\nactive_sources: %d\nsanitized_sources: %d\nmissing_sources: %d\nquarantined_sources: %d\nretracted_sources: %d\nartifacts: %d\nreview_items: %d\n", status.ActiveSources, status.SanitizedSources, status.MissingSources, status.QuarantinedSources, status.RetractedSources, status.Artifacts, status.ReviewItems)
 		return nil
 	case "context":
 		scope := ""

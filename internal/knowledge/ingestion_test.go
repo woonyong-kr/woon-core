@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +22,42 @@ func TestKnowledgeIgnoreSkipsFilesAndDirectories(t *testing.T) {
 	}
 	if result.Files != 1 || result.Sources != 1 {
 		t.Fatalf("ignored sources were scanned: %+v", result)
+	}
+}
+
+func TestSecretSourceCreatesSafeDerivativeWithoutBlockingOtherFiles(t *testing.T) {
+	repo := t.TempDir()
+	writeFixture(t, filepath.Join(repo, "config", "knowledge-workflow.yaml"), basicKnowledgeConfig())
+	credential := "ghp_" + strings.Repeat("A", 24)
+	writeFixture(t, filepath.Join(repo, "sources", "imports", "drop", "unsafe.md"), "token="+credential+"\n설명은 유지한다.\n")
+	writeFixture(t, filepath.Join(repo, "sources", "imports", "drop", "safe.md"), "정상 문서다.\n")
+	result, err := Scan(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Sources != 2 {
+		t.Fatalf("safe source was blocked: %+v", result)
+	}
+	catalog, err := loadCatalog(repo, mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sanitized Source
+	for _, source := range catalog.Sources {
+		if source.State == "sanitized" {
+			sanitized = source
+		}
+	}
+	if sanitized.ID == "" || sanitized.SanitizedPath == "" || !sanitized.RotationRequired || len(sanitized.Findings) != 1 {
+		t.Fatalf("secret receipt is incomplete: %+v", sanitized)
+	}
+	path, _ := safePath(repo, sanitized.SanitizedPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), credential) || !strings.Contains(string(data), "[REDACTED_SECRET:github-token:") || !strings.Contains(string(data), "설명은 유지한다") {
+		t.Fatalf("unsafe or incomplete sanitized derivative: %s", data)
 	}
 }
 

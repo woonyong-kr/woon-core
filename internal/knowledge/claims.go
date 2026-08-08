@@ -27,7 +27,7 @@ func evaluateClaims(claims []Claim, sources []Source) []ReviewItem {
 		}
 		unavailable := []string{}
 		for _, sourceID := range claim.SourceIDs {
-			if states[sourceID] != "active" {
+			if states[sourceID] != "active" && states[sourceID] != "sanitized" {
 				unavailable = append(unavailable, sourceID)
 			}
 		}

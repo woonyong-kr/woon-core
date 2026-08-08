@@ -24,6 +24,8 @@ func GetStatus(repo string) (Status, error) {
 		switch source.State {
 		case "active":
 			status.ActiveSources++
+		case "sanitized":
+			status.SanitizedSources++
 		case "missing":
 			status.MissingSources++
 		case "quarantined":
