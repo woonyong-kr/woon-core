@@ -3,10 +3,11 @@ package knowledge
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 type IndexResult struct {
@@ -44,11 +45,6 @@ func IndexSources(ctx context.Context, repo string, registry *AdapterRegistry) (
 		return result, fmt.Errorf("vector_store index option is required")
 	}
 	result.Index = indexName
-	chunks, err := sourceChunks(repo, cfg)
-	if err != nil {
-		return result, err
-	}
-	result.Chunks = len(chunks)
 	spec := VectorIndexSpec{
 		ContractVersion: VectorContractVersion, Name: indexName,
 		Embedding: adapters.Embedding.Spec(), Distance: DistanceCosine,
@@ -69,28 +65,42 @@ func IndexSources(ctx context.Context, repo string, registry *AdapterRegistry) (
 	for _, record := range existing {
 		existingByID[record.ID] = record
 	}
-	pending := make([]Chunk, 0, len(chunks))
-	expected := make(map[string]bool, len(chunks))
-	for _, chunk := range chunks {
+	expected := make(map[string]bool)
+	pending := make([]Chunk, 0, 64)
+	flushPending := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		records, buildErr := BuildVectorRecords(ctx, adapters.Embedding, pending)
+		if buildErr != nil {
+			return buildErr
+		}
+		if err := adapters.VectorStore.Upsert(ctx, indexName, records); err != nil {
+			return fmt.Errorf("upsert vector records: %w", err)
+		}
+		result.Upserted += len(records)
+		pending = pending[:0]
+		return nil
+	}
+	result.Chunks = 0
+	if err := walkSourceChunks(ctx, repo, cfg, func(chunk Chunk) error {
+		result.Chunks++
 		expected[chunk.ID] = true
 		record, exists := existingByID[chunk.ID]
-		if !exists || record.ContentSHA256 != chunk.ContentSHA256 {
-			pending = append(pending, chunk)
+		if exists && record.ContentSHA256 == chunk.ContentSHA256 {
+			return nil
 		}
-	}
-	var records []VectorRecord
-	if len(pending) > 0 {
-		records, err = BuildVectorRecords(ctx, adapters.Embedding, pending)
-		if err != nil {
-			return result, err
+		pending = append(pending, chunk)
+		if len(pending) == cap(pending) {
+			return flushPending()
 		}
+		return nil
+	}); err != nil {
+		return result, err
 	}
-	if len(records) > 0 {
-		if err := adapters.VectorStore.Upsert(ctx, indexName, records); err != nil {
-			return result, fmt.Errorf("upsert vector records: %w", err)
-		}
+	if err := flushPending(); err != nil {
+		return result, err
 	}
-	result.Upserted = len(records)
 	stale := make([]string, 0)
 	for _, record := range existing {
 		if !expected[record.ID] {
@@ -139,21 +149,6 @@ func SearchSources(ctx context.Context, repo string, registry *AdapterRegistry, 
 	if err != nil {
 		return nil, fmt.Errorf("search vector index: %w", err)
 	}
-	chunks, err := sourceChunks(repo, cfg)
-	if err != nil {
-		return nil, err
-	}
-	byID := make(map[string]Chunk, len(chunks))
-	for _, chunk := range chunks {
-		byID[chunk.ID] = chunk
-	}
-	chunksBySource := make(map[string][]Chunk)
-	for _, chunk := range chunks {
-		chunksBySource[chunk.SourceID] = append(chunksBySource[chunk.SourceID], chunk)
-	}
-	for sourceID := range chunksBySource {
-		sort.Slice(chunksBySource[sourceID], func(i, j int) bool { return chunksBySource[sourceID][i].Ordinal < chunksBySource[sourceID][j].Ordinal })
-	}
 	type rankedMatch struct {
 		chunk Chunk
 		score float32
@@ -162,8 +157,8 @@ func SearchSources(ctx context.Context, repo string, registry *AdapterRegistry, 
 	ranked := make([]rankedMatch, 0, len(matches))
 	seenContent := map[string]bool{}
 	for _, match := range matches {
-		chunk, exists := byID[match.Record.ID]
-		if !exists || seenContent[chunk.ContentSHA256] {
+		chunk, readErr := chunkFromVectorRecord(repo, match.Record)
+		if readErr != nil || seenContent[chunk.ContentSHA256] {
 			continue
 		}
 		seenContent[chunk.ContentSHA256] = true
@@ -180,7 +175,10 @@ func SearchSources(ctx context.Context, repo string, registry *AdapterRegistry, 
 		if len(results) >= resultLimit {
 			break
 		}
-		text, kind := expandChunkContext(repo, match.chunk, chunksBySource[match.chunk.SourceID], cfg)
+		text, kind, expandErr := expandChunkContextStreaming(ctx, repo, match.chunk, cfg)
+		if expandErr != nil {
+			continue
+		}
 		key := match.chunk.SourceID + "\x00" + kind + "\x00" + strings.Join(match.chunk.HeadingPath, "\x00")
 		if seenContext[key] {
 			continue
@@ -194,36 +192,80 @@ func SearchSources(ctx context.Context, repo string, registry *AdapterRegistry, 
 	return results, nil
 }
 
-func sourceChunks(repo string, cfg Config) ([]Chunk, error) {
+func chunkFromVectorRecord(repo string, record VectorRecord) (Chunk, error) {
+	start, err := strconv.Atoi(record.Metadata["start_offset"])
+	if err != nil || start < 0 {
+		return Chunk{}, fmt.Errorf("invalid start offset for %s", record.ID)
+	}
+	end, err := strconv.Atoi(record.Metadata["end_offset"])
+	if err != nil || end <= start {
+		return Chunk{}, fmt.Errorf("invalid end offset for %s", record.ID)
+	}
+	readPath := record.Metadata["read_path"]
+	if readPath == "" {
+		readPath = record.Path
+	}
+	absolute, err := safePath(repo, readPath)
+	if err != nil {
+		return Chunk{}, err
+	}
+	file, err := os.Open(absolute)
+	if err != nil {
+		return Chunk{}, err
+	}
+	defer file.Close()
+	data := make([]byte, end-start)
+	count, err := file.ReadAt(data, int64(start))
+	if err != nil && err != io.EOF {
+		return Chunk{}, err
+	}
+	data = data[:count]
+	tokenCount, _ := strconv.Atoi(record.Metadata["token_count"])
+	return Chunk{
+		ID: record.ID, SourceID: record.SourceID, Path: record.Path, Ordinal: record.Ordinal,
+		HeadingPath: splitHeadingPath(record.Metadata["heading_path"]), PreviousChunkID: record.Metadata["previous_chunk_id"],
+		NextChunkID: record.Metadata["next_chunk_id"], StartOffset: start, EndOffset: end, TokenCount: tokenCount,
+		Text: strings.TrimSpace(string(data)), ContentSHA256: record.ContentSHA256, Metadata: cloneMetadata(record.Metadata),
+	}, nil
+}
+
+func splitHeadingPath(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return strings.Split(value, " / ")
+}
+
+func walkSourceChunks(ctx context.Context, repo string, cfg Config, visit func(Chunk) error) error {
 	catalog, err := loadCatalog(repo, cfg)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var chunks []Chunk
 	for _, source := range catalog.Sources {
 		if !sourceIsAvailable(source) || len(source.Paths) == 0 {
 			continue
 		}
 		readPath := readableSourcePath(source)
 		path, _ := safePath(repo, readPath)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read source for indexing %s: %w", source.ID, err)
+		isText, textErr := isUTF8TextFile(path)
+		if textErr != nil {
+			return textErr
 		}
-		if !utf8.Valid(data) || strings.IndexByte(string(data), 0) >= 0 {
+		if !isText {
 			continue
 		}
-		generated := chunkDocument(source.ID, source.Paths[0], string(data), cfg.Chunking)
-		for i := range generated {
-			generated[i].Metadata["read_path"] = readPath
+		err = walkFileChunks(ctx, source.ID, source.Paths[0], path, cfg.Chunking, func(chunk Chunk) error {
+			chunk.Metadata["read_path"] = readPath
 			if source.State == "sanitized" {
-				generated[i].Metadata["kind"] = "sanitized"
+				chunk.Metadata["kind"] = "sanitized"
 			}
+			return visit(chunk)
+		})
+		if err != nil {
+			return fmt.Errorf("stream source for indexing %s: %w", source.ID, err)
 		}
-		chunks = append(chunks, generated...)
 	}
-	sortChunksByOrdinal(chunks)
-	return chunks, nil
+	return nil
 }
 
 func tokenTerms(text string) map[string]bool {
@@ -249,54 +291,49 @@ func lexicalBoost(queryTerms map[string]bool, text string) float32 {
 	return float32(len(matched)) / float32(len(queryTerms)) * 0.05
 }
 
-func expandChunkContext(repo string, hit Chunk, sourceChunks []Chunk, cfg Config) (string, string) {
-	total := 0
-	for _, chunk := range sourceChunks {
-		total += chunk.TokenCount
+func expandChunkContextStreaming(ctx context.Context, repo string, hit Chunk, cfg Config) (string, string, error) {
+	readPath := hit.Metadata["read_path"]
+	if readPath == "" {
+		readPath = hit.Path
 	}
-	if total <= cfg.Retrieval.ReadFullDocumentUnderTokens {
-		readPath := hit.Metadata["read_path"]
-		if readPath == "" {
-			readPath = hit.Path
-		}
-		path, err := safePath(repo, readPath)
-		if err == nil {
-			if data, readErr := os.ReadFile(path); readErr == nil {
-				return string(data), "full-document"
-			}
-		}
+	path, err := safePath(repo, readPath)
+	if err != nil {
+		return "", "", err
 	}
-	selected := map[int]bool{}
-	for i, chunk := range sourceChunks {
-		if sameHeadingPath(chunk.HeadingPath, hit.HeadingPath) {
-			selected[i] = true
-		}
-		if chunk.ID == hit.ID {
-			for offset := -cfg.Retrieval.NeighborChunks; offset <= cfg.Retrieval.NeighborChunks; offset++ {
-				if i+offset >= 0 && i+offset < len(sourceChunks) {
-					selected[i+offset] = true
-				}
-			}
-		}
+	total, err := countFileTokensUpTo(path, cfg.Retrieval.ReadFullDocumentUnderTokens)
+	if err != nil {
+		return "", "", err
 	}
-	indices := make([]int, 0, len(selected))
-	for index := range selected {
-		indices = append(indices, index)
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", "", err
 	}
-	sort.Ints(indices)
-	parts := make([]string, 0, len(indices))
+	if total <= cfg.Retrieval.ReadFullDocumentUnderTokens && info.Size() <= 64*1024*1024 {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return "", "", readErr
+		}
+		return string(data), "full-document", nil
+	}
+	parts := make([]string, 0)
 	used := 0
-	for _, index := range indices {
-		chunk := sourceChunks[index]
+	err = walkFileChunks(ctx, hit.SourceID, hit.Path, path, cfg.Chunking, func(chunk Chunk) error {
+		inSection := sameHeadingPath(chunk.HeadingPath, hit.HeadingPath)
+		isNeighbor := chunk.Ordinal >= hit.Ordinal-cfg.Retrieval.NeighborChunks && chunk.Ordinal <= hit.Ordinal+cfg.Retrieval.NeighborChunks
+		if !inSection && !isNeighbor {
+			return nil
+		}
 		if used > 0 && used+chunk.TokenCount > cfg.Retrieval.ReadFullDocumentUnderTokens {
-			break
+			return nil
 		}
-		if len(parts) == 0 || parts[len(parts)-1] != chunk.Text {
-			parts = append(parts, chunk.Text)
-		}
+		parts = append(parts, chunk.Text)
 		used += chunk.TokenCount
+		return nil
+	})
+	if err != nil {
+		return "", "", err
 	}
-	return strings.Join(parts, "\n\n"), "section"
+	return strings.Join(parts, "\n\n"), "section", nil
 }
 
 func sameHeadingPath(left, right []string) bool {
