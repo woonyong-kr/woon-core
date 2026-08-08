@@ -45,6 +45,10 @@ type fileSnapshot struct {
 	ModifiedUnixNano int64
 }
 
+type stabilityCache struct {
+	Files []fileSnapshot `json:"files"`
+}
+
 // WaitForStableSources waits for the complete inbox tree, not only one file,
 // to remain unchanged. It returns immediately when stability is disabled or
 // the inbox is empty.
@@ -58,6 +62,14 @@ func WaitForStableSources(ctx context.Context, repo string, cfg Config) error {
 		return err
 	}
 	if len(previous) == 0 {
+		return nil
+	}
+	cachePath := filepath.Join(repo, ".knowledge-runtime", "stability.json")
+	var cache stabilityCache
+	if err := readJSONIfExists(cachePath, &cache); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(cache.Files, previous) {
 		return nil
 	}
 	equalChecks := 0
@@ -83,7 +95,7 @@ func WaitForStableSources(ctx context.Context, repo string, cfg Config) error {
 			}
 			quiet := time.Since(lastChanged) >= time.Duration(policy.QuietSeconds)*time.Second
 			if equalChecks >= policy.RequiredEqualChecks && quiet {
-				return nil
+				return writeJSON(cachePath, stabilityCache{Files: current})
 			}
 			if policy.MaxWaitSeconds > 0 && time.Since(started) >= time.Duration(policy.MaxWaitSeconds)*time.Second {
 				return fmt.Errorf("inbox did not stabilize within %d seconds", policy.MaxWaitSeconds)

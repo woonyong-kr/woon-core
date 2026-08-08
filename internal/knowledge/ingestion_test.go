@@ -78,6 +78,13 @@ func TestWaitForStableSourcesRequiresQuietTree(t *testing.T) {
 	if time.Since(started) < time.Second {
 		t.Fatal("stability check returned before the quiet period")
 	}
+	second := time.Now()
+	if err := WaitForStableSources(context.Background(), repo, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(second) >= time.Second {
+		t.Fatal("unchanged inbox did not reuse its stability receipt")
+	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
 	}
