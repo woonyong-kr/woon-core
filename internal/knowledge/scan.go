@@ -82,6 +82,21 @@ func Scan(repo string) (ScanResult, error) {
 				items = append(items, newReview("unsupported-link", "심볼릭 링크는 원본으로 수집하지 않음", nil, []string{relative}, nil))
 				return nil
 			}
+			if info.Size() > wholeFileScanThresholdBytes {
+				analysis, analyzeErr := analyzeLargeSource(repo, path)
+				if analyzeErr != nil {
+					items = append(items, newReview("streaming-source-error", "대용량 원본을 streaming 검사하지 못해 해당 파일만 보류함", nil, []string{relative}, nil))
+					return nil
+				}
+				if analysis.SanitizedTemp != "" {
+					defer os.Remove(analysis.SanitizedTemp)
+				}
+				files++
+				if recordErr := recordStreamedSource(repo, cfg, root, path, relative, analysis, previous, found); recordErr != nil {
+					return recordErr
+				}
+				return nil
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return err
@@ -239,6 +254,66 @@ func Scan(repo string) (ScanResult, error) {
 		return ScanResult{}, fmt.Errorf("write review: %w", err)
 	}
 	return ScanResult{Files: files, Sources: len(catalog.Sources), ReviewItems: len(items)}, nil
+}
+
+func recordStreamedSource(repo string, cfg Config, inboxRoot, path, relative string, analysis streamedSourceAnalysis, previous, found map[string]Source) error {
+	id := "src-" + analysis.SHA256
+	source, exists := found[id]
+	if !exists {
+		source = Source{
+			ID: id, SHA256: analysis.SHA256, NormalizedSHA256: analysis.NormalizedSHA256,
+			MediaType: mime.TypeByExtension(strings.ToLower(filepath.Ext(path))), State: "active",
+		}
+		if old, ok := previous[id]; ok && old.State == "retracted" {
+			source.State = old.State
+			source.RetireReason = old.RetireReason
+		}
+	}
+	source.Paths = append(source.Paths, relative)
+	if len(analysis.Findings) > 0 && source.State != "retracted" {
+		source.Findings = append(source.Findings, analysis.Findings...)
+		source.RotationRequired = analysis.RotationRequired
+		quarantineRoot, err := safePath(repo, cfg.Secrets.QuarantineRoot)
+		if err != nil {
+			return err
+		}
+		if err := copyFilePrivate(path, filepath.Join(quarantineRoot, id, filepath.Base(path))); err != nil {
+			return fmt.Errorf("preserve large quarantined source: %w", err)
+		}
+		if analysis.SanitizedTemp != "" {
+			source.State = "sanitized"
+			source.SanitizedPath = filepath.ToSlash(filepath.Join(cfg.Secrets.SanitizedRoot, id+".txt"))
+			target, err := safePath(repo, source.SanitizedPath)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := os.Rename(analysis.SanitizedTemp, target); err != nil {
+				return err
+			}
+			if err := os.Chmod(target, 0o644); err != nil {
+				return err
+			}
+			sanitizedHash, err := hashFile(target)
+			if err != nil {
+				return err
+			}
+			source.SanitizedSHA256 = sanitizedHash
+		} else {
+			source.State = "quarantined"
+		}
+	}
+	hintPath, err := filepath.Rel(inboxRoot, filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if hintPath != "." {
+		source.InputHints = appendUnique(source.InputHints, filepath.ToSlash(hintPath))
+	}
+	found[id] = source
+	return nil
 }
 
 func newReview(kind, summary string, sourceIDs, paths, claimIDs []string) ReviewItem {
