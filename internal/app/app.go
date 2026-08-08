@@ -1,20 +1,15 @@
 package app
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"os"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/woonyong-kr/woon-core/internal/buildinfo"
 	"github.com/woonyong-kr/woon-core/internal/contextdoc"
 	"github.com/woonyong-kr/woon-core/internal/envsync"
-	"github.com/woonyong-kr/woon-core/internal/knowledge"
 	"github.com/woonyong-kr/woon-core/internal/registry"
 	"github.com/woonyong-kr/woon-core/internal/skills"
 	"github.com/woonyong-kr/woon-core/internal/workspace"
@@ -23,8 +18,6 @@ import (
 type options struct {
 	root string
 }
-
-const woonKnowledgeCommand = "woon knowledge"
 
 func Run(rawArgs []string, stdout, stderr io.Writer) error {
 	opts, args, err := parseGlobal(rawArgs)
@@ -57,339 +50,9 @@ func Run(rawArgs []string, stdout, stderr io.Writer) error {
 		return runEnv(opts, args[1:], stdout)
 	case "skills":
 		return runSkills(opts, args[1:], stdout)
-	case "knowledge":
-		return runKnowledge(opts, args[1:], stdout, woonKnowledgeCommand, []string{"knowledge"})
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
-}
-
-func runKnowledge(opts options, args []string, out io.Writer, commandName string, commandArguments []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: %s <run|automation|scan|process|index|search|status|context|link|trace|retire>", commandName)
-	}
-	ws, reg, err := load(opts)
-	if err != nil {
-		return err
-	}
-	repo, err := reg.Resolve(ws.Root, "knowledge")
-	if err != nil {
-		return err
-	}
-	invocationArguments := []string{"--root", ws.Root}
-	invocationArguments = append(invocationArguments, commandArguments...)
-	return runKnowledgeRepository(ws.Root, repo, args, out, commandName, invocationArguments)
-}
-
-func runKnowledgeRepository(workspaceRoot, repo string, args []string, out io.Writer, commandName string, invocationArguments []string) error {
-	switch args[0] {
-	case "run":
-		if len(args) != 1 {
-			return fmt.Errorf("usage: %s run", commandName)
-		}
-		return runKnowledgeOneShot(repo, out)
-	case "automation":
-		return runKnowledgeAutomation(workspaceRoot, repo, args[1:], out, commandName, invocationArguments)
-	case "scan":
-		if len(args) != 1 {
-			return fmt.Errorf("usage: %s scan", commandName)
-		}
-		result, err := knowledge.Scan(repo)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: ok\nfiles: %d\nsources: %d\nreview_items: %d\n", result.Files, result.Sources, result.ReviewItems)
-		return nil
-	case "watch":
-		cfg, err := knowledge.LoadConfig(repo)
-		if err != nil {
-			return err
-		}
-		if !cfg.Processing.AllowPersistentProcess {
-			return fmt.Errorf("knowledge watch is disabled: persistent processes are not allowed; use %s process", commandName)
-		}
-		interval, err := knowledgeWatchInterval(commandName, args, time.Duration(cfg.PollSeconds)*time.Second)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: watching\ninterval: %s\n", interval)
-		return knowledge.Watch(repo, interval, func(result knowledge.ScanResult) {
-			fmt.Fprintf(out, "scan: files=%d sources=%d review_items=%d\n", result.Files, result.Sources, result.ReviewItems)
-		})
-	case "process":
-		cfg, err := knowledge.LoadConfig(repo)
-		if err != nil {
-			return err
-		}
-		limit, err := knowledgeProcessLimit(commandName, args, cfg.Processing.BatchSize)
-		if err != nil {
-			return err
-		}
-		processor, err := knowledge.NewConfiguredProcessor(repo, cfg)
-		if err != nil {
-			return err
-		}
-		result, err := knowledge.ProcessPending(context.Background(), repo, processor, limit)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: ok\nscanned_files: %d\npending_sources: %d\ncreated_candidates: %d\nreview_items: %d\n", result.ScannedFiles, result.Pending, result.Created, result.ReviewItems)
-		return nil
-	case "index":
-		if len(args) != 1 {
-			return fmt.Errorf("usage: %s index", commandName)
-		}
-		registry, err := knowledge.NewDefaultAdapterRegistry(repo)
-		if err != nil {
-			return err
-		}
-		result, err := knowledge.IndexSources(context.Background(), repo, registry)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: ok\nindex: %s\nchunks: %d\nupserted: %d\ndeleted: %d\n", result.Index, result.Chunks, result.Upserted, result.Deleted)
-		return nil
-	case "search":
-		query, limit, err := parseKnowledgeSearch(commandName, args[1:])
-		if err != nil {
-			return err
-		}
-		registry, err := knowledge.NewDefaultAdapterRegistry(repo)
-		if err != nil {
-			return err
-		}
-		results, err := knowledge.SearchSources(context.Background(), repo, registry, query, limit)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: ok\nmatches: %d\n", len(results))
-		for _, result := range results {
-			fmt.Fprintf(out, "- score: %.6f\n  source: %s\n  path: %s\n  ordinal: %d\n  context: %s\n  heading: %s\n  text: %s\n", result.Score, result.SourceID, result.Path, result.Ordinal, result.ContextKind, strings.Join(result.HeadingPath, " / "), strings.ReplaceAll(result.Text, "\n", " "))
-		}
-		return nil
-	case "status":
-		if len(args) != 1 {
-			return fmt.Errorf("usage: %s status", commandName)
-		}
-		status, err := knowledge.GetStatus(repo)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: ok\nactive_sources: %d\nsanitized_sources: %d\nmissing_sources: %d\nquarantined_sources: %d\nretracted_sources: %d\nartifacts: %d\nreview_items: %d\n", status.ActiveSources, status.SanitizedSources, status.MissingSources, status.QuarantinedSources, status.RetractedSources, status.Artifacts, status.ReviewItems)
-		return nil
-	case "stage":
-		if len(args) != 1 {
-			return fmt.Errorf("usage: %s stage", commandName)
-		}
-		result, err := knowledge.StageKnowledgeChanges(context.Background(), repo)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: ok\nstaged_files: %d\nlfs_files: %d\nblocked_large_files: %d\n", result.StagedFiles, result.LFSFiles, len(result.BlockedLargeFiles))
-		for _, path := range result.BlockedLargeFiles {
-			fmt.Fprintf(out, "  blocked: %s\n", path)
-		}
-		return nil
-	case "context":
-		scope := ""
-		if len(args) == 3 && args[1] == "--scope" {
-			scope = args[2]
-		} else if len(args) != 1 {
-			return fmt.Errorf("usage: %s context [--scope <scope>]", commandName)
-		}
-		claims, err := knowledge.Context(repo, scope)
-		if err != nil {
-			return err
-		}
-		data, err := knowledge.EncodeContext(claims)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(out, string(data))
-		return nil
-	case "link":
-		artifactPath, kind, sourceIDs, err := parseKnowledgeLink(commandName, args[1:])
-		if err != nil {
-			return err
-		}
-		artifact, err := knowledge.Link(repo, artifactPath, kind, sourceIDs)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: ok\nartifact: %s\nstate: %s\nsources: %d\n", artifact.ID, artifact.State, len(artifact.SourceIDs))
-		return nil
-	case "trace":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: %s trace <source-id-or-prefix>", commandName)
-		}
-		source, artifacts, err := knowledge.Trace(repo, args[1])
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: ok\nsource: %s\nstate: %s\n", source.ID, source.State)
-		for _, path := range source.Paths {
-			fmt.Fprintf(out, "  raw: %s\n", path)
-		}
-		for _, artifact := range artifacts {
-			fmt.Fprintf(out, "  derived: %s [%s]\n", artifact.Path, artifact.State)
-		}
-		return nil
-	case "retire":
-		if len(args) != 4 || args[2] != "--reason" {
-			return fmt.Errorf("usage: %s retire <source-id-or-prefix> --reason <text>", commandName)
-		}
-		source, artifacts, err := knowledge.Retire(repo, args[1], args[3])
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "status: ok\nsource: %s\nstate: %s\naffected_artifacts: %d\nhard_deleted: 0\n", source.ID, source.State, len(artifacts))
-		return nil
-	default:
-		return fmt.Errorf("unknown %s command %q", commandName, args[0])
-	}
-}
-
-func runKnowledgeAutomation(workspaceRoot, repo string, args []string, out io.Writer, commandName string, invocationArguments []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("usage: %s automation <run|install|status|enable|disable|uninstall>", commandName)
-	}
-	ctx := context.Background()
-	if args[0] == "run" {
-		return runKnowledgeOneShot(repo, out)
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve command executable: %w", err)
-	}
-	var status knowledge.AutomationTriggerStatus
-	switch args[0] {
-	case "install":
-		status, err = knowledge.InstallAutomation(ctx, workspaceRoot, repo, executable, invocationArguments)
-	case "status":
-		status, err = knowledge.GetAutomationStatus(ctx, workspaceRoot, repo, executable, invocationArguments)
-	case "enable":
-		status, err = knowledge.EnableAutomation(ctx, workspaceRoot, repo, executable, invocationArguments)
-	case "disable":
-		status, err = knowledge.DisableAutomation(ctx, workspaceRoot, repo, executable, invocationArguments)
-	case "uninstall":
-		status, err = knowledge.UninstallAutomation(ctx, workspaceRoot, repo, executable, invocationArguments)
-	default:
-		return fmt.Errorf("unknown %s automation command %q", commandName, args[0])
-	}
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "status: ok\ntrigger: %s\nlabel: %s\nstate: %s\ninstalled: %t\nenabled: %t\nkeep_alive: %t\nruns: %d\nlast_exit_code: %d\n", status.Kind, status.Label, status.State, status.Installed, status.Enabled, status.KeepAlive, status.Runs, status.LastExitCode)
-	if status.PlistPath != "" {
-		fmt.Fprintf(out, "registration: %s\n", status.PlistPath)
-	}
-	return nil
-}
-
-func runKnowledgeOneShot(repo string, out io.Writer) error {
-	result, err := knowledge.RunAutomation(context.Background(), repo)
-	if err != nil {
-		return err
-	}
-	if result.Skipped {
-		fmt.Fprintln(out, "status: skipped\nreason: already-running")
-		return nil
-	}
-	fmt.Fprintln(out, "status: ok")
-	for _, receipt := range result.ProcessReceipts {
-		fmt.Fprintf(out, "process: scanned=%d pending=%d created=%d review_items=%d\n", receipt.ScannedFiles, receipt.Pending, receipt.Created, receipt.ReviewItems)
-	}
-	fmt.Fprintf(out, "index: name=%s chunks=%d upserted=%d deleted=%d\n", result.Index.Index, result.Index.Chunks, result.Index.Upserted, result.Index.Deleted)
-	fmt.Fprintf(out, "knowledge: active=%d sanitized=%d missing=%d quarantined=%d retracted=%d artifacts=%d review_items=%d\n", result.Status.ActiveSources, result.Status.SanitizedSources, result.Status.MissingSources, result.Status.QuarantinedSources, result.Status.RetractedSources, result.Status.Artifacts, result.Status.ReviewItems)
-	fmt.Fprintf(out, "git: staged=%d lfs=%d blocked=%d committed=%t pushed=%t\n", result.Stage.StagedFiles, result.Stage.LFSFiles, len(result.Stage.BlockedLargeFiles), result.Committed, result.Pushed)
-	if result.CommitSHA != "" {
-		fmt.Fprintf(out, "commit: %s\n", result.CommitSHA)
-	}
-	return nil
-}
-
-func parseKnowledgeSearch(commandName string, args []string) (string, int, error) {
-	limit := 5
-	if len(args) == 0 {
-		return "", 0, fmt.Errorf("usage: %s search <query> [--limit <count>]", commandName)
-	}
-	if len(args) >= 2 && args[len(args)-2] == "--limit" {
-		parsed, err := strconv.Atoi(args[len(args)-1])
-		if err != nil || parsed <= 0 || parsed > 50 {
-			return "", 0, fmt.Errorf("search limit must be between 1 and 50")
-		}
-		limit = parsed
-		args = args[:len(args)-2]
-	}
-	query := strings.TrimSpace(strings.Join(args, " "))
-	if query == "" {
-		return "", 0, fmt.Errorf("search query is required")
-	}
-	return query, limit, nil
-}
-
-func knowledgeProcessLimit(commandName string, args []string, defaultLimit int) (int, error) {
-	if len(args) == 1 {
-		if defaultLimit <= 0 {
-			return 0, fmt.Errorf("processing batch size must be positive")
-		}
-		return defaultLimit, nil
-	}
-	if len(args) != 3 || args[1] != "--limit" {
-		return 0, fmt.Errorf("usage: %s process [--limit <count>]", commandName)
-	}
-	limit, err := strconv.Atoi(args[2])
-	if err != nil || limit <= 0 {
-		return 0, fmt.Errorf("process limit must be a positive integer")
-	}
-	if limit > defaultLimit {
-		return 0, fmt.Errorf("process limit %d exceeds configured batch size %d", limit, defaultLimit)
-	}
-	return limit, nil
-}
-
-func knowledgeWatchInterval(commandName string, args []string, defaultInterval time.Duration) (time.Duration, error) {
-	interval := defaultInterval
-	if len(args) == 3 && args[1] == "--interval" {
-		parsed, err := time.ParseDuration(args[2])
-		if err != nil {
-			return 0, fmt.Errorf("parse watch interval: %w", err)
-		}
-		interval = parsed
-	} else if len(args) != 1 {
-		return 0, fmt.Errorf("usage: %s watch [--interval <duration>]", commandName)
-	}
-	if interval <= 0 {
-		return 0, fmt.Errorf("watch interval must be positive")
-	}
-	return interval, nil
-}
-
-func parseKnowledgeLink(commandName string, args []string) (string, string, []string, error) {
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return "", "", nil, fmt.Errorf("usage: %s link <artifact-path> --kind <kind> --source <source-id> [--source <source-id>...]", commandName)
-	}
-	artifactPath := args[0]
-	kind := ""
-	var sourceIDs []string
-	for i := 1; i < len(args); i++ {
-		if i+1 >= len(args) {
-			return "", "", nil, fmt.Errorf("%s requires a value", args[i])
-		}
-		switch args[i] {
-		case "--kind":
-			kind = args[i+1]
-		case "--source":
-			sourceIDs = append(sourceIDs, args[i+1])
-		default:
-			return "", "", nil, fmt.Errorf("unknown link option %q", args[i])
-		}
-		i++
-	}
-	if kind == "" || len(sourceIDs) == 0 {
-		return "", "", nil, fmt.Errorf("link requires --kind and at least one --source")
-	}
-	return artifactPath, kind, sourceIDs, nil
 }
 
 func runSkills(opts options, args []string, out io.Writer) error {
@@ -753,15 +416,6 @@ Usage:
   woon skills validate --profile <names>
   woon skills install --profile <names> --target <codex|claude>
   woon skills doctor
-  woon knowledge scan
-  woon knowledge run
-  woon knowledge automation <run|install|status|enable|disable|uninstall>
-  woon knowledge watch [--interval <duration>]
-  woon knowledge status
-  woon knowledge context [--scope <scope>]
-  woon knowledge link <artifact-path> --kind <kind> --source <source-id>...
-  woon knowledge trace <source-id-or-prefix>
-  woon knowledge retire <source-id-or-prefix> --reason <text>
   woon env check [--target <macos|windows|linux>]
   woon version`)
 }
