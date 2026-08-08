@@ -148,7 +148,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		}
 		fmt.Fprintf(out, "status: ok\nmatches: %d\n", len(results))
 		for _, result := range results {
-			fmt.Fprintf(out, "- score: %.6f\n  source: %s\n  path: %s\n  ordinal: %d\n  text: %s\n", result.Score, result.SourceID, result.Path, result.Ordinal, strings.ReplaceAll(result.Text, "\n", " "))
+			fmt.Fprintf(out, "- score: %.6f\n  source: %s\n  path: %s\n  ordinal: %d\n  context: %s\n  heading: %s\n  text: %s\n", result.Score, result.SourceID, result.Path, result.Ordinal, result.ContextKind, strings.Join(result.HeadingPath, " / "), strings.ReplaceAll(result.Text, "\n", " "))
 		}
 		return nil
 	case "status":

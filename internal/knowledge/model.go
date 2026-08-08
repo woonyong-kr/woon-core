@@ -242,6 +242,9 @@ func (c *Config) applyDefaults() {
 	if c.Ingestion.SizePolicy.ImageAnalysisMaxDimension == 0 {
 		c.Ingestion.SizePolicy.ImageAnalysisMaxDimension = 2048
 	}
+	if !c.Ingestion.SizePolicy.PreserveOriginal {
+		c.Ingestion.SizePolicy.PreserveOriginal = true
+	}
 	if c.Chunking.Unit == "" {
 		c.Chunking.Unit = "token"
 	}
@@ -274,6 +277,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Secrets.SanitizedRoot == "" {
 		c.Secrets.SanitizedRoot = "knowledge-ops/sanitized"
+	}
+	if !c.Secrets.ContinueSafeFiles {
+		c.Secrets.ContinueSafeFiles = true
 	}
 }
 
@@ -308,7 +314,10 @@ func (c Config) validate(repo string) error {
 	if c.Ingestion.Stability.QuietSeconds > 0 && (c.Ingestion.Stability.CheckIntervalSeconds <= 0 || c.Ingestion.Stability.RequiredEqualChecks <= 0) {
 		return errors.New("enabled ingestion stability requires an interval and equal checks")
 	}
-	if c.Ingestion.SizePolicy.RegularGitMaxMiB <= 0 || c.Ingestion.SizePolicy.LargeFileStrategy != "git-lfs" || c.Ingestion.SizePolicy.TextProcessing != "streaming" || c.Ingestion.SizePolicy.ImageAnalysisMaxDimension <= 0 {
+	if c.Ingestion.Stability.QuietSeconds > 0 && (!contains(c.Ingestion.Stability.Compare, "size") || !contains(c.Ingestion.Stability.Compare, "modified_time") || !c.Ingestion.Stability.VerifyHashBeforeAfterProcessing) {
+		return errors.New("enabled ingestion stability must compare size and modified_time and verify processing hashes")
+	}
+	if c.Ingestion.SizePolicy.RegularGitMaxMiB <= 0 || c.Ingestion.SizePolicy.LargeFileStrategy != "git-lfs" || c.Ingestion.SizePolicy.TextProcessing != "streaming" || c.Ingestion.SizePolicy.ImageAnalysisMaxDimension <= 0 || !c.Ingestion.SizePolicy.PreserveOriginal {
 		return errors.New("size policy requires git-lfs, streaming text processing, and positive limits")
 	}
 	for _, path := range []string{c.Ingestion.IgnoreFile, c.Secrets.QuarantineRoot, c.Secrets.SanitizedRoot} {
