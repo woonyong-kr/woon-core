@@ -3,6 +3,7 @@ package knowledge
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,4 +98,35 @@ deletion: {missing_source: quarantine-dependents, explicit_retire: cascade-revie
 	if _, err := LoadConfig(repo); err == nil || !strings.Contains(err.Error(), "auto_push requires auto_commit") {
 		t.Fatalf("push without commit was not rejected: %v", err)
 	}
+}
+
+func TestAutomationPathExcludesUnrelatedSessionDirectories(t *testing.T) {
+	t.Setenv("PATH", strings.Join([]string{
+		filepath.Join(t.TempDir(), "codex-session"),
+		filepath.Dir(mustLookPath(t, "git")),
+	}, string(os.PathListSeparator)))
+	for _, command := range []string{"codex", "woon-knowledge-vector", "gh"} {
+		directory := filepath.Join(t.TempDir(), command)
+		writeFixture(t, filepath.Join(directory, command), "#!/bin/sh\n")
+		if err := os.Chmod(filepath.Join(directory, command), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	path, err := buildAutomationPath("/stable/bin/woon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(path, "codex-session") || !strings.HasPrefix(path, "/stable/bin") {
+		t.Fatalf("automation path is not stable: %s", path)
+	}
+}
+
+func mustLookPath(t *testing.T, command string) string {
+	t.Helper()
+	path, err := exec.LookPath(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

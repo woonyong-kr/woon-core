@@ -155,6 +155,10 @@ func buildAutomationTriggerSpec(ctx context.Context, workspaceRoot, repo, execut
 	if branch == "" {
 		return automationTriggerSpec{}, errors.New("cannot install knowledge automation from a detached HEAD")
 	}
+	pathEnvironment, err := buildAutomationPath(executable)
+	if err != nil {
+		return automationTriggerSpec{}, err
+	}
 	watchPaths := make([]string, 0, len(cfg.Automation.WatchPaths))
 	for _, relative := range cfg.Automation.WatchPaths {
 		absolute, pathErr := safePath(repo, relative)
@@ -171,8 +175,31 @@ func buildAutomationTriggerSpec(ctx context.Context, workspaceRoot, repo, execut
 		WorkspaceRoot: workspaceRoot, KnowledgeRepo: repo, Executable: executable,
 		WatchPaths: watchPaths, ThrottleSeconds: cfg.Automation.ThrottleSeconds,
 		RunAtLoad: cfg.Automation.RunAtLoad, Branch: branch,
-		PathEnvironment: os.Getenv("PATH"),
+		PathEnvironment: pathEnvironment,
 	}, nil
+}
+
+func buildAutomationPath(executable string) (string, error) {
+	directories := []string{filepath.Dir(executable)}
+	for _, command := range []string{"codex", "woon-knowledge-vector", "gh", "git"} {
+		path, err := exec.LookPath(command)
+		if err != nil {
+			return "", fmt.Errorf("find required automation command %q: %w", command, err)
+		}
+		directories = append(directories, filepath.Dir(path))
+	}
+	directories = append(directories, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
+	seen := map[string]bool{}
+	unique := directories[:0]
+	for _, directory := range directories {
+		directory = filepath.Clean(directory)
+		if directory == "." || seen[directory] {
+			continue
+		}
+		seen[directory] = true
+		unique = append(unique, directory)
+	}
+	return strings.Join(unique, string(os.PathListSeparator)), nil
 }
 
 func newAutomationTrigger(kind string, environment triggerEnvironment, runner automationCommandRunner) (automationTrigger, error) {
