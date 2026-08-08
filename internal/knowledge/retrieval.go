@@ -17,11 +17,13 @@ type IndexResult struct {
 }
 
 type SearchResult struct {
-	SourceID string
-	Path     string
-	Ordinal  int
-	Score    float32
-	Text     string
+	SourceID    string
+	Path        string
+	Ordinal     int
+	Score       float32
+	Text        string
+	HeadingPath []string
+	ContextKind string
 }
 
 func IndexSources(ctx context.Context, repo string, registry *AdapterRegistry) (IndexResult, error) {
@@ -129,7 +131,11 @@ func SearchSources(ctx context.Context, repo string, registry *AdapterRegistry, 
 	if err := validateVector(embeddings[0].Values, adapters.Embedding.Spec().Dimensions); err != nil {
 		return nil, err
 	}
-	matches, err := adapters.VectorStore.Search(ctx, indexName, VectorQuery{Vector: embeddings[0].Values, Limit: limit, Metadata: map[string]string{"state": "active"}})
+	candidateLimit := cfg.Retrieval.VectorCandidates
+	if candidateLimit < limit {
+		candidateLimit = limit
+	}
+	matches, err := adapters.VectorStore.Search(ctx, indexName, VectorQuery{Vector: embeddings[0].Values, Limit: candidateLimit, Metadata: map[string]string{"state": "active"}})
 	if err != nil {
 		return nil, fmt.Errorf("search vector index: %w", err)
 	}
@@ -141,15 +147,48 @@ func SearchSources(ctx context.Context, repo string, registry *AdapterRegistry, 
 	for _, chunk := range chunks {
 		byID[chunk.ID] = chunk
 	}
-	results := make([]SearchResult, 0, len(matches))
+	chunksBySource := make(map[string][]Chunk)
+	for _, chunk := range chunks {
+		chunksBySource[chunk.SourceID] = append(chunksBySource[chunk.SourceID], chunk)
+	}
+	for sourceID := range chunksBySource {
+		sort.Slice(chunksBySource[sourceID], func(i, j int) bool { return chunksBySource[sourceID][i].Ordinal < chunksBySource[sourceID][j].Ordinal })
+	}
+	type rankedMatch struct {
+		chunk Chunk
+		score float32
+	}
+	queryTerms := tokenTerms(query)
+	ranked := make([]rankedMatch, 0, len(matches))
+	seenContent := map[string]bool{}
 	for _, match := range matches {
 		chunk, exists := byID[match.Record.ID]
-		if !exists {
+		if !exists || seenContent[chunk.ContentSHA256] {
 			continue
 		}
+		seenContent[chunk.ContentSHA256] = true
+		ranked = append(ranked, rankedMatch{chunk: chunk, score: match.Score + lexicalBoost(queryTerms, chunk.Text)})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+	resultLimit := limit
+	if resultLimit > cfg.Retrieval.RerankLimit {
+		resultLimit = cfg.Retrieval.RerankLimit
+	}
+	results := make([]SearchResult, 0, resultLimit)
+	seenContext := map[string]bool{}
+	for _, match := range ranked {
+		if len(results) >= resultLimit {
+			break
+		}
+		text, kind := expandChunkContext(repo, match.chunk, chunksBySource[match.chunk.SourceID], cfg)
+		key := match.chunk.SourceID + "\x00" + kind + "\x00" + strings.Join(match.chunk.HeadingPath, "\x00")
+		if seenContext[key] {
+			continue
+		}
+		seenContext[key] = true
 		results = append(results, SearchResult{
-			SourceID: chunk.SourceID, Path: chunk.Path, Ordinal: chunk.Ordinal,
-			Score: match.Score, Text: chunk.Text,
+			SourceID: match.chunk.SourceID, Path: match.chunk.Path, Ordinal: match.chunk.Ordinal,
+			Score: match.score, Text: text, HeadingPath: append([]string(nil), match.chunk.HeadingPath...), ContextKind: kind,
 		})
 	}
 	return results, nil
@@ -173,57 +212,83 @@ func sourceChunks(repo string, cfg Config) ([]Chunk, error) {
 		if !utf8.Valid(data) || strings.IndexByte(string(data), 0) >= 0 {
 			continue
 		}
-		parts := splitText(string(data), 1800)
-		for ordinal, text := range parts {
-			contentSHA := digest([]byte(text))
-			chunks = append(chunks, Chunk{
-				ID:       stableID("chunk", source.ID, fmt.Sprint(ordinal), contentSHA),
-				SourceID: source.ID, Path: source.Paths[0], Ordinal: ordinal, Text: text,
-				ContentSHA256: contentSHA, Metadata: map[string]string{"state": "active", "kind": "raw"},
-			})
-		}
+		chunks = append(chunks, chunkDocument(source.ID, source.Paths[0], string(data), cfg.Chunking)...)
 	}
-	sort.Slice(chunks, func(i, j int) bool { return chunks[i].ID < chunks[j].ID })
+	sortChunksByOrdinal(chunks)
 	return chunks, nil
 }
 
-func splitText(text string, maxRunes int) []string {
-	text = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
-	if text == "" {
-		return nil
+func tokenTerms(text string) map[string]bool {
+	terms := map[string]bool{}
+	for _, span := range unicodeTokenSpans(strings.ToLower(text)) {
+		terms[strings.ToLower(text)[span.start:span.end]] = true
 	}
-	paragraphs := strings.Split(text, "\n\n")
-	var result []string
-	var current strings.Builder
-	flush := func() {
-		value := strings.TrimSpace(current.String())
-		if value != "" {
-			result = append(result, value)
-		}
-		current.Reset()
+	return terms
+}
+
+func lexicalBoost(queryTerms map[string]bool, text string) float32 {
+	if len(queryTerms) == 0 {
+		return 0
 	}
-	for _, paragraph := range paragraphs {
-		paragraph = strings.TrimSpace(paragraph)
-		for len([]rune(paragraph)) > maxRunes {
-			flush()
-			runes := []rune(paragraph)
-			result = append(result, strings.TrimSpace(string(runes[:maxRunes])))
-			paragraph = strings.TrimSpace(string(runes[maxRunes:]))
+	matched := map[string]bool{}
+	lower := strings.ToLower(text)
+	for _, span := range unicodeTokenSpans(lower) {
+		term := lower[span.start:span.end]
+		if queryTerms[term] {
+			matched[term] = true
 		}
-		separator := 0
-		if current.Len() > 0 {
-			separator = 2
-		}
-		if len([]rune(current.String()))+separator+len([]rune(paragraph)) > maxRunes {
-			flush()
-		}
-		if current.Len() > 0 {
-			current.WriteString("\n\n")
-		}
-		current.WriteString(paragraph)
 	}
-	flush()
-	return result
+	return float32(len(matched)) / float32(len(queryTerms)) * 0.05
+}
+
+func expandChunkContext(repo string, hit Chunk, sourceChunks []Chunk, cfg Config) (string, string) {
+	total := 0
+	for _, chunk := range sourceChunks {
+		total += chunk.TokenCount
+	}
+	if total <= cfg.Retrieval.ReadFullDocumentUnderTokens {
+		path, err := safePath(repo, hit.Path)
+		if err == nil {
+			if data, readErr := os.ReadFile(path); readErr == nil {
+				return string(data), "full-document"
+			}
+		}
+	}
+	selected := map[int]bool{}
+	for i, chunk := range sourceChunks {
+		if sameHeadingPath(chunk.HeadingPath, hit.HeadingPath) {
+			selected[i] = true
+		}
+		if chunk.ID == hit.ID {
+			for offset := -cfg.Retrieval.NeighborChunks; offset <= cfg.Retrieval.NeighborChunks; offset++ {
+				if i+offset >= 0 && i+offset < len(sourceChunks) {
+					selected[i+offset] = true
+				}
+			}
+		}
+	}
+	indices := make([]int, 0, len(selected))
+	for index := range selected {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+	parts := make([]string, 0, len(indices))
+	used := 0
+	for _, index := range indices {
+		chunk := sourceChunks[index]
+		if used > 0 && used+chunk.TokenCount > cfg.Retrieval.ReadFullDocumentUnderTokens {
+			break
+		}
+		if len(parts) == 0 || parts[len(parts)-1] != chunk.Text {
+			parts = append(parts, chunk.Text)
+		}
+		used += chunk.TokenCount
+	}
+	return strings.Join(parts, "\n\n"), "section"
+}
+
+func sameHeadingPath(left, right []string) bool {
+	return strings.Join(left, "\x00") == strings.Join(right, "\x00")
 }
 
 func listVectorRecords(ctx context.Context, store VectorStoreAdapter, index string) ([]VectorRecord, error) {

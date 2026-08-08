@@ -30,6 +30,9 @@ type Config struct {
 	MaxFileBytes   int64                `yaml:"max_file_bytes"`
 	IgnoreNames    []string             `yaml:"ignore_names"`
 	PollSeconds    int                  `yaml:"poll_seconds"`
+	Ingestion      IngestionConfig      `yaml:"ingestion"`
+	Chunking       ChunkingConfig       `yaml:"chunking"`
+	Secrets        SecretPolicy         `yaml:"secrets"`
 	Conflicts      ConflictPolicy       `yaml:"conflicts"`
 	Deletion       DeletionPolicy       `yaml:"deletion"`
 	Classification ClassificationPolicy `yaml:"classification"`
@@ -51,10 +54,54 @@ type ProcessingConfig struct {
 }
 
 type RetrievalConfig struct {
-	ExecutionMode          string                   `yaml:"execution_mode"`
-	AllowPersistentProcess bool                     `yaml:"allow_persistent_process"`
-	Embedding              EmbeddingAdapterConfig   `yaml:"embedding"`
-	VectorStore            VectorStoreAdapterConfig `yaml:"vector_store"`
+	ExecutionMode               string                   `yaml:"execution_mode"`
+	AllowPersistentProcess      bool                     `yaml:"allow_persistent_process"`
+	VectorCandidates            int                      `yaml:"vector_candidates"`
+	RerankLimit                 int                      `yaml:"rerank_limit"`
+	NeighborChunks              int                      `yaml:"neighbor_chunks"`
+	ReadFullDocumentUnderTokens int                      `yaml:"read_full_document_under_tokens"`
+	Embedding                   EmbeddingAdapterConfig   `yaml:"embedding"`
+	VectorStore                 VectorStoreAdapterConfig `yaml:"vector_store"`
+}
+
+type IngestionConfig struct {
+	IgnoreFile string          `yaml:"ignore_file"`
+	Stability  StabilityConfig `yaml:"stability"`
+	SizePolicy SizePolicy      `yaml:"size_policy"`
+}
+
+type StabilityConfig struct {
+	QuietSeconds                    int      `yaml:"quiet_seconds"`
+	CheckIntervalSeconds            int      `yaml:"check_interval_seconds"`
+	RequiredEqualChecks             int      `yaml:"required_equal_checks"`
+	Compare                         []string `yaml:"compare"`
+	VerifyHashBeforeAfterProcessing bool     `yaml:"verify_hash_before_after_processing"`
+	MaxWaitSeconds                  int      `yaml:"max_wait_seconds"`
+}
+
+type SizePolicy struct {
+	RegularGitMaxMiB          int64  `yaml:"regular_git_max_mib"`
+	LargeFileStrategy         string `yaml:"large_file_strategy"`
+	TextProcessing            string `yaml:"text_processing"`
+	ImageAnalysisMaxDimension int    `yaml:"image_analysis_max_dimension"`
+	PreserveOriginal          bool   `yaml:"preserve_original"`
+}
+
+type ChunkingConfig struct {
+	Unit               string `yaml:"unit"`
+	Tokenizer          string `yaml:"tokenizer"`
+	TargetTokens       int    `yaml:"target_tokens"`
+	MaxTokens          int    `yaml:"max_tokens"`
+	OverlapTokens      int    `yaml:"overlap_tokens"`
+	PreserveHeadings   bool   `yaml:"preserve_headings"`
+	PreserveCodeBlocks bool   `yaml:"preserve_code_blocks"`
+	PreserveTables     bool   `yaml:"preserve_tables"`
+}
+
+type SecretPolicy struct {
+	QuarantineRoot    string `yaml:"quarantine_root"`
+	SanitizedRoot     string `yaml:"sanitized_root"`
+	ContinueSafeFiles bool   `yaml:"continue_safe_files"`
 }
 
 type EmbeddingAdapterConfig struct {
@@ -102,6 +149,9 @@ type Source struct {
 	MediaType        string   `json:"media_type,omitempty"`
 	State            string   `json:"state"`
 	Findings         []string `json:"findings,omitempty"`
+	SanitizedPath    string   `json:"sanitized_path,omitempty"`
+	SanitizedSHA256  string   `json:"sanitized_sha256,omitempty"`
+	RotationRequired bool     `json:"rotation_required,omitempty"`
 	InputHints       []string `json:"input_hints,omitempty"`
 	RetireReason     string   `json:"retire_reason,omitempty"`
 }
@@ -148,6 +198,7 @@ type Claim struct {
 
 type Status struct {
 	ActiveSources      int
+	SanitizedSources   int
 	MissingSources     int
 	QuarantinedSources int
 	RetractedSources   int
@@ -165,13 +216,69 @@ func LoadConfig(repo string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse knowledge config: %w", err)
 	}
+	cfg.applyDefaults()
 	if err := cfg.validate(repo); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
 }
 
+func (c *Config) applyDefaults() {
+	if c.PollSeconds == 0 {
+		c.PollSeconds = 5
+	}
+	if c.Ingestion.IgnoreFile == "" {
+		c.Ingestion.IgnoreFile = ".knowledgeignore"
+	}
+	if c.Ingestion.SizePolicy.RegularGitMaxMiB == 0 {
+		c.Ingestion.SizePolicy.RegularGitMaxMiB = 90
+	}
+	if c.Ingestion.SizePolicy.LargeFileStrategy == "" {
+		c.Ingestion.SizePolicy.LargeFileStrategy = "git-lfs"
+	}
+	if c.Ingestion.SizePolicy.TextProcessing == "" {
+		c.Ingestion.SizePolicy.TextProcessing = "streaming"
+	}
+	if c.Ingestion.SizePolicy.ImageAnalysisMaxDimension == 0 {
+		c.Ingestion.SizePolicy.ImageAnalysisMaxDimension = 2048
+	}
+	if c.Chunking.Unit == "" {
+		c.Chunking.Unit = "token"
+	}
+	if c.Chunking.Tokenizer == "" {
+		c.Chunking.Tokenizer = "unicode-word-v1"
+	}
+	if c.Chunking.TargetTokens == 0 {
+		c.Chunking.TargetTokens = 1000
+	}
+	if c.Chunking.MaxTokens == 0 {
+		c.Chunking.MaxTokens = 1400
+	}
+	if c.Chunking.OverlapTokens == 0 {
+		c.Chunking.OverlapTokens = 150
+	}
+	if c.Retrieval.VectorCandidates == 0 {
+		c.Retrieval.VectorCandidates = 10
+	}
+	if c.Retrieval.RerankLimit == 0 {
+		c.Retrieval.RerankLimit = 5
+	}
+	if c.Retrieval.NeighborChunks == 0 {
+		c.Retrieval.NeighborChunks = 1
+	}
+	if c.Retrieval.ReadFullDocumentUnderTokens == 0 {
+		c.Retrieval.ReadFullDocumentUnderTokens = 12000
+	}
+	if c.Secrets.QuarantineRoot == "" {
+		c.Secrets.QuarantineRoot = ".knowledge-runtime/quarantine"
+	}
+	if c.Secrets.SanitizedRoot == "" {
+		c.Secrets.SanitizedRoot = "knowledge-ops/sanitized"
+	}
+}
+
 func (c Config) validate(repo string) error {
+	c.applyDefaults()
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported knowledge config version %d", c.Version)
 	}
@@ -183,11 +290,31 @@ func (c Config) validate(repo string) error {
 			return err
 		}
 	}
-	if c.MaxFileBytes <= 0 {
-		return errors.New("max_file_bytes must be positive")
-	}
 	if c.PollSeconds <= 0 {
 		return errors.New("poll_seconds must be positive")
+	}
+	if c.Chunking.Unit != "token" || c.Chunking.Tokenizer != "unicode-word-v1" {
+		return errors.New("chunking requires token unit and supported tokenizer unicode-word-v1")
+	}
+	if c.Chunking.TargetTokens <= 0 || c.Chunking.MaxTokens < c.Chunking.TargetTokens || c.Chunking.OverlapTokens < 0 || c.Chunking.OverlapTokens >= c.Chunking.TargetTokens {
+		return errors.New("chunking token limits are invalid")
+	}
+	if c.Retrieval.VectorCandidates <= 0 || c.Retrieval.RerankLimit <= 0 || c.Retrieval.RerankLimit > c.Retrieval.VectorCandidates || c.Retrieval.NeighborChunks < 0 || c.Retrieval.ReadFullDocumentUnderTokens <= 0 {
+		return errors.New("retrieval limits are invalid")
+	}
+	if c.Ingestion.Stability.QuietSeconds < 0 || c.Ingestion.Stability.CheckIntervalSeconds < 0 || c.Ingestion.Stability.RequiredEqualChecks < 0 || c.Ingestion.Stability.MaxWaitSeconds < 0 {
+		return errors.New("ingestion stability values cannot be negative")
+	}
+	if c.Ingestion.Stability.QuietSeconds > 0 && (c.Ingestion.Stability.CheckIntervalSeconds <= 0 || c.Ingestion.Stability.RequiredEqualChecks <= 0) {
+		return errors.New("enabled ingestion stability requires an interval and equal checks")
+	}
+	if c.Ingestion.SizePolicy.RegularGitMaxMiB <= 0 || c.Ingestion.SizePolicy.LargeFileStrategy != "git-lfs" || c.Ingestion.SizePolicy.TextProcessing != "streaming" || c.Ingestion.SizePolicy.ImageAnalysisMaxDimension <= 0 {
+		return errors.New("size policy requires git-lfs, streaming text processing, and positive limits")
+	}
+	for _, path := range []string{c.Ingestion.IgnoreFile, c.Secrets.QuarantineRoot, c.Secrets.SanitizedRoot} {
+		if _, err := safePath(repo, path); err != nil {
+			return err
+		}
 	}
 	if !c.Conflicts.AutoMergeEquivalent || c.Conflicts.DifferentValue != "review" || c.Conflicts.Retrieval != "block-conflicted" {
 		return errors.New("conflict policy must review different values and block conflicted retrieval")

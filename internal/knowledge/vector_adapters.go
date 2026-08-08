@@ -62,13 +62,19 @@ func (s EmbeddingSpec) Fingerprint() (string, error) {
 }
 
 type Chunk struct {
-	ID            string            `json:"id"`
-	SourceID      string            `json:"source_id"`
-	Path          string            `json:"path"`
-	Ordinal       int               `json:"ordinal"`
-	Text          string            `json:"text"`
-	ContentSHA256 string            `json:"content_sha256"`
-	Metadata      map[string]string `json:"metadata"`
+	ID              string            `json:"id"`
+	SourceID        string            `json:"source_id"`
+	Path            string            `json:"path"`
+	Ordinal         int               `json:"ordinal"`
+	HeadingPath     []string          `json:"heading_path,omitempty"`
+	PreviousChunkID string            `json:"previous_chunk_id,omitempty"`
+	NextChunkID     string            `json:"next_chunk_id,omitempty"`
+	StartOffset     int               `json:"start_offset"`
+	EndOffset       int               `json:"end_offset"`
+	TokenCount      int               `json:"token_count"`
+	Text            string            `json:"text"`
+	ContentSHA256   string            `json:"content_sha256"`
+	Metadata        map[string]string `json:"metadata"`
 }
 
 type Embedding struct {
