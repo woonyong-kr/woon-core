@@ -35,8 +35,10 @@ func preserveQuarantinedSource(repo string, cfg Config, sourceID, originalPath s
 	return nil
 }
 
+var privateKeyBlockPattern = regexp.MustCompile(`(?s)-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`)
+
 var secretPatterns = []secretPattern{
-	{"private-key", regexp.MustCompile(`(?s)-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`), true},
+	{"private-key", privateKeyBlockPattern, true},
 	{"aws-access-key", regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`), true},
 	{"github-token", regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`), true},
 	{"openai-key", regexp.MustCompile(`sk-[A-Za-z0-9_-]{20,}`), true},

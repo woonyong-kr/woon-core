@@ -62,8 +62,8 @@ func processLargeSource(ctx context.Context, repo string, processor DocumentProc
 		return ProcessedDocument{}, err
 	}
 	partials := make([]ProcessedDocument, 0, len(h.levels)*cfg.Processing.MapReduceFanIn)
-	for _, level := range h.levels {
-		partials = append(partials, level...)
+	for index := len(h.levels) - 1; index >= 0; index-- {
+		partials = append(partials, h.levels[index]...)
 	}
 	if len(partials) == 0 {
 		return ProcessedDocument{}, fmt.Errorf("large source %s produced no chunks", source.ID)

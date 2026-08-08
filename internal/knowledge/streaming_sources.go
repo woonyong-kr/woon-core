@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const defaultWholeFileScanThresholdBytes = 64 * 1024 * 1024
@@ -84,7 +85,10 @@ func normalizedFileDigest(repo, path string) (string, error) {
 					}
 				}
 			}
-			if _, err := temporary.WriteString(strings.TrimSpace(line)); err != nil {
+			if !wrote {
+				line = strings.TrimLeftFunc(line, unicode.IsSpace)
+			}
+			if _, err := temporary.WriteString(line); err != nil {
 				return "", err
 			}
 			wrote = true
@@ -142,6 +146,15 @@ func sanitizeTextFile(repo, path string) (string, []string, bool, error) {
 				}
 				inPrivateKey = false
 				privateDigest.Reset()
+			}
+		} else if privateKeyBlockPattern.Match(lineBytes) {
+			findings["private-key"] = true
+			rotation = true
+			lineBytes = privateKeyBlockPattern.ReplaceAllFunc(lineBytes, func(match []byte) []byte {
+				return []byte(fmt.Sprintf("[REDACTED_SECRET:private-key:%s]", digest(match)[:12]))
+			})
+			if _, err := output.Write(lineBytes); err != nil {
+				return "", nil, false, err
 			}
 		} else if privateKeyHeader.Match(lineBytes) {
 			findings["private-key"] = true
