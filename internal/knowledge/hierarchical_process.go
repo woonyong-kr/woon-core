@@ -46,7 +46,7 @@ func processLargeSource(ctx context.Context, repo string, processor DocumentProc
 	}
 	err = walkFileChunks(ctx, source.ID, source.Paths[0], absolute, cfg.Chunking, func(chunk Chunk) error {
 		batch = append(batch, ProcessDocument{
-			SourceID: fmt.Sprintf("%s-chunk-%08d", source.ID, chunk.Ordinal), Path: source.Paths[0],
+			SourceID: derivedProcessSourceID(source.ID, "chunk", fmt.Sprint(chunk.Ordinal), chunk.ContentSHA256), Path: source.Paths[0],
 			InputHints: append(append([]string(nil), source.InputHints...), strings.Join(chunk.HeadingPath, " / ")),
 			Text:       chunk.Text,
 		})
@@ -106,7 +106,11 @@ func (h *hierarchicalProcessor) add(level int, document ProcessedDocument) error
 
 func (h *hierarchicalProcessor) nextReduceID(kind string) string {
 	h.reduceSeq++
-	return fmt.Sprintf("%s-%s-%08d", h.source.ID, kind, h.reduceSeq)
+	return derivedProcessSourceID(h.source.ID, kind, fmt.Sprint(h.reduceSeq))
+}
+
+func derivedProcessSourceID(parts ...string) string {
+	return "src-" + digest([]byte(strings.Join(parts, "\x00")))
 }
 
 func (h *hierarchicalProcessor) reduce(targetID string, documents []ProcessedDocument) (ProcessedDocument, error) {

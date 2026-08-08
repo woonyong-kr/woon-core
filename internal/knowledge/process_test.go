@@ -177,6 +177,47 @@ func TestCodexCLIProcessorEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCodexCLIHierarchicalEndToEnd(t *testing.T) {
+	schemaSource := os.Getenv("WOON_KNOWLEDGE_SCHEMA")
+	if schemaSource == "" {
+		t.Skip("set WOON_KNOWLEDGE_SCHEMA to run the Codex CLI integration test")
+	}
+	schema, err := os.ReadFile(schemaSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := t.TempDir()
+	writeProcessingFixture(t, repo)
+	configPath := filepath.Join(repo, "config", "knowledge-workflow.yaml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config = append(config, []byte(`
+chunking: {unit: token, tokenizer: unicode-word-v1, target_tokens: 1000, max_tokens: 1400, overlap_tokens: 150, preserve_headings: true, preserve_code_blocks: true, preserve_tables: true}
+retrieval: {vector_candidates: 10, rerank_limit: 5, neighbor_chunks: 1, read_full_document_under_tokens: 50, read_full_document_max_mib: 64, embedding_batch_size: 64}
+`)...)
+	writeFixture(t, configPath, string(config))
+	writeFixture(t, filepath.Join(repo, "config", "voice.md"), "결론을 먼저 쓰고 원문에 없는 사실은 추가하지 않는다.\n")
+	writeFixture(t, filepath.Join(repo, "config", "candidate.schema.json"), string(schema))
+	writeFixture(t, filepath.Join(repo, "sources", "imports", "drop", "large.md"), "# 장애 기록\n\n"+strings.Repeat("테스트 환경에서 연결 실패를 확인했고 재시도로 복구했다.\n", 20))
+	cfg, err := LoadConfig(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor, err := NewConfiguredProcessor(repo, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ProcessPending(context.Background(), repo, processor, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Created != 1 {
+		t.Fatalf("Codex CLI hierarchical processing failed: %+v", result)
+	}
+}
+
 func writeProcessingFixture(t *testing.T, repo string) {
 	t.Helper()
 	writeFixture(t, filepath.Join(repo, "config", "knowledge-workflow.yaml"), `version: 1
