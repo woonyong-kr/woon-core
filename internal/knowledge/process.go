@@ -232,7 +232,7 @@ func ProcessPending(ctx context.Context, repo string, processor DocumentProcesso
 		if statErr != nil {
 			return result, statErr
 		}
-		if tokens > cfg.Retrieval.ReadFullDocumentUnderTokens || info.Size() > 64*1024*1024 {
+		if tokens > cfg.Retrieval.ReadFullDocumentUnderTokens || info.Size() > cfg.Processing.StreamingThresholdMiB*1024*1024 {
 			document, processErr := processLargeSource(ctx, repo, processor, cfg, string(voice), source, readPath)
 			if processErr != nil {
 				return result, fmt.Errorf("hierarchical process source %s: %w", source.ID, processErr)

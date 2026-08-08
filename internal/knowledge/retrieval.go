@@ -66,7 +66,7 @@ func IndexSources(ctx context.Context, repo string, registry *AdapterRegistry) (
 		existingByID[record.ID] = record
 	}
 	expected := make(map[string]bool)
-	pending := make([]Chunk, 0, 64)
+	pending := make([]Chunk, 0, cfg.Retrieval.EmbeddingBatchSize)
 	flushPending := func() error {
 		if len(pending) == 0 {
 			return nil
@@ -308,7 +308,7 @@ func expandChunkContextStreaming(ctx context.Context, repo string, hit Chunk, cf
 	if err != nil {
 		return "", "", err
 	}
-	if total <= cfg.Retrieval.ReadFullDocumentUnderTokens && info.Size() <= 64*1024*1024 {
+	if total <= cfg.Retrieval.ReadFullDocumentUnderTokens && info.Size() <= cfg.Retrieval.ReadFullDocumentMaxMiB*1024*1024 {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return "", "", readErr

@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const wholeFileScanThresholdBytes = 64 * 1024 * 1024
+const defaultWholeFileScanThresholdBytes = 64 * 1024 * 1024
 
 type streamedSourceAnalysis struct {
 	SHA256           string

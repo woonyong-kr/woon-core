@@ -115,7 +115,7 @@ func TestScanRoutesSourceAboveMemoryBoundThroughStreamingAnalysis(t *testing.T) 
 		t.Fatal(err)
 	}
 	pattern := []byte("streaming evidence line\n")
-	size := int64((wholeFileScanThresholdBytes/len(pattern))+1) * int64(len(pattern))
+	size := int64((defaultWholeFileScanThresholdBytes/len(pattern))+1) * int64(len(pattern))
 	reader := &repeatedPatternReader{pattern: pattern, remain: size}
 	if _, err := io.Copy(file, reader); err != nil {
 		t.Fatal(err)

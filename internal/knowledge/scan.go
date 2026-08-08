@@ -82,7 +82,7 @@ func Scan(repo string) (ScanResult, error) {
 				items = append(items, newReview("unsupported-link", "심볼릭 링크는 원본으로 수집하지 않음", nil, []string{relative}, nil))
 				return nil
 			}
-			if info.Size() > wholeFileScanThresholdBytes {
+			if info.Size() > cfg.Ingestion.WholeFileScanMaxMiB*1024*1024 {
 				analysis, analyzeErr := analyzeLargeSource(repo, path)
 				if analyzeErr != nil {
 					items = append(items, newReview("streaming-source-error", "대용량 원본을 streaming 검사하지 못해 해당 파일만 보류함", nil, []string{relative}, nil))

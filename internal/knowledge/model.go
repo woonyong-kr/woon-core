@@ -51,6 +51,8 @@ type ProcessingConfig struct {
 	VoiceProfilePath       string `yaml:"voice_profile_path"`
 	SchemaPath             string `yaml:"schema_path"`
 	CommandPath            string `yaml:"command_path"`
+	StreamingThresholdMiB  int64  `yaml:"streaming_threshold_mib"`
+	MapReduceFanIn         int    `yaml:"map_reduce_fan_in"`
 }
 
 type RetrievalConfig struct {
@@ -60,14 +62,17 @@ type RetrievalConfig struct {
 	RerankLimit                 int                      `yaml:"rerank_limit"`
 	NeighborChunks              int                      `yaml:"neighbor_chunks"`
 	ReadFullDocumentUnderTokens int                      `yaml:"read_full_document_under_tokens"`
+	ReadFullDocumentMaxMiB      int64                    `yaml:"read_full_document_max_mib"`
+	EmbeddingBatchSize          int                      `yaml:"embedding_batch_size"`
 	Embedding                   EmbeddingAdapterConfig   `yaml:"embedding"`
 	VectorStore                 VectorStoreAdapterConfig `yaml:"vector_store"`
 }
 
 type IngestionConfig struct {
-	IgnoreFile string          `yaml:"ignore_file"`
-	Stability  StabilityConfig `yaml:"stability"`
-	SizePolicy SizePolicy      `yaml:"size_policy"`
+	IgnoreFile          string          `yaml:"ignore_file"`
+	WholeFileScanMaxMiB int64           `yaml:"whole_file_scan_max_mib"`
+	Stability           StabilityConfig `yaml:"stability"`
+	SizePolicy          SizePolicy      `yaml:"size_policy"`
 }
 
 type StabilityConfig struct {
@@ -230,6 +235,9 @@ func (c *Config) applyDefaults() {
 	if c.Ingestion.IgnoreFile == "" {
 		c.Ingestion.IgnoreFile = ".knowledgeignore"
 	}
+	if c.Ingestion.WholeFileScanMaxMiB == 0 {
+		c.Ingestion.WholeFileScanMaxMiB = 64
+	}
 	if c.Ingestion.SizePolicy.RegularGitMaxMiB == 0 {
 		c.Ingestion.SizePolicy.RegularGitMaxMiB = 90
 	}
@@ -272,6 +280,21 @@ func (c *Config) applyDefaults() {
 	if c.Retrieval.ReadFullDocumentUnderTokens == 0 {
 		c.Retrieval.ReadFullDocumentUnderTokens = 12000
 	}
+	if c.Retrieval.ReadFullDocumentMaxMiB == 0 {
+		c.Retrieval.ReadFullDocumentMaxMiB = 64
+	}
+	if c.Retrieval.EmbeddingBatchSize == 0 {
+		c.Retrieval.EmbeddingBatchSize = 64
+	}
+	if c.Processing.StreamingThresholdMiB == 0 {
+		c.Processing.StreamingThresholdMiB = 64
+	}
+	if c.Processing.MapReduceFanIn == 0 {
+		c.Processing.MapReduceFanIn = c.Processing.BatchSize
+		if c.Processing.MapReduceFanIn == 0 {
+			c.Processing.MapReduceFanIn = 10
+		}
+	}
 	if c.Secrets.QuarantineRoot == "" {
 		c.Secrets.QuarantineRoot = ".knowledge-runtime/quarantine"
 	}
@@ -305,7 +328,7 @@ func (c Config) validate(repo string) error {
 	if c.Chunking.TargetTokens <= 0 || c.Chunking.MaxTokens < c.Chunking.TargetTokens || c.Chunking.OverlapTokens < 0 || c.Chunking.OverlapTokens >= c.Chunking.TargetTokens {
 		return errors.New("chunking token limits are invalid")
 	}
-	if c.Retrieval.VectorCandidates <= 0 || c.Retrieval.RerankLimit <= 0 || c.Retrieval.RerankLimit > c.Retrieval.VectorCandidates || c.Retrieval.NeighborChunks < 0 || c.Retrieval.ReadFullDocumentUnderTokens <= 0 {
+	if c.Retrieval.VectorCandidates <= 0 || c.Retrieval.RerankLimit <= 0 || c.Retrieval.RerankLimit > c.Retrieval.VectorCandidates || c.Retrieval.NeighborChunks < 0 || c.Retrieval.ReadFullDocumentUnderTokens <= 0 || c.Retrieval.ReadFullDocumentMaxMiB <= 0 || c.Retrieval.EmbeddingBatchSize <= 0 {
 		return errors.New("retrieval limits are invalid")
 	}
 	if c.Ingestion.Stability.QuietSeconds < 0 || c.Ingestion.Stability.CheckIntervalSeconds < 0 || c.Ingestion.Stability.RequiredEqualChecks < 0 || c.Ingestion.Stability.MaxWaitSeconds < 0 {
@@ -319,6 +342,9 @@ func (c Config) validate(repo string) error {
 	}
 	if c.Ingestion.SizePolicy.RegularGitMaxMiB <= 0 || c.Ingestion.SizePolicy.LargeFileStrategy != "git-lfs" || c.Ingestion.SizePolicy.TextProcessing != "streaming" || c.Ingestion.SizePolicy.ImageAnalysisMaxDimension <= 0 || !c.Ingestion.SizePolicy.PreserveOriginal {
 		return errors.New("size policy requires git-lfs, streaming text processing, and positive limits")
+	}
+	if c.Ingestion.WholeFileScanMaxMiB <= 0 || c.Processing.StreamingThresholdMiB <= 0 || c.Processing.MapReduceFanIn < 2 {
+		return errors.New("streaming thresholds must be positive and map_reduce_fan_in must be at least 2")
 	}
 	for _, path := range []string{c.Ingestion.IgnoreFile, c.Secrets.QuarantineRoot, c.Secrets.SanitizedRoot} {
 		if _, err := safePath(repo, path); err != nil {

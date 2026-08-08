@@ -61,7 +61,7 @@ func processLargeSource(ctx context.Context, repo string, processor DocumentProc
 	if err := flush(); err != nil {
 		return ProcessedDocument{}, err
 	}
-	partials := make([]ProcessedDocument, 0, len(h.levels)*cfg.Processing.BatchSize)
+	partials := make([]ProcessedDocument, 0, len(h.levels)*cfg.Processing.MapReduceFanIn)
 	for _, level := range h.levels {
 		partials = append(partials, level...)
 	}
@@ -69,9 +69,9 @@ func processLargeSource(ctx context.Context, repo string, processor DocumentProc
 		return ProcessedDocument{}, fmt.Errorf("large source %s produced no chunks", source.ID)
 	}
 	for len(partials) > 1 {
-		next := make([]ProcessedDocument, 0, (len(partials)+cfg.Processing.BatchSize-1)/cfg.Processing.BatchSize)
-		for start := 0; start < len(partials); start += cfg.Processing.BatchSize {
-			end := start + cfg.Processing.BatchSize
+		next := make([]ProcessedDocument, 0, (len(partials)+cfg.Processing.MapReduceFanIn-1)/cfg.Processing.MapReduceFanIn)
+		for start := 0; start < len(partials); start += cfg.Processing.MapReduceFanIn {
+			end := start + cfg.Processing.MapReduceFanIn
 			if end > len(partials) {
 				end = len(partials)
 			}
@@ -92,7 +92,7 @@ func (h *hierarchicalProcessor) add(level int, document ProcessedDocument) error
 		h.levels = append(h.levels, nil)
 	}
 	h.levels[level] = append(h.levels[level], document)
-	if len(h.levels[level]) < h.cfg.Processing.BatchSize {
+	if len(h.levels[level]) < h.cfg.Processing.MapReduceFanIn {
 		return nil
 	}
 	group := append([]ProcessedDocument(nil), h.levels[level]...)
