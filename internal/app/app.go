@@ -161,6 +161,19 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		}
 		fmt.Fprintf(out, "status: ok\nactive_sources: %d\nsanitized_sources: %d\nmissing_sources: %d\nquarantined_sources: %d\nretracted_sources: %d\nartifacts: %d\nreview_items: %d\n", status.ActiveSources, status.SanitizedSources, status.MissingSources, status.QuarantinedSources, status.RetractedSources, status.Artifacts, status.ReviewItems)
 		return nil
+	case "stage":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: woon knowledge stage")
+		}
+		result, err := knowledge.StageKnowledgeChanges(context.Background(), repo)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "status: ok\nstaged_files: %d\nlfs_files: %d\nblocked_large_files: %d\n", result.StagedFiles, result.LFSFiles, len(result.BlockedLargeFiles))
+		for _, path := range result.BlockedLargeFiles {
+			fmt.Fprintf(out, "  blocked: %s\n", path)
+		}
+		return nil
 	case "context":
 		scope := ""
 		if len(args) == 3 && args[1] == "--scope" {

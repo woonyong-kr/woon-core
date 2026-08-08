@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"mime"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 type ScanResult struct {
@@ -99,7 +101,8 @@ func Scan(repo string) (ScanResult, error) {
 				}
 			}
 			source.Paths = append(source.Paths, relative)
-			if sanitized, safe := sanitizeSecrets(data); safe && len(sanitized.Findings) > 0 && source.State != "retracted" {
+			textSource := utf8.Valid(data) && bytes.IndexByte(data, 0) < 0
+			if sanitized, safe := sanitizeSecrets(data); textSource && safe && len(sanitized.Findings) > 0 && source.State != "retracted" {
 				source.Findings = append(source.Findings, sanitized.Findings...)
 				source.State = "sanitized"
 				source.RotationRequired = sanitized.RotationRequired
@@ -112,8 +115,17 @@ func Scan(repo string) (ScanResult, error) {
 				if writeErr := writeAtomic(sanitizedPath, sanitized.Data); writeErr != nil {
 					return fmt.Errorf("write sanitized source %s: %w", source.ID, writeErr)
 				}
-			} else if !safe && source.State != "retracted" {
+			} else if textSource && !safe && source.State != "retracted" {
 				source.State = "quarantined"
+			} else if !textSource && source.State != "retracted" {
+				for _, candidate := range secretPatterns {
+					if candidate.pattern.Match(data) {
+						source.Findings = appendUnique(source.Findings, candidate.name)
+					}
+				}
+				if len(source.Findings) > 0 {
+					source.State = "quarantined"
+				}
 			}
 			hintPath, err := filepath.Rel(root, filepath.Dir(path))
 			if err != nil {
