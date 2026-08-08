@@ -28,16 +28,17 @@ type AutomationTriggerStatus struct {
 }
 
 type automationTriggerSpec struct {
-	Kind            string
-	Label           string
-	WorkspaceRoot   string
-	KnowledgeRepo   string
-	Executable      string
-	WatchPaths      []string
-	ThrottleSeconds int
-	RunAtLoad       bool
-	Branch          string
-	PathEnvironment string
+	Kind                string
+	Label               string
+	WorkspaceRoot       string
+	KnowledgeRepo       string
+	Executable          string
+	InvocationArguments []string
+	WatchPaths          []string
+	ThrottleSeconds     int
+	RunAtLoad           bool
+	Branch              string
+	PathEnvironment     string
 }
 
 type automationTrigger interface {
@@ -86,27 +87,27 @@ func currentTriggerEnvironment() (triggerEnvironment, error) {
 	return triggerEnvironment{goos: runtime.GOOS, home: home, uid: current.Uid}, nil
 }
 
-func InstallAutomation(ctx context.Context, workspaceRoot, repo, executable string) (AutomationTriggerStatus, error) {
-	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, "install")
+func InstallAutomation(ctx context.Context, workspaceRoot, repo, executable string, invocationArguments []string) (AutomationTriggerStatus, error) {
+	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, invocationArguments, "install")
 }
 
-func GetAutomationStatus(ctx context.Context, workspaceRoot, repo, executable string) (AutomationTriggerStatus, error) {
-	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, "status")
+func GetAutomationStatus(ctx context.Context, workspaceRoot, repo, executable string, invocationArguments []string) (AutomationTriggerStatus, error) {
+	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, invocationArguments, "status")
 }
 
-func EnableAutomation(ctx context.Context, workspaceRoot, repo, executable string) (AutomationTriggerStatus, error) {
-	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, "enable")
+func EnableAutomation(ctx context.Context, workspaceRoot, repo, executable string, invocationArguments []string) (AutomationTriggerStatus, error) {
+	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, invocationArguments, "enable")
 }
 
-func DisableAutomation(ctx context.Context, workspaceRoot, repo, executable string) (AutomationTriggerStatus, error) {
-	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, "disable")
+func DisableAutomation(ctx context.Context, workspaceRoot, repo, executable string, invocationArguments []string) (AutomationTriggerStatus, error) {
+	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, invocationArguments, "disable")
 }
 
-func UninstallAutomation(ctx context.Context, workspaceRoot, repo, executable string) (AutomationTriggerStatus, error) {
-	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, "uninstall")
+func UninstallAutomation(ctx context.Context, workspaceRoot, repo, executable string, invocationArguments []string) (AutomationTriggerStatus, error) {
+	return changeAutomationTrigger(ctx, workspaceRoot, repo, executable, invocationArguments, "uninstall")
 }
 
-func changeAutomationTrigger(ctx context.Context, workspaceRoot, repo, executable, action string) (AutomationTriggerStatus, error) {
+func changeAutomationTrigger(ctx context.Context, workspaceRoot, repo, executable string, invocationArguments []string, action string) (AutomationTriggerStatus, error) {
 	var status AutomationTriggerStatus
 	if ctx == nil {
 		return status, errors.New("context is required")
@@ -115,7 +116,7 @@ func changeAutomationTrigger(ctx context.Context, workspaceRoot, repo, executabl
 	if err != nil {
 		return status, err
 	}
-	spec, err := buildAutomationTriggerSpec(ctx, workspaceRoot, repo, executable, cfg)
+	spec, err := buildAutomationTriggerSpec(ctx, workspaceRoot, repo, executable, invocationArguments, cfg)
 	if err != nil {
 		return status, err
 	}
@@ -143,9 +144,17 @@ func changeAutomationTrigger(ctx context.Context, workspaceRoot, repo, executabl
 	}
 }
 
-func buildAutomationTriggerSpec(ctx context.Context, workspaceRoot, repo, executable string, cfg Config) (automationTriggerSpec, error) {
+func buildAutomationTriggerSpec(ctx context.Context, workspaceRoot, repo, executable string, invocationArguments []string, cfg Config) (automationTriggerSpec, error) {
 	if strings.TrimSpace(executable) == "" || !filepath.IsAbs(executable) {
 		return automationTriggerSpec{}, errors.New("automation executable must be an absolute path")
+	}
+	if len(invocationArguments) == 0 {
+		return automationTriggerSpec{}, errors.New("automation invocation arguments are required")
+	}
+	for _, argument := range invocationArguments {
+		if strings.TrimSpace(argument) == "" {
+			return automationTriggerSpec{}, errors.New("automation invocation arguments must not be blank")
+		}
 	}
 	branch, err := runGit(ctx, repo, "branch", "--show-current")
 	if err != nil {
@@ -173,7 +182,8 @@ func buildAutomationTriggerSpec(ctx context.Context, workspaceRoot, repo, execut
 	return automationTriggerSpec{
 		Kind: cfg.Automation.Trigger, Label: cfg.Automation.Label,
 		WorkspaceRoot: workspaceRoot, KnowledgeRepo: repo, Executable: executable,
-		WatchPaths: watchPaths, ThrottleSeconds: cfg.Automation.ThrottleSeconds,
+		InvocationArguments: append([]string(nil), invocationArguments...),
+		WatchPaths:          watchPaths, ThrottleSeconds: cfg.Automation.ThrottleSeconds,
 		RunAtLoad: cfg.Automation.RunAtLoad, Branch: branch,
 		PathEnvironment: pathEnvironment,
 	}, nil
@@ -358,7 +368,10 @@ func renderLaunchAgentPlist(spec automationTriggerSpec, logDirectory string) ([]
 	for _, item := range stringsByKey {
 		writePlistString(&output, item.key, item.value)
 	}
-	writePlistArray(&output, "ProgramArguments", []string{spec.Executable, "--root", spec.WorkspaceRoot, "knowledge", "automation", "run"})
+	programArguments := []string{spec.Executable}
+	programArguments = append(programArguments, spec.InvocationArguments...)
+	programArguments = append(programArguments, "run")
+	writePlistArray(&output, "ProgramArguments", programArguments)
 	writePlistArray(&output, "WatchPaths", spec.WatchPaths)
 	output.WriteString("<key>EnvironmentVariables</key><dict>\n")
 	writePlistString(&output, "PATH", spec.PathEnvironment)

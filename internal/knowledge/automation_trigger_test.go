@@ -31,7 +31,8 @@ func TestMacOSLaunchdTriggerInstallsCoreExecutableAsOneShot(t *testing.T) {
 	spec := automationTriggerSpec{
 		Kind: "macos-launchd", Label: "org.example.knowledge",
 		WorkspaceRoot: "/workspace/woon", KnowledgeRepo: "/workspace/woon/knowledge",
-		Executable: "/usr/local/bin/woon", WatchPaths: []string{"/workspace/woon/knowledge/drop"},
+		Executable: "/usr/local/bin/woon", InvocationArguments: []string{"--root", "/workspace/woon", "knowledge"},
+		WatchPaths:      []string{"/workspace/woon/knowledge/drop"},
 		ThrottleSeconds: 30, RunAtLoad: true, Branch: "feature/knowledge",
 		PathEnvironment: "/usr/local/bin:/usr/bin:/bin",
 	}
@@ -50,7 +51,6 @@ func TestMacOSLaunchdTriggerInstallsCoreExecutableAsOneShot(t *testing.T) {
 	for _, expected := range []string{
 		"<string>/usr/local/bin/woon</string>",
 		"<string>knowledge</string>",
-		"<string>automation</string>",
 		"<string>run</string>",
 		"<key>KeepAlive</key><false/>",
 		"<key>RunAtLoad</key><true/>",
@@ -64,6 +64,37 @@ func TestMacOSLaunchdTriggerInstallsCoreExecutableAsOneShot(t *testing.T) {
 	for _, expected := range []string{"launchctl bootout gui/501/org.example.knowledge", "launchctl enable gui/501/org.example.knowledge", "launchctl bootstrap gui/501", "launchctl print gui/501/org.example.knowledge"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("launchctl call is missing %q:\n%s", expected, joined)
+		}
+	}
+}
+
+func TestLaunchAgentUsesFullplateHelmCommandArguments(t *testing.T) {
+	spec := automationTriggerSpec{
+		Kind: "macos-launchd", Label: "org.example.fullplate.helm",
+		WorkspaceRoot: "/workspace/woon", KnowledgeRepo: "/workspace/woon/knowledge",
+		Executable: "/usr/local/bin/fullplate", InvocationArguments: []string{"--workspace", "/workspace/woon/knowledge", "helm"},
+		WatchPaths: []string{"/workspace/woon/knowledge/drop"}, ThrottleSeconds: 30,
+		PathEnvironment: "/usr/local/bin:/usr/bin:/bin",
+	}
+	data, err := renderLaunchAgentPlist(spec, "/tmp/logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plist := string(data)
+	for _, expected := range []string{
+		"<string>/usr/local/bin/fullplate</string>",
+		"<string>--workspace</string>",
+		"<string>/workspace/woon/knowledge</string>",
+		"<string>helm</string>",
+		"<string>run</string>",
+	} {
+		if !strings.Contains(plist, expected) {
+			t.Fatalf("generated plist is missing %q:\n%s", expected, plist)
+		}
+	}
+	for _, legacy := range []string{"<string>knowledge</string>", "<string>automation</string>"} {
+		if strings.Contains(plist, legacy) {
+			t.Fatalf("Fullplate trigger contains legacy argument %q:\n%s", legacy, plist)
 		}
 	}
 }

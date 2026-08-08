@@ -24,6 +24,8 @@ type options struct {
 	root string
 }
 
+const woonKnowledgeCommand = "woon knowledge"
+
 func Run(rawArgs []string, stdout, stderr io.Writer) error {
 	opts, args, err := parseGlobal(rawArgs)
 	if err != nil {
@@ -56,15 +58,15 @@ func Run(rawArgs []string, stdout, stderr io.Writer) error {
 	case "skills":
 		return runSkills(opts, args[1:], stdout)
 	case "knowledge":
-		return runKnowledge(opts, args[1:], stdout)
+		return runKnowledge(opts, args[1:], stdout, woonKnowledgeCommand, []string{"knowledge"})
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
 
-func runKnowledge(opts options, args []string, out io.Writer) error {
+func runKnowledge(opts options, args []string, out io.Writer, commandName string, commandArguments []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: woon knowledge <automation|scan|process|index|search|status|context|link|trace|retire>")
+		return fmt.Errorf("usage: %s <run|automation|scan|process|index|search|status|context|link|trace|retire>", commandName)
 	}
 	ws, reg, err := load(opts)
 	if err != nil {
@@ -74,12 +76,23 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	invocationArguments := []string{"--root", ws.Root}
+	invocationArguments = append(invocationArguments, commandArguments...)
+	return runKnowledgeRepository(ws.Root, repo, args, out, commandName, invocationArguments)
+}
+
+func runKnowledgeRepository(workspaceRoot, repo string, args []string, out io.Writer, commandName string, invocationArguments []string) error {
 	switch args[0] {
+	case "run":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: %s run", commandName)
+		}
+		return runKnowledgeOneShot(repo, out)
 	case "automation":
-		return runKnowledgeAutomation(ws.Root, repo, args[1:], out)
+		return runKnowledgeAutomation(workspaceRoot, repo, args[1:], out, commandName, invocationArguments)
 	case "scan":
 		if len(args) != 1 {
-			return fmt.Errorf("usage: woon knowledge scan")
+			return fmt.Errorf("usage: %s scan", commandName)
 		}
 		result, err := knowledge.Scan(repo)
 		if err != nil {
@@ -93,9 +106,9 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 			return err
 		}
 		if !cfg.Processing.AllowPersistentProcess {
-			return fmt.Errorf("knowledge watch is disabled: persistent processes are not allowed; use woon knowledge process")
+			return fmt.Errorf("knowledge watch is disabled: persistent processes are not allowed; use %s process", commandName)
 		}
-		interval, err := knowledgeWatchInterval(args, time.Duration(cfg.PollSeconds)*time.Second)
+		interval, err := knowledgeWatchInterval(commandName, args, time.Duration(cfg.PollSeconds)*time.Second)
 		if err != nil {
 			return err
 		}
@@ -108,7 +121,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		limit, err := knowledgeProcessLimit(args, cfg.Processing.BatchSize)
+		limit, err := knowledgeProcessLimit(commandName, args, cfg.Processing.BatchSize)
 		if err != nil {
 			return err
 		}
@@ -124,7 +137,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		return nil
 	case "index":
 		if len(args) != 1 {
-			return fmt.Errorf("usage: woon knowledge index")
+			return fmt.Errorf("usage: %s index", commandName)
 		}
 		registry, err := knowledge.NewDefaultAdapterRegistry(repo)
 		if err != nil {
@@ -137,7 +150,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		fmt.Fprintf(out, "status: ok\nindex: %s\nchunks: %d\nupserted: %d\ndeleted: %d\n", result.Index, result.Chunks, result.Upserted, result.Deleted)
 		return nil
 	case "search":
-		query, limit, err := parseKnowledgeSearch(args[1:])
+		query, limit, err := parseKnowledgeSearch(commandName, args[1:])
 		if err != nil {
 			return err
 		}
@@ -156,7 +169,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		return nil
 	case "status":
 		if len(args) != 1 {
-			return fmt.Errorf("usage: woon knowledge status")
+			return fmt.Errorf("usage: %s status", commandName)
 		}
 		status, err := knowledge.GetStatus(repo)
 		if err != nil {
@@ -166,7 +179,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		return nil
 	case "stage":
 		if len(args) != 1 {
-			return fmt.Errorf("usage: woon knowledge stage")
+			return fmt.Errorf("usage: %s stage", commandName)
 		}
 		result, err := knowledge.StageKnowledgeChanges(context.Background(), repo)
 		if err != nil {
@@ -182,7 +195,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		if len(args) == 3 && args[1] == "--scope" {
 			scope = args[2]
 		} else if len(args) != 1 {
-			return fmt.Errorf("usage: woon knowledge context [--scope <scope>]")
+			return fmt.Errorf("usage: %s context [--scope <scope>]", commandName)
 		}
 		claims, err := knowledge.Context(repo, scope)
 		if err != nil {
@@ -195,7 +208,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		fmt.Fprintln(out, string(data))
 		return nil
 	case "link":
-		artifactPath, kind, sourceIDs, err := parseKnowledgeLink(args[1:])
+		artifactPath, kind, sourceIDs, err := parseKnowledgeLink(commandName, args[1:])
 		if err != nil {
 			return err
 		}
@@ -207,7 +220,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		return nil
 	case "trace":
 		if len(args) != 2 {
-			return fmt.Errorf("usage: woon knowledge trace <source-id-or-prefix>")
+			return fmt.Errorf("usage: %s trace <source-id-or-prefix>", commandName)
 		}
 		source, artifacts, err := knowledge.Trace(repo, args[1])
 		if err != nil {
@@ -223,7 +236,7 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		return nil
 	case "retire":
 		if len(args) != 4 || args[2] != "--reason" {
-			return fmt.Errorf("usage: woon knowledge retire <source-id-or-prefix> --reason <text>")
+			return fmt.Errorf("usage: %s retire <source-id-or-prefix> --reason <text>", commandName)
 		}
 		source, artifacts, err := knowledge.Retire(repo, args[1], args[3])
 		if err != nil {
@@ -232,54 +245,36 @@ func runKnowledge(opts options, args []string, out io.Writer) error {
 		fmt.Fprintf(out, "status: ok\nsource: %s\nstate: %s\naffected_artifacts: %d\nhard_deleted: 0\n", source.ID, source.State, len(artifacts))
 		return nil
 	default:
-		return fmt.Errorf("unknown knowledge command %q", args[0])
+		return fmt.Errorf("unknown %s command %q", commandName, args[0])
 	}
 }
 
-func runKnowledgeAutomation(workspaceRoot, repo string, args []string, out io.Writer) error {
+func runKnowledgeAutomation(workspaceRoot, repo string, args []string, out io.Writer, commandName string, invocationArguments []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: woon knowledge automation <run|install|status|enable|disable|uninstall>")
+		return fmt.Errorf("usage: %s automation <run|install|status|enable|disable|uninstall>", commandName)
 	}
 	ctx := context.Background()
 	if args[0] == "run" {
-		result, err := knowledge.RunAutomation(ctx, repo)
-		if err != nil {
-			return err
-		}
-		if result.Skipped {
-			fmt.Fprintln(out, "status: skipped\nreason: already-running")
-			return nil
-		}
-		fmt.Fprintln(out, "status: ok")
-		for _, receipt := range result.ProcessReceipts {
-			fmt.Fprintf(out, "process: scanned=%d pending=%d created=%d review_items=%d\n", receipt.ScannedFiles, receipt.Pending, receipt.Created, receipt.ReviewItems)
-		}
-		fmt.Fprintf(out, "index: name=%s chunks=%d upserted=%d deleted=%d\n", result.Index.Index, result.Index.Chunks, result.Index.Upserted, result.Index.Deleted)
-		fmt.Fprintf(out, "knowledge: active=%d sanitized=%d missing=%d quarantined=%d retracted=%d artifacts=%d review_items=%d\n", result.Status.ActiveSources, result.Status.SanitizedSources, result.Status.MissingSources, result.Status.QuarantinedSources, result.Status.RetractedSources, result.Status.Artifacts, result.Status.ReviewItems)
-		fmt.Fprintf(out, "git: staged=%d lfs=%d blocked=%d committed=%t pushed=%t\n", result.Stage.StagedFiles, result.Stage.LFSFiles, len(result.Stage.BlockedLargeFiles), result.Committed, result.Pushed)
-		if result.CommitSHA != "" {
-			fmt.Fprintf(out, "commit: %s\n", result.CommitSHA)
-		}
-		return nil
+		return runKnowledgeOneShot(repo, out)
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("resolve woon executable: %w", err)
+		return fmt.Errorf("resolve command executable: %w", err)
 	}
 	var status knowledge.AutomationTriggerStatus
 	switch args[0] {
 	case "install":
-		status, err = knowledge.InstallAutomation(ctx, workspaceRoot, repo, executable)
+		status, err = knowledge.InstallAutomation(ctx, workspaceRoot, repo, executable, invocationArguments)
 	case "status":
-		status, err = knowledge.GetAutomationStatus(ctx, workspaceRoot, repo, executable)
+		status, err = knowledge.GetAutomationStatus(ctx, workspaceRoot, repo, executable, invocationArguments)
 	case "enable":
-		status, err = knowledge.EnableAutomation(ctx, workspaceRoot, repo, executable)
+		status, err = knowledge.EnableAutomation(ctx, workspaceRoot, repo, executable, invocationArguments)
 	case "disable":
-		status, err = knowledge.DisableAutomation(ctx, workspaceRoot, repo, executable)
+		status, err = knowledge.DisableAutomation(ctx, workspaceRoot, repo, executable, invocationArguments)
 	case "uninstall":
-		status, err = knowledge.UninstallAutomation(ctx, workspaceRoot, repo, executable)
+		status, err = knowledge.UninstallAutomation(ctx, workspaceRoot, repo, executable, invocationArguments)
 	default:
-		return fmt.Errorf("unknown knowledge automation command %q", args[0])
+		return fmt.Errorf("unknown %s automation command %q", commandName, args[0])
 	}
 	if err != nil {
 		return err
@@ -291,10 +286,32 @@ func runKnowledgeAutomation(workspaceRoot, repo string, args []string, out io.Wr
 	return nil
 }
 
-func parseKnowledgeSearch(args []string) (string, int, error) {
+func runKnowledgeOneShot(repo string, out io.Writer) error {
+	result, err := knowledge.RunAutomation(context.Background(), repo)
+	if err != nil {
+		return err
+	}
+	if result.Skipped {
+		fmt.Fprintln(out, "status: skipped\nreason: already-running")
+		return nil
+	}
+	fmt.Fprintln(out, "status: ok")
+	for _, receipt := range result.ProcessReceipts {
+		fmt.Fprintf(out, "process: scanned=%d pending=%d created=%d review_items=%d\n", receipt.ScannedFiles, receipt.Pending, receipt.Created, receipt.ReviewItems)
+	}
+	fmt.Fprintf(out, "index: name=%s chunks=%d upserted=%d deleted=%d\n", result.Index.Index, result.Index.Chunks, result.Index.Upserted, result.Index.Deleted)
+	fmt.Fprintf(out, "knowledge: active=%d sanitized=%d missing=%d quarantined=%d retracted=%d artifacts=%d review_items=%d\n", result.Status.ActiveSources, result.Status.SanitizedSources, result.Status.MissingSources, result.Status.QuarantinedSources, result.Status.RetractedSources, result.Status.Artifacts, result.Status.ReviewItems)
+	fmt.Fprintf(out, "git: staged=%d lfs=%d blocked=%d committed=%t pushed=%t\n", result.Stage.StagedFiles, result.Stage.LFSFiles, len(result.Stage.BlockedLargeFiles), result.Committed, result.Pushed)
+	if result.CommitSHA != "" {
+		fmt.Fprintf(out, "commit: %s\n", result.CommitSHA)
+	}
+	return nil
+}
+
+func parseKnowledgeSearch(commandName string, args []string) (string, int, error) {
 	limit := 5
 	if len(args) == 0 {
-		return "", 0, fmt.Errorf("usage: woon knowledge search <query> [--limit <count>]")
+		return "", 0, fmt.Errorf("usage: %s search <query> [--limit <count>]", commandName)
 	}
 	if len(args) >= 2 && args[len(args)-2] == "--limit" {
 		parsed, err := strconv.Atoi(args[len(args)-1])
@@ -311,7 +328,7 @@ func parseKnowledgeSearch(args []string) (string, int, error) {
 	return query, limit, nil
 }
 
-func knowledgeProcessLimit(args []string, defaultLimit int) (int, error) {
+func knowledgeProcessLimit(commandName string, args []string, defaultLimit int) (int, error) {
 	if len(args) == 1 {
 		if defaultLimit <= 0 {
 			return 0, fmt.Errorf("processing batch size must be positive")
@@ -319,7 +336,7 @@ func knowledgeProcessLimit(args []string, defaultLimit int) (int, error) {
 		return defaultLimit, nil
 	}
 	if len(args) != 3 || args[1] != "--limit" {
-		return 0, fmt.Errorf("usage: woon knowledge process [--limit <count>]")
+		return 0, fmt.Errorf("usage: %s process [--limit <count>]", commandName)
 	}
 	limit, err := strconv.Atoi(args[2])
 	if err != nil || limit <= 0 {
@@ -331,7 +348,7 @@ func knowledgeProcessLimit(args []string, defaultLimit int) (int, error) {
 	return limit, nil
 }
 
-func knowledgeWatchInterval(args []string, defaultInterval time.Duration) (time.Duration, error) {
+func knowledgeWatchInterval(commandName string, args []string, defaultInterval time.Duration) (time.Duration, error) {
 	interval := defaultInterval
 	if len(args) == 3 && args[1] == "--interval" {
 		parsed, err := time.ParseDuration(args[2])
@@ -340,7 +357,7 @@ func knowledgeWatchInterval(args []string, defaultInterval time.Duration) (time.
 		}
 		interval = parsed
 	} else if len(args) != 1 {
-		return 0, fmt.Errorf("usage: woon knowledge watch [--interval <duration>]")
+		return 0, fmt.Errorf("usage: %s watch [--interval <duration>]", commandName)
 	}
 	if interval <= 0 {
 		return 0, fmt.Errorf("watch interval must be positive")
@@ -348,9 +365,9 @@ func knowledgeWatchInterval(args []string, defaultInterval time.Duration) (time.
 	return interval, nil
 }
 
-func parseKnowledgeLink(args []string) (string, string, []string, error) {
+func parseKnowledgeLink(commandName string, args []string) (string, string, []string, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return "", "", nil, fmt.Errorf("usage: woon knowledge link <artifact-path> --kind <kind> --source <source-id> [--source <source-id>...]")
+		return "", "", nil, fmt.Errorf("usage: %s link <artifact-path> --kind <kind> --source <source-id> [--source <source-id>...]", commandName)
 	}
 	artifactPath := args[0]
 	kind := ""
@@ -737,6 +754,7 @@ Usage:
   woon skills install --profile <names> --target <codex|claude>
   woon skills doctor
   woon knowledge scan
+  woon knowledge run
   woon knowledge automation <run|install|status|enable|disable|uninstall>
   woon knowledge watch [--interval <duration>]
   woon knowledge status
