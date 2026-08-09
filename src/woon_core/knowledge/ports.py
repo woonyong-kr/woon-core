@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from typing import Protocol
 
 from woon_core.knowledge.domain import (
@@ -35,6 +36,12 @@ class CanonicalDocumentRepository(Protocol):
 
     def parse(self, relative_path: str, text: str) -> CanonicalDocument: ...
 
+    def exclusive(self) -> AbstractContextManager[None]: ...
+
+    def snapshot(self, canonical_id: str) -> bytes | None: ...
+
+    def restore_snapshot(self, canonical_id: str, snapshot: bytes | None) -> None: ...
+
 
 class KnowledgeSearchIndex(Protocol):
     """Index port; FTS and vector implementations can be exchanged."""
@@ -46,6 +53,8 @@ class KnowledgeSearchIndex(Protocol):
     def read_excerpt(self, document_id: str, chunk_id: str) -> KnowledgeExcerpt: ...
 
     def statistics(self) -> IndexStatistics: ...
+
+    def generation(self) -> str | None: ...
 
 
 class ReadOnlyKnowledgeCorpus(Protocol):

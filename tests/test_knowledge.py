@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,14 +17,26 @@ from woon_core.knowledge.adapters import (
     SQLiteFtsSearchIndex,
 )
 from woon_core.knowledge.config import KnowledgeSettings
-from woon_core.knowledge.domain import DocumentMetadata
+from woon_core.knowledge.domain import DocumentMetadata, IndexedDocument
 from woon_core.knowledge.factory import build_knowledge_service
 from woon_core.knowledge.service import KnowledgeService
 
 
+class FailOnceIndex(SQLiteFtsSearchIndex):
+    def __init__(self, database: Path) -> None:
+        super().__init__(database)
+        self.fail_next = False
+
+    def rebuild(self, documents: Iterable[IndexedDocument]) -> int:
+        if self.fail_next:
+            self.fail_next = False
+            raise RuntimeError("injected index failure")
+        return super().rebuild(documents)
+
+
 def make_service(tmp_path: Path) -> KnowledgeService:
     canonical_root = tmp_path / "wiki/canonical"
-    canonical_root.mkdir(parents=True)
+    canonical_root.mkdir(parents=True, exist_ok=True)
     return KnowledgeService(
         MarkdownDocumentRepository(tmp_path, canonical_root),
         SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
@@ -99,6 +114,125 @@ def test_archive_rejects_duplicate_normalized_title(tmp_path: Path) -> None:
 
     with pytest.raises(WoonError, match="same normalized title"):
         service.archive(duplicate, "## 설명\n\n두 번째 문서.")
+
+
+def test_concurrent_update_allows_exactly_one_revision(tmp_path: Path) -> None:
+    service_a = make_service(tmp_path)
+    service_b = make_service(tmp_path)
+    first = service_a.archive(metadata(), "## 설명\n\n첫 문서.")
+
+    def update(service: KnowledgeService, suffix: str) -> str:
+        result = service.archive(
+            metadata(),
+            f"## 설명\n\n{suffix} 수정.",
+            first.document.revision,
+        )
+        return result.document.revision
+
+    successes: list[str] = []
+    failures: list[Exception] = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(update, service_a, "A"), executor.submit(update, service_b, "B")]
+        for future in futures:
+            try:
+                successes.append(future.result())
+            except Exception as error:
+                failures.append(error)
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert "changed after it was read" in str(failures[0])
+
+
+def test_concurrent_duplicate_title_allows_exactly_one_document(tmp_path: Path) -> None:
+    service_a = make_service(tmp_path)
+    service_b = make_service(tmp_path)
+    first = metadata("backend/first")
+    second = DocumentMetadata(
+        canonical_id="architecture/second",
+        title="포트 와 어댑터",
+        domain="architecture",
+        summary="같은 개념의 두 번째 후보.",
+    )
+
+    def create(service: KnowledgeService, value: DocumentMetadata) -> str:
+        return service.archive(value, "## 설명\n\n동시 생성 후보.").document.metadata.canonical_id
+
+    successes: list[str] = []
+    failures: list[Exception] = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(create, service_a, first),
+            executor.submit(create, service_b, second),
+        ]
+        for future in futures:
+            try:
+                successes.append(future.result())
+            except Exception as error:
+                failures.append(error)
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert "same normalized title" in str(failures[0])
+
+
+def test_archive_rolls_back_canonical_file_when_reindex_fails(tmp_path: Path) -> None:
+    canonical_root = tmp_path / "wiki/canonical"
+    canonical_root.mkdir(parents=True)
+    index = FailOnceIndex(tmp_path / ".local/search.sqlite3")
+    service = KnowledgeService(
+        MarkdownDocumentRepository(tmp_path, canonical_root),
+        index,
+        GitKnowledgeHistory(tmp_path),
+    )
+    first = service.archive(metadata(), "## 설명\n\n첫 문서.")
+    index.fail_next = True
+
+    with pytest.raises(RuntimeError, match="injected index failure"):
+        service.archive(metadata(), "## 설명\n\n저장되면 안 되는 수정.", first.document.revision)
+
+    current = service.get(metadata().canonical_id)
+    assert current.revision == first.document.revision
+    assert "첫 문서" in current.body
+    assert service.search("첫 문서", 1)[0].canonical_id == metadata().canonical_id
+
+
+def test_archive_rejects_source_identity_owned_by_another_document(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    first = replace(metadata(), source_ids=("repo://vault/wiki/source.md",))
+    service.archive(first, "## 설명\n\n첫 문서.")
+    duplicate = DocumentMetadata(
+        canonical_id="architecture/duplicate-source",
+        title="다른 제목",
+        domain="architecture",
+        summary="같은 원천을 잘못 중복 소유한 문서.",
+        source_ids=("repo://vault/wiki/source.md",),
+    )
+
+    with pytest.raises(WoonError, match="already owned"):
+        service.archive(duplicate, "## 설명\n\n중복 원천.")
+
+
+def test_search_fails_closed_when_canonical_file_changes_outside_service(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    saved = service.archive(metadata(), "## 설명\n\n첫 문서.")
+    path = tmp_path / saved.document.relative_path
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("첫 문서", "외부 수정"), encoding="utf-8"
+    )
+
+    with pytest.raises(WoonError, match="index is stale"):
+        service.search("첫 문서", 1)
+
+
+def test_invalid_canonical_file_is_not_silently_omitted(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    invalid = tmp_path / "wiki/canonical/backend/invalid.md"
+    invalid.parent.mkdir(parents=True)
+    invalid.write_text("# frontmatter 없음\n", encoding="utf-8")
+
+    with pytest.raises(WoonError, match="invalid canonical document"):
+        service.reindex()
 
 
 def test_audit_reports_unresolved_learning_relation(tmp_path: Path) -> None:

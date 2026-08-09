@@ -30,7 +30,11 @@ def build_knowledge_service(
     )
     if settings.search_adapter != "sqlite-fts":
         raise WoonError(f"unsupported search adapter: {settings.search_adapter!r}")
-    repository = MarkdownDocumentRepository(settings.vault, settings.canonical_root)
+    repository = MarkdownDocumentRepository(
+        settings.vault,
+        settings.canonical_root,
+        settings.runtime_root / "mutation.lock",
+    )
     index = SQLiteFtsSearchIndex(settings.search_database, settings.max_chunk_chars)
     history = GitKnowledgeHistory(settings.vault)
     corpus = MarkdownKnowledgeCorpus(

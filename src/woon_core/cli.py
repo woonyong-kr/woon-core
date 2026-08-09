@@ -19,6 +19,12 @@ from woon_core.environment import verify as verify_environment
 from woon_core.environment.machine import runtime_target
 from woon_core.errors import WoonError
 from woon_core.knowledge.factory import build_knowledge_service
+from woon_core.knowledge.reconciliation import audit_reconciliation, reconcile_catalog
+from woon_core.knowledge.source_catalog import (
+    load_source_catalog,
+    plan_source_catalog,
+    write_source_catalog,
+)
 from woon_core.registry import Registry
 from woon_core.skills import ClaudeRoutingSelector, CodexRoutingSelector, evaluate_routing
 from woon_core.skills import doctor as doctor_skills
@@ -52,6 +58,11 @@ Usage:
   woon knowledge get <canonical-id> [--vault <path>]
   woon knowledge audit [--vault <path>]
   woon knowledge history <canonical-id> [--limit <1..100>] [--vault <path>]
+  woon knowledge source-plan --source <path> --source-name <name> [--protect <glob>]
+    [--vault <path>] [--output <relative-path>]
+  woon knowledge source-reconcile --source <path> --source-name <name>
+    [--vault <path>] [--limit <count>] [--model <model>] [--state <state>]
+  woon knowledge source-audit --source <path> --source-name <name> [--vault <path>]
   woon version
 """
 
@@ -279,6 +290,15 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if not arguments:
         raise WoonError("usage: woon knowledge <index|search|get|audit|history>")
     command, *raw_options = arguments
+    if command == "source-plan":
+        _run_knowledge_source_plan(raw_options, output)
+        return
+    if command == "source-reconcile":
+        _run_knowledge_source_reconcile(raw_options, output)
+        return
+    if command == "source-audit":
+        _run_knowledge_source_audit(raw_options, output)
+        return
     vault, options = _parse_knowledge_options(raw_options)
     settings, service = build_knowledge_service(vault)
     if command == "index":
@@ -339,6 +359,134 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         )
     else:
         raise WoonError(f"unknown knowledge command {command!r}")
+
+
+def _run_knowledge_source_plan(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    protected: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--source", "--source-name", "--vault", "--output", "--protect"}:
+            raise WoonError(f"unexpected source-plan argument: {option}")
+        if index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires a value")
+        value = arguments[index + 1]
+        if option == "--protect":
+            protected.append(value)
+        elif option in values:
+            raise WoonError(f"{option} may only be provided once")
+        else:
+            values[option] = value
+        index += 2
+    if "--source" not in values or "--source-name" not in values:
+        raise WoonError("source-plan requires --source and --source-name")
+    target = Path(values.get("--vault", ".")).expanduser().resolve()
+    relative_output = Path(
+        values.get("--output", f"catalog/sources/{values['--source-name']}.yaml")
+    )
+    if relative_output.is_absolute() or ".." in relative_output.parts:
+        raise WoonError("source-plan --output must be a safe relative path")
+    destination = (target / relative_output).resolve()
+    try:
+        destination.relative_to(target)
+    except ValueError as error:
+        raise WoonError("source-plan output escapes the target vault") from error
+    plan = plan_source_catalog(
+        Path(values["--source"]),
+        target,
+        values["--source-name"],
+        protected_patterns=tuple(protected),
+        previous_records=(
+            load_source_catalog(destination).records if destination.is_file() else ()
+        ),
+    )
+    write_source_catalog(plan, destination)
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "source": plan.source_name,
+                "records": len(plan.records),
+                "excluded": len(plan.excluded),
+                "summary": plan.summary,
+                "output": relative_output.as_posix(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_knowledge_source_reconcile(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {
+            "--source",
+            "--source-name",
+            "--vault",
+            "--limit",
+            "--model",
+            "--state",
+        }:
+            raise WoonError(f"unexpected source-reconcile argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--source" not in values or "--source-name" not in values:
+        raise WoonError("source-reconcile requires --source and --source-name")
+    try:
+        limit = int(values.get("--limit", "1"))
+    except ValueError as error:
+        raise WoonError("source-reconcile --limit must be an integer") from error
+    state = values.get("--state")
+    if state is not None and state not in {"merge-required", "semantic-match", "new"}:
+        raise WoonError("source-reconcile --state must be merge-required, semantic-match, or new")
+    target = Path(values.get("--vault", ".")).expanduser().resolve()
+    name = values["--source-name"]
+    summary = reconcile_catalog(
+        Path(values["--source"]),
+        target,
+        target / f"catalog/sources/{name}.yaml",
+        target / f"catalog/reconciliation/{name}.yaml",
+        limit=limit,
+        model=values.get("--model", "gpt-5.6-terra"),
+        states=(state,) if state is not None else ("merge-required", "semantic-match", "new"),
+    )
+    print(json.dumps(asdict(summary), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_knowledge_source_audit(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--source", "--source-name", "--vault"}:
+            raise WoonError(f"unexpected source-audit argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--source" not in values or "--source-name" not in values:
+        raise WoonError("source-audit requires --source and --source-name")
+    target = Path(values.get("--vault", ".")).expanduser().resolve()
+    name = values["--source-name"]
+    audit = audit_reconciliation(
+        Path(values["--source"]),
+        target,
+        target / f"catalog/sources/{name}.yaml",
+        target / f"catalog/reconciliation/{name}.yaml",
+    )
+    print(json.dumps(asdict(audit), ensure_ascii=False, indent=2), file=output)
+    if not audit.complete:
+        raise WoonError(
+            f"source reconciliation is incomplete: pending={audit.pending}, "
+            f"failed={audit.failed}, errors={len(audit.errors)}"
+        )
 
 
 def _parse_knowledge_options(arguments: list[str]) -> tuple[Path | None, list[str]]:

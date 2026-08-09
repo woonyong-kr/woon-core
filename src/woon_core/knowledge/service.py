@@ -17,6 +17,7 @@ from woon_core.knowledge.domain import (
     SaveResult,
     SearchResult,
 )
+from woon_core.knowledge.generation import knowledge_generation
 from woon_core.knowledge.ports import (
     CanonicalDocumentRepository,
     KnowledgeHistory,
@@ -58,31 +59,22 @@ class KnowledgeService:
     ) -> SaveResult:
         validated = self._validate_metadata(metadata)
         normalized_body = self._validate_body(body)
-        current = self._repository.get(validated.canonical_id)
-        if current is not None and expected_revision is None:
-            raise WoonError(
-                "canonical document already exists; read it first and provide expected_revision"
-            )
-        for document in self._repository.list_documents():
-            if document.metadata.canonical_id != validated.canonical_id and _fingerprint(
-                document.metadata.title
-            ) == _fingerprint(validated.title):
+        with self._repository.exclusive():
+            current = self._repository.get(validated.canonical_id)
+            if current is not None and expected_revision is None:
                 raise WoonError(
-                    "a canonical document with the same normalized title already exists: "
-                    f"{document.metadata.canonical_id}"
+                    "canonical document already exists; read it first and provide expected_revision"
                 )
-        result = self._repository.save(validated, normalized_body, expected_revision)
-        if result.changed:
-            self.reindex()
-        return result
+            self._ensure_unique_identity(validated)
+            snapshot = self._repository.snapshot(validated.canonical_id)
+            result = self._repository.save(validated, normalized_body, expected_revision)
+            if result.changed:
+                self._reindex_or_restore(validated.canonical_id, snapshot)
+            return result
 
     def reindex(self) -> int:
-        canonical = [_indexed(document) for document in self._repository.list_documents()]
-        documents = {document.document_id: document for document in canonical}
-        if self._corpus is not None:
-            for document in self._corpus.list_documents():
-                documents.setdefault(document.document_id, document)
-        return self._index.rebuild(documents.values())
+        with self._repository.exclusive():
+            return self._reindex_unlocked()
 
     def search(self, query: str, limit: int = 5) -> list[SearchResult]:
         normalized_query = " ".join(query.split())
@@ -90,6 +82,7 @@ class KnowledgeService:
             raise WoonError("search query must not be empty")
         if limit < 1 or limit > 20:
             raise WoonError("search limit must be between 1 and 20")
+        self._assert_index_current()
         return self._index.search(normalized_query, limit)
 
     def read_excerpt(self, document_id: str, chunk_id: str) -> KnowledgeExcerpt:
@@ -97,15 +90,36 @@ class KnowledgeService:
         normalized_chunk_id = chunk_id.strip()
         if not normalized_document_id or not normalized_chunk_id:
             raise WoonError("document_id and chunk_id must not be empty")
+        self._assert_index_current()
         return self._index.read_excerpt(normalized_document_id, normalized_chunk_id)
 
     def index_statistics(self) -> IndexStatistics:
+        self._assert_index_current()
         return self._index.statistics()
 
     def audit(self) -> list[str]:
         errors = self._repository.validate()
-        ids = {document.metadata.canonical_id for document in self._repository.list_documents()}
-        for document in self._repository.list_documents():
+        try:
+            documents = list(self._repository.list_documents())
+        except WoonError as error:
+            return sorted(set([*errors, str(error)]))
+        ids = {document.metadata.canonical_id for document in documents}
+        titles: dict[str, str] = {}
+        sources: dict[str, str] = {}
+        for document in documents:
+            title = _fingerprint(document.metadata.title)
+            if previous := titles.get(title):
+                errors.append(
+                    f"{document.metadata.canonical_id}: normalized title also used by {previous}"
+                )
+            titles[title] = document.metadata.canonical_id
+            for source_id in document.metadata.source_ids:
+                if previous := sources.get(source_id):
+                    errors.append(
+                        f"{document.metadata.canonical_id}: source_id {source_id!r} "
+                        f"also used by {previous}"
+                    )
+                sources[source_id] = document.metadata.canonical_id
             references = (
                 document.metadata.prerequisites
                 + document.metadata.next_concepts
@@ -137,12 +151,76 @@ class KnowledgeService:
         historical = self._repository.parse(current.relative_path, historical_text)
         if historical.metadata.canonical_id != current.metadata.canonical_id:
             raise WoonError("historical document identity does not match current identity")
-        result = self._repository.save(
-            replace(historical.metadata), historical.body, expected_revision
-        )
-        if result.changed:
-            self.reindex()
-        return result
+        with self._repository.exclusive():
+            latest = self._repository.get(canonical_id)
+            if latest is None:
+                raise WoonError(f"canonical document not found: {canonical_id}")
+            if latest.revision != expected_revision:
+                raise WoonError(
+                    "canonical document changed after it was read; reload and merge before writing"
+                )
+            self._ensure_unique_identity(historical.metadata)
+            snapshot = self._repository.snapshot(canonical_id)
+            result = self._repository.save(
+                replace(historical.metadata), historical.body, expected_revision
+            )
+            if result.changed:
+                self._reindex_or_restore(canonical_id, snapshot)
+            return result
+
+    def _ensure_unique_identity(self, metadata: DocumentMetadata) -> None:
+        candidate_sources = set(metadata.source_ids)
+        for document in self._repository.list_documents():
+            if document.metadata.canonical_id == metadata.canonical_id:
+                continue
+            if _fingerprint(document.metadata.title) == _fingerprint(metadata.title):
+                raise WoonError(
+                    "a canonical document with the same normalized title already exists: "
+                    f"{document.metadata.canonical_id}"
+                )
+            duplicate_sources = candidate_sources.intersection(document.metadata.source_ids)
+            if duplicate_sources:
+                source_id = sorted(duplicate_sources)[0]
+                raise WoonError(
+                    f"source_id {source_id!r} is already owned by canonical document "
+                    f"{document.metadata.canonical_id}"
+                )
+
+    def _index_documents(self) -> list[IndexedDocument]:
+        canonical = [_indexed(document) for document in self._repository.list_documents()]
+        documents = {document.document_id: document for document in canonical}
+        if self._corpus is not None:
+            for document in self._corpus.list_documents():
+                documents.setdefault(document.document_id, document)
+        return list(documents.values())
+
+    def _reindex_unlocked(self) -> int:
+        return self._index.rebuild(self._index_documents())
+
+    def _reindex_or_restore(self, canonical_id: str, snapshot: bytes | None) -> None:
+        try:
+            self._reindex_unlocked()
+        except Exception as index_error:
+            try:
+                self._repository.restore_snapshot(canonical_id, snapshot)
+                self._reindex_unlocked()
+            except Exception as recovery_error:
+                raise WoonError(
+                    "knowledge index failed and the previous canonical/index state could not "
+                    f"be fully restored: index={index_error}; recovery={recovery_error}"
+                ) from recovery_error
+            raise
+
+    def _assert_index_current(self) -> None:
+        actual = self._index.generation()
+        if actual is None:
+            raise WoonError(
+                "knowledge index does not exist or has no generation; call "
+                "woon_knowledge_reindex and retry"
+            )
+        expected = knowledge_generation(self._index_documents())
+        if actual != expected:
+            raise WoonError("knowledge index is stale; call woon_knowledge_reindex and retry")
 
     @staticmethod
     def _validate_id(canonical_id: str) -> str:

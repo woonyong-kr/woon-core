@@ -10,6 +10,7 @@
 - Codex·Claude·Copilot 지침의 결정적 생성과 drift 검사
 - 운영 파일의 개인 절대경로와 토큰 예산 검사
 - 한 개념당 Markdown 정본 한 편과 optimistic revision 검사
+- 외부 corpus의 content-addressed catalog, 파일별 병합, resume-safe ledger
 - 교체 가능한 document, search, history port와 local stdio MCP
 
 ## 설치
@@ -35,6 +36,9 @@ woon skills plan --profile core,python --target codex
 woon skills eval-routing --executor all --repeat 3
 woon knowledge index --vault /path/to/woon-knowledge
 woon knowledge search '검색어' --vault /path/to/woon-knowledge
+woon knowledge source-plan --source /path/to/source --source-name source --vault /path/to/woon-knowledge
+woon knowledge source-reconcile --source /path/to/source --source-name source --state merge-required --limit 1 --vault /path/to/woon-knowledge
+woon knowledge source-audit --source /path/to/source --source-name source --vault /path/to/woon-knowledge
 ```
 
 `skills eval-routing`은 같은 catalog·prompt·JSON schema로 Codex와 Claude를 각각 격리 실행합니다. 특정 실행기만 검사하려면 `--executor codex` 또는 `--executor claude`를 사용합니다. `installable: false`인 평가 전용 profile은 validate와 routing에는 사용할 수 있지만 target plan·install은 거부됩니다.

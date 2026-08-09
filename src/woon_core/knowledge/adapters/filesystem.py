@@ -5,22 +5,42 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from woon_core.errors import WoonError
+from woon_core.io import exclusive_file_lock
 from woon_core.knowledge.domain import CanonicalDocument, DocumentMetadata, SaveResult
 
 
 class MarkdownDocumentRepository:
     """Store each canonical ID as exactly one Markdown file under the wiki root."""
 
-    def __init__(self, vault: Path, canonical_root: Path) -> None:
-        self._vault = vault
-        self._root = canonical_root
+    def __init__(
+        self,
+        vault: Path,
+        canonical_root: Path,
+        lock_path: Path | None = None,
+    ) -> None:
+        self._vault = vault.expanduser().resolve()
+        self._root = canonical_root.expanduser().resolve()
+        try:
+            self._root.relative_to(self._vault)
+        except ValueError as error:
+            raise WoonError("canonical root escapes the configured vault") from error
+        self._lock_path = (
+            lock_path.expanduser().resolve()
+            if lock_path is not None
+            else self._vault / ".local/woon-knowledge/mutation.lock"
+        )
+        try:
+            self._lock_path.relative_to(self._vault)
+        except ValueError as error:
+            raise WoonError("knowledge mutation lock escapes the configured vault") from error
 
     def get(self, canonical_id: str) -> CanonicalDocument | None:
         path = self._path(canonical_id)
@@ -36,16 +56,40 @@ class MarkdownDocumentRepository:
             return []
         documents: list[CanonicalDocument] = []
         for path in sorted(self._root.rglob("*.md")):
+            relative = path.relative_to(self._vault).as_posix()
             try:
-                documents.append(
-                    self.parse(
-                        path.relative_to(self._vault).as_posix(),
-                        path.read_text(encoding="utf-8"),
-                    )
-                )
-            except WoonError:
-                continue
+                documents.append(self.parse(relative, path.read_text(encoding="utf-8")))
+            except (OSError, UnicodeError, WoonError) as error:
+                raise WoonError(f"invalid canonical document {relative}: {error}") from error
         return documents
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Serialize all canonical validation, writes, and index rebuilds."""
+
+        with exclusive_file_lock(self._lock_path):
+            yield
+
+    def snapshot(self, canonical_id: str) -> bytes | None:
+        path = self._path(canonical_id)
+        return path.read_bytes() if path.is_file() else None
+
+    def restore_snapshot(self, canonical_id: str, snapshot: bytes | None) -> None:
+        path = self._path(canonical_id)
+        if snapshot is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(snapshot)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def save(
         self,

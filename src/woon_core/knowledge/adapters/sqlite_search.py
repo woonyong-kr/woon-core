@@ -16,6 +16,7 @@ from woon_core.knowledge.domain import (
     KnowledgeExcerpt,
     SearchResult,
 )
+from woon_core.knowledge.generation import knowledge_generation
 
 MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 QUERY_STOPWORDS = {
@@ -46,9 +47,10 @@ class SQLiteFtsSearchIndex:
 
     def rebuild(self, documents: Iterable[IndexedDocument]) -> int:
         self._database.parent.mkdir(parents=True, exist_ok=True)
+        materialized = sorted(documents, key=lambda item: item.document_id)
         rows: list[tuple[object, ...]] = []
         document_count = 0
-        for document in documents:
+        for document in materialized:
             document_count += 1
             for chunk in _chunk_document(document, self._max_chunk_chars):
                 rows.append(
@@ -79,8 +81,22 @@ class SQLiteFtsSearchIndex:
                 """,
                 rows,
             )
+            connection.execute(
+                "INSERT OR REPLACE INTO knowledge_metadata(key, value) VALUES ('generation', ?)",
+                (knowledge_generation(materialized),),
+            )
             connection.commit()
         return document_count
+
+    def generation(self) -> str | None:
+        if not self._database.is_file():
+            return None
+        with sqlite3.connect(self._database) as connection:
+            _initialize(connection)
+            row = connection.execute(
+                "SELECT value FROM knowledge_metadata WHERE key = 'generation'"
+            ).fetchone()
+        return str(row[0]) if row is not None else None
 
     def search(self, query: str, limit: int) -> list[SearchResult]:
         if not self._database.is_file():
@@ -178,6 +194,14 @@ class SQLiteFtsSearchIndex:
 
 
 def _initialize(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_metadata(
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+        """
+    )
     try:
         connection.execute(
             """
