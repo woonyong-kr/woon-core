@@ -29,7 +29,7 @@ class KnowledgeSettings:
         config_path = resolved_vault / "config/canonical-knowledge.yaml"
         if not config_path.is_file():
             raise WoonError(f"knowledge configuration not found: {config_path}")
-        raw = yaml.safe_load(config_path.read_text()) or {}
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         if not isinstance(raw, dict):
             raise WoonError(f"knowledge configuration must be a mapping: {config_path}")
         version = raw.get("version")

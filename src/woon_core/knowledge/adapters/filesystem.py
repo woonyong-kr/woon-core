@@ -26,7 +26,7 @@ class MarkdownDocumentRepository:
         path = self._path(canonical_id)
         if not path.is_file():
             return None
-        return self.parse(str(path.relative_to(self._vault)), path.read_text())
+        return self.parse(str(path.relative_to(self._vault)), path.read_text(encoding="utf-8"))
 
     def list_documents(self) -> Iterable[CanonicalDocument]:
         if not self._root.is_dir():
@@ -34,7 +34,12 @@ class MarkdownDocumentRepository:
         documents: list[CanonicalDocument] = []
         for path in sorted(self._root.rglob("*.md")):
             try:
-                documents.append(self.parse(str(path.relative_to(self._vault)), path.read_text()))
+                documents.append(
+                    self.parse(
+                        str(path.relative_to(self._vault)),
+                        path.read_text(encoding="utf-8"),
+                    )
+                )
             except WoonError:
                 continue
         return documents
@@ -80,7 +85,7 @@ class MarkdownDocumentRepository:
         for path in sorted(self._root.rglob("*.md")):
             relative = str(path.relative_to(self._vault))
             try:
-                document = self.parse(relative, path.read_text())
+                document = self.parse(relative, path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, WoonError) as error:
                 errors.append(f"{relative}: {error}")
                 continue

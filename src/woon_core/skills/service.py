@@ -481,7 +481,7 @@ def _read_install_manifest(target: Path) -> dict[str, Any]:
     if not path.exists():
         return {"version": 1, "skills": {}}
     try:
-        manifest = json.loads(path.read_text())
+        manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WoonError(f"invalid install manifest in {target}: {error}") from error
     if (

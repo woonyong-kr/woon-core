@@ -349,7 +349,7 @@ def _list_extensions(command: str, args: tuple[str, ...]) -> set[str]:
 
 
 def _read_lines(path: Path) -> list[str]:
-    return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def _substitute_id(args: tuple[str, ...], identifier: str) -> list[str]:

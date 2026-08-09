@@ -33,7 +33,9 @@ def main() -> None:
     arguments = parser.parse_args()
     manifest = audit(arguments.source_root, arguments.material_directory)
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
-    arguments.output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    arguments.output.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     print(
         json.dumps(
             {

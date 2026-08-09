@@ -121,7 +121,9 @@ def _normalized_keymap(
 
 def _render_vscode_settings(repository_path: Path, model: EnvironmentModel) -> bytes:
     try:
-        settings = json.loads((repository_path / "adapters/vscode/defaults.json").read_text())
+        settings = json.loads(
+            (repository_path / "adapters/vscode/defaults.json").read_text(encoding="utf-8")
+        )
     except (OSError, json.JSONDecodeError) as error:
         raise WoonError(f"parse VS Code defaults: {error}") from error
     if not isinstance(settings, dict):
