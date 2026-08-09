@@ -39,6 +39,20 @@ woon knowledge search '검색어' --vault /path/to/woon-knowledge
 
 `skills eval-routing`은 같은 catalog·prompt·JSON schema로 Codex와 Claude를 각각 격리 실행합니다. 특정 실행기만 검사하려면 `--executor codex` 또는 `--executor claude`를 사용합니다. `installable: false`인 평가 전용 profile은 validate와 routing에는 사용할 수 있지만 target plan·install은 거부됩니다.
 
+스킬 설치 경로는 Woon 전용 직접 경로가 가장 우선합니다. 설정하지 않으면 각 executor의 표준 home 아래 `skills`를 사용하고, 표준 home도 없으면 사용자 기본 경로를 사용합니다.
+
+| target | 직접 경로 | executor home | 기본 경로 |
+|---|---|---|---|
+| Codex | `WOON_CODEX_SKILLS_HOME` | `CODEX_HOME/skills` | `~/.codex/skills` |
+| Claude | `WOON_CLAUDE_SKILLS_HOME` | `CLAUDE_CONFIG_DIR/skills` | `~/.claude/skills` |
+
+격리된 plan·install 검증은 임시 executor home을 명시합니다.
+
+```bash
+CODEX_HOME=/tmp/woon-codex-eval woon skills plan --profile learning --target codex
+CLAUDE_CONFIG_DIR=/tmp/woon-claude-eval woon skills plan --profile learning --target claude
+```
+
 root 후보가 서로 다르면 임의로 선택하지 않고 실패한다. `--root`, `WOON_HOME`, platform config, 상위 `.woon-root`, 기본 workspace 순서로 확인한다.
 
 교차 저장소 참조는 안정적인 URI를 사용한다.

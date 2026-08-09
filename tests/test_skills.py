@@ -70,6 +70,48 @@ def fixture(tmp_path: Path) -> tuple[Path, Registry]:
     return root, registry
 
 
+@pytest.mark.parametrize(
+    ("target", "direct_variable", "home_variable"),
+    [
+        ("codex", "WOON_CODEX_SKILLS_HOME", "CODEX_HOME"),
+        ("claude", "WOON_CLAUDE_SKILLS_HOME", "CLAUDE_CONFIG_DIR"),
+    ],
+)
+def test_executor_home_targets_isolated_skills_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    direct_variable: str,
+    home_variable: str,
+) -> None:
+    monkeypatch.delenv(direct_variable, raising=False)
+    executor_home = tmp_path / f"{target} home"
+    monkeypatch.setenv(home_variable, str(executor_home))
+
+    assert plan(*fixture(tmp_path), ["core"], target).target == (executor_home / "skills").resolve()
+
+
+@pytest.mark.parametrize(
+    ("target", "direct_variable", "home_variable"),
+    [
+        ("codex", "WOON_CODEX_SKILLS_HOME", "CODEX_HOME"),
+        ("claude", "WOON_CLAUDE_SKILLS_HOME", "CLAUDE_CONFIG_DIR"),
+    ],
+)
+def test_woon_direct_target_overrides_executor_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    direct_variable: str,
+    home_variable: str,
+) -> None:
+    direct = tmp_path / f"{target} direct skills"
+    monkeypatch.setenv(direct_variable, str(direct))
+    monkeypatch.setenv(home_variable, str(tmp_path / f"{target} ignored home"))
+
+    assert plan(*fixture(tmp_path), ["core"], target).target == direct.resolve()
+
+
 def test_install_detects_drift_and_repairs_missing_skill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

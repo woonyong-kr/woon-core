@@ -653,18 +653,29 @@ def _effects(value: object, reference: str) -> list[str]:
 
 def _target_path(target: str) -> Path:
     if target == "codex":
-        return (
-            Path(os.environ.get("WOON_CODEX_SKILLS_HOME", Path.home() / ".codex/skills"))
-            .expanduser()
-            .resolve()
+        return _configured_skills_path(
+            direct_variable="WOON_CODEX_SKILLS_HOME",
+            executor_home_variable="CODEX_HOME",
+            default_home=Path.home() / ".codex",
         )
     if target == "claude":
-        return (
-            Path(os.environ.get("WOON_CLAUDE_SKILLS_HOME", Path.home() / ".claude/skills"))
-            .expanduser()
-            .resolve()
+        return _configured_skills_path(
+            direct_variable="WOON_CLAUDE_SKILLS_HOME",
+            executor_home_variable="CLAUDE_CONFIG_DIR",
+            default_home=Path.home() / ".claude",
         )
     raise WoonError(f"unknown skills target {target!r}")
+
+
+def _configured_skills_path(
+    *, direct_variable: str, executor_home_variable: str, default_home: Path
+) -> Path:
+    direct = os.environ.get(direct_variable)
+    if direct:
+        return Path(direct).expanduser().resolve()
+    executor_home = os.environ.get(executor_home_variable)
+    home = Path(executor_home).expanduser() if executor_home else default_home
+    return (home / "skills").resolve()
 
 
 def _read_install_manifest(target: Path) -> dict[str, Any]:
