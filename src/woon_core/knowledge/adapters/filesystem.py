@@ -26,7 +26,10 @@ class MarkdownDocumentRepository:
         path = self._path(canonical_id)
         if not path.is_file():
             return None
-        return self.parse(str(path.relative_to(self._vault)), path.read_text(encoding="utf-8"))
+        return self.parse(
+            path.relative_to(self._vault).as_posix(),
+            path.read_text(encoding="utf-8"),
+        )
 
     def list_documents(self) -> Iterable[CanonicalDocument]:
         if not self._root.is_dir():
@@ -36,7 +39,7 @@ class MarkdownDocumentRepository:
             try:
                 documents.append(
                     self.parse(
-                        str(path.relative_to(self._vault)),
+                        path.relative_to(self._vault).as_posix(),
                         path.read_text(encoding="utf-8"),
                     )
                 )
@@ -73,7 +76,7 @@ class MarkdownDocumentRepository:
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
-        document = self.parse(str(path.relative_to(self._vault)), rendered)
+        document = self.parse(path.relative_to(self._vault).as_posix(), rendered)
         return SaveResult(document=document, created=current is None, changed=True)
 
     def validate(self) -> list[str]:
@@ -83,13 +86,13 @@ class MarkdownDocumentRepository:
         if not self._root.is_dir():
             return []
         for path in sorted(self._root.rglob("*.md")):
-            relative = str(path.relative_to(self._vault))
+            relative = path.relative_to(self._vault).as_posix()
             try:
                 document = self.parse(relative, path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, WoonError) as error:
                 errors.append(f"{relative}: {error}")
                 continue
-            expected_id = str(path.relative_to(self._root).with_suffix(""))
+            expected_id = path.relative_to(self._root).with_suffix("").as_posix()
             if document.metadata.canonical_id != expected_id:
                 errors.append(
                     f"{relative}: canonical_id {document.metadata.canonical_id!r} "
