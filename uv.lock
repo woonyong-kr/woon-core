@@ -1143,13 +1143,9 @@ version = "0.5.4"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
-    { name = "pyyaml" },
-]
-
-[package.optional-dependencies]
-reference-audit = [
     { name = "pdfplumber" },
     { name = "pypdf" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -1163,11 +1159,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=1.27,<2" },
-    { name = "pdfplumber", marker = "extra == 'reference-audit'", specifier = ">=0.11.9,<0.12" },
-    { name = "pypdf", marker = "extra == 'reference-audit'", specifier = ">=6.10,<7" },
+    { name = "pdfplumber", specifier = ">=0.11.9,<0.12" },
+    { name = "pypdf", specifier = ">=6.10,<7" },
     { name = "pyyaml", specifier = ">=6.0.2,<7" },
 ]
-provides-extras = ["reference-audit"]
 
 [package.metadata.requires-dev]
 dev = [
