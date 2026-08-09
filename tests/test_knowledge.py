@@ -15,6 +15,7 @@ from woon_core.knowledge.adapters import (
 )
 from woon_core.knowledge.config import KnowledgeSettings
 from woon_core.knowledge.domain import DocumentMetadata
+from woon_core.knowledge.factory import build_knowledge_service
 from woon_core.knowledge.service import KnowledgeService
 
 
@@ -35,6 +36,32 @@ def metadata(canonical_id: str = "backend/ports-and-adapters") -> DocumentMetada
         domain="backend",
         summary="도메인 로직과 외부 기술의 의존 방향을 분리하는 구조.",
         prerequisites=("backend/dependency-inversion",),
+    )
+
+
+def write_knowledge_config(
+    vault: Path,
+    document_guide: str,
+    diagram_guide: str,
+    canonical_root: str = "wiki/canonical",
+) -> None:
+    config = vault / "config"
+    config.mkdir(parents=True)
+    (config / "canonical-knowledge.yaml").write_text(
+        f"""
+version: 1
+runtime_root: .local/knowledge
+canonical:
+  root: {canonical_root}
+search:
+  adapter: sqlite-fts
+  database: .local/knowledge/search.sqlite3
+  roots: []
+style:
+  document_guide: {document_guide}
+  diagram_guide: {diagram_guide}
+""".lstrip(),
+        encoding="utf-8",
     )
 
 
@@ -84,25 +111,103 @@ def test_audit_reports_unresolved_learning_relation(tmp_path: Path) -> None:
 
 
 def test_settings_reject_path_escape(tmp_path: Path) -> None:
-    config = tmp_path / "config"
-    config.mkdir()
-    (config / "canonical-knowledge.yaml").write_text(
-        """
-version: 1
-runtime_root: .local/knowledge
-canonical:
-  root: ../outside
-search:
-  adapter: sqlite-fts
-  database: .local/knowledge/search.sqlite3
-style:
-  document_guide: ai-reference/document.md
-  diagram_guide: ai-reference/diagram.md
-""".lstrip()
+    write_knowledge_config(
+        tmp_path,
+        "ai-reference/document.md",
+        "ai-reference/diagram.md",
+        canonical_root="../outside",
     )
 
     with pytest.raises(WoonError, match="escapes the vault"):
         KnowledgeSettings.load(tmp_path)
+
+
+def test_settings_resolves_repository_style_guides(tmp_path: Path) -> None:
+    vault = tmp_path / "woon-knowledge"
+    write_knowledge_config(
+        vault,
+        "repo://skills/standards/learning-content-quality.md",
+        "repo://skills/skills/docs/diagram",
+    )
+    skills = tmp_path / "woon-skills"
+    (skills / "standards").mkdir(parents=True)
+    (skills / "standards/learning-content-quality.md").touch()
+    (skills / "skills/docs/diagram").mkdir(parents=True)
+
+    settings = KnowledgeSettings.load(
+        vault,
+        repository_resolver=lambda reference: skills / reference.removeprefix("repo://skills/"),
+    )
+
+    assert settings.style_guide == (skills / "standards/learning-content-quality.md").resolve()
+    assert settings.diagram_guide == (skills / "skills/docs/diagram").resolve()
+
+
+def test_settings_rejects_repository_guide_without_resolver(tmp_path: Path) -> None:
+    vault = tmp_path / "woon-knowledge"
+    write_knowledge_config(
+        vault,
+        "repo://skills/standards/learning-content-quality.md",
+        "repo://skills/skills/docs/diagram",
+    )
+
+    with pytest.raises(WoonError, match="requires a repository resolver"):
+        KnowledgeSettings.load(vault)
+
+
+def test_settings_rejects_missing_repository_style_guide(tmp_path: Path) -> None:
+    vault = tmp_path / "woon-knowledge"
+    write_knowledge_config(
+        vault,
+        "repo://skills/standards/missing.md",
+        "repo://skills/skills/docs/diagram",
+    )
+
+    with pytest.raises(WoonError, match="target does not exist"):
+        KnowledgeSettings.load(
+            vault,
+            repository_resolver=lambda reference: (
+                tmp_path / reference.removeprefix("repo://skills/")
+            ),
+        )
+
+
+def test_build_service_resolves_registered_style_guides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config-home"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".woon-root").write_text("version: 1\n", encoding="utf-8")
+    registry = tmp_path / "woon-core/registry"
+    registry.mkdir(parents=True)
+    (registry / "repositories.yaml").write_text(
+        """
+version: 1
+repositories:
+  skills:
+    remote: https://github.com/example/skills.git
+    directory: woon-skills
+  knowledge:
+    remote: https://github.com/example/knowledge.git
+    directory: woon-knowledge
+""".lstrip(),
+        encoding="utf-8",
+    )
+    skills = tmp_path / "woon-skills"
+    (skills / "standards").mkdir(parents=True)
+    (skills / "standards/learning-content-quality.md").touch()
+    (skills / "skills/docs/diagram").mkdir(parents=True)
+    vault = tmp_path / "woon-knowledge"
+    write_knowledge_config(
+        vault,
+        "repo://skills/standards/learning-content-quality.md",
+        "repo://skills/skills/docs/diagram",
+    )
+
+    settings, _ = build_knowledge_service(vault)
+
+    assert settings.style_guide == (skills / "standards/learning-content-quality.md").resolve()
+    assert settings.diagram_guide == (skills / "skills/docs/diagram").resolve()
 
 
 def test_git_history_can_restore_previous_document(tmp_path: Path) -> None:

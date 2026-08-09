@@ -24,7 +24,10 @@ def build_knowledge_service(
 ) -> tuple[KnowledgeSettings, KnowledgeService]:
     """Resolve configuration once and connect replaceable local adapters."""
 
-    settings = KnowledgeSettings.load(vault or resolve_knowledge_vault())
+    settings = KnowledgeSettings.load(
+        vault or resolve_knowledge_vault(),
+        repository_resolver=_resolve_repository_reference,
+    )
     if settings.search_adapter != "sqlite-fts":
         raise WoonError(f"unsupported search adapter: {settings.search_adapter!r}")
     repository = MarkdownDocumentRepository(settings.vault, settings.canonical_root)
@@ -47,3 +50,9 @@ def resolve_knowledge_vault() -> Path:
     workspace = discover("")
     registry = Registry.load(workspace.root)
     return registry.resolve(workspace.root, "knowledge")
+
+
+def _resolve_repository_reference(reference: str) -> Path:
+    workspace = discover("")
+    registry = Registry.load(workspace.root)
+    return registry.resolve(workspace.root, reference)

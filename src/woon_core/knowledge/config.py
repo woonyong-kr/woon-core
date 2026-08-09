@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,11 @@ class KnowledgeSettings:
     diagram_guide: Path
 
     @classmethod
-    def load(cls, vault: Path) -> KnowledgeSettings:
+    def load(
+        cls,
+        vault: Path,
+        repository_resolver: Callable[[str], Path] | None = None,
+    ) -> KnowledgeSettings:
         resolved_vault = vault.expanduser().resolve()
         config_path = resolved_vault / "config/canonical-knowledge.yaml"
         if not config_path.is_file():
@@ -82,11 +87,17 @@ class KnowledgeSettings:
             search_roots=search_roots,
             search_exclusions=search_exclusions,
             max_chunk_chars=max_chunk_chars,
-            style_guide=_inside(
-                resolved_vault, style.get("document_guide"), "style.document_guide"
+            style_guide=_guide(
+                resolved_vault,
+                style.get("document_guide"),
+                "style.document_guide",
+                repository_resolver,
             ),
-            diagram_guide=_inside(
-                resolved_vault, style.get("diagram_guide"), "style.diagram_guide"
+            diagram_guide=_guide(
+                resolved_vault,
+                style.get("diagram_guide"),
+                "style.diagram_guide",
+                repository_resolver,
             ),
         )
 
@@ -135,4 +146,21 @@ def _inside(vault: Path, raw: object, field: str) -> Path:
         resolved.relative_to(vault)
     except ValueError as error:
         raise WoonError(f"knowledge configuration {field!r} escapes the vault") from error
+    return resolved
+
+
+def _guide(
+    vault: Path,
+    raw: object,
+    field: str,
+    repository_resolver: Callable[[str], Path] | None,
+) -> Path:
+    if isinstance(raw, str) and raw.startswith("repo://"):
+        if repository_resolver is None:
+            raise WoonError(f"knowledge configuration {field!r} requires a repository resolver")
+        resolved = repository_resolver(raw).resolve()
+    else:
+        resolved = _inside(vault, raw, field)
+    if not resolved.exists():
+        raise WoonError(f"knowledge configuration {field!r} target does not exist: {resolved}")
     return resolved
