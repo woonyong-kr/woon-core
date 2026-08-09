@@ -9,6 +9,9 @@ from woon_core.knowledge.domain import (
     CanonicalDocument,
     DocumentMetadata,
     HistoryEntry,
+    IndexedDocument,
+    IndexStatistics,
+    KnowledgeExcerpt,
     SaveResult,
     SearchResult,
 )
@@ -36,9 +39,19 @@ class CanonicalDocumentRepository(Protocol):
 class KnowledgeSearchIndex(Protocol):
     """Index port; FTS and vector implementations can be exchanged."""
 
-    def rebuild(self, documents: Iterable[CanonicalDocument]) -> int: ...
+    def rebuild(self, documents: Iterable[IndexedDocument]) -> int: ...
 
     def search(self, query: str, limit: int) -> list[SearchResult]: ...
+
+    def read_excerpt(self, document_id: str, chunk_id: str) -> KnowledgeExcerpt: ...
+
+    def statistics(self) -> IndexStatistics: ...
+
+
+class ReadOnlyKnowledgeCorpus(Protocol):
+    """Read-only source documents that may be searched but never overwritten."""
+
+    def list_documents(self) -> Iterable[IndexedDocument]: ...
 
 
 class KnowledgeHistory(Protocol):

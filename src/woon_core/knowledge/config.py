@@ -12,6 +12,14 @@ from woon_core.errors import WoonError
 
 
 @dataclass(frozen=True, slots=True)
+class SearchRootSettings:
+    """One read-only directory included in the local knowledge index."""
+
+    path: Path
+    source_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class KnowledgeSettings:
     """Resolved paths and adapter selections for one private knowledge vault."""
 
@@ -20,6 +28,9 @@ class KnowledgeSettings:
     runtime_root: Path
     search_adapter: str
     search_database: Path
+    search_roots: tuple[SearchRootSettings, ...]
+    search_exclusions: tuple[str, ...]
+    max_chunk_chars: int
     style_guide: Path
     diagram_guide: Path
 
@@ -41,12 +52,36 @@ class KnowledgeSettings:
         canonical_root = _inside(resolved_vault, canonical.get("root"), "canonical.root")
         runtime_root = _inside(resolved_vault, raw.get("runtime_root"), "runtime_root")
         search_database = _inside(resolved_vault, search.get("database"), "search.database")
+        search_roots = tuple(
+            SearchRootSettings(
+                path=_inside(
+                    resolved_vault,
+                    _object_mapping(item, "search.roots entry").get("path"),
+                    "search.roots.path",
+                ),
+                source_type=_source_type(_object_mapping(item, "search.roots entry").get("type")),
+            )
+            for item in _list(search.get("roots", []), "search.roots")
+        )
+        search_exclusions = tuple(
+            _relative_pattern(value) for value in _list(search.get("exclude", []), "search.exclude")
+        )
+        max_chunk_chars = search.get("max_chunk_chars", 6000)
+        if not isinstance(max_chunk_chars, int) or isinstance(max_chunk_chars, bool):
+            raise WoonError("knowledge configuration search.max_chunk_chars must be an integer")
+        if max_chunk_chars < 1000 or max_chunk_chars > 20000:
+            raise WoonError(
+                "knowledge configuration search.max_chunk_chars must be between 1000 and 20000"
+            )
         return cls(
             vault=resolved_vault,
             canonical_root=canonical_root,
             runtime_root=runtime_root,
             search_adapter=str(search.get("adapter", "sqlite-fts")),
             search_database=search_database,
+            search_roots=search_roots,
+            search_exclusions=search_exclusions,
+            max_chunk_chars=max_chunk_chars,
             style_guide=_inside(
                 resolved_vault, style.get("document_guide"), "style.document_guide"
             ),
@@ -61,6 +96,32 @@ def _mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WoonError(f"knowledge configuration {key!r} must be a mapping")
     return value
+
+
+def _list(value: object, field: str) -> list[object]:
+    if not isinstance(value, list):
+        raise WoonError(f"knowledge configuration {field!r} must be a list")
+    return value
+
+
+def _object_mapping(value: object, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise WoonError(f"knowledge configuration {field!r} must be a mapping")
+    return value
+
+
+def _source_type(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise WoonError("knowledge configuration search.roots.type must be a non-empty string")
+    return value.strip()
+
+
+def _relative_pattern(value: object) -> str:
+    if not isinstance(value, str) or not value.strip() or Path(value).is_absolute():
+        raise WoonError("knowledge configuration search.exclude entries must be relative patterns")
+    if ".." in Path(value).parts:
+        raise WoonError("knowledge configuration search.exclude must not escape the vault")
+    return value.strip()
 
 
 def _inside(vault: Path, raw: object, field: str) -> Path:

@@ -7,8 +7,10 @@ from pathlib import Path
 
 from woon_core.errors import WoonError
 from woon_core.knowledge.adapters import (
+    CorpusRoot,
     GitKnowledgeHistory,
     MarkdownDocumentRepository,
+    MarkdownKnowledgeCorpus,
     SQLiteFtsSearchIndex,
 )
 from woon_core.knowledge.config import KnowledgeSettings
@@ -26,9 +28,14 @@ def build_knowledge_service(
     if settings.search_adapter != "sqlite-fts":
         raise WoonError(f"unsupported search adapter: {settings.search_adapter!r}")
     repository = MarkdownDocumentRepository(settings.vault, settings.canonical_root)
-    index = SQLiteFtsSearchIndex(settings.search_database)
+    index = SQLiteFtsSearchIndex(settings.search_database, settings.max_chunk_chars)
     history = GitKnowledgeHistory(settings.vault)
-    return settings, KnowledgeService(repository, index, history)
+    corpus = MarkdownKnowledgeCorpus(
+        settings.vault,
+        tuple(CorpusRoot(root.path, root.source_type) for root in settings.search_roots),
+        settings.search_exclusions,
+    )
+    return settings, KnowledgeService(repository, index, history, corpus)
 
 
 def resolve_knowledge_vault() -> Path:

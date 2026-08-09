@@ -31,16 +31,57 @@ class CanonicalDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class IndexedDocument:
+    """Read-only document representation used by replaceable search indexes."""
+
+    document_id: str
+    canonical_id: str | None
+    title: str
+    summary: str
+    body: str
+    relative_path: str
+    revision: str
+    source_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class SearchResult:
     """Search hit returned independently of a concrete index implementation."""
 
-    canonical_id: str
+    document_id: str
+    canonical_id: str | None
     title: str
     summary: str
     relative_path: str
     revision: str
+    source_type: str
+    chunk_id: str
+    heading: str
     score: float
     snippet: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeExcerpt:
+    """Bounded section returned after a search hit is selected."""
+
+    document_id: str
+    relative_path: str
+    revision: str
+    source_type: str
+    chunk_id: str
+    heading: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class IndexStatistics:
+    """Size measurements used to verify bounded retrieval behavior."""
+
+    documents: int
+    chunks: int
+    total_chars: int
+    max_chunk_chars: int
 
 
 @dataclass(frozen=True, slots=True)

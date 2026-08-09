@@ -11,6 +11,9 @@ from woon_core.knowledge.domain import (
     CanonicalDocument,
     DocumentMetadata,
     HistoryEntry,
+    IndexedDocument,
+    IndexStatistics,
+    KnowledgeExcerpt,
     SaveResult,
     SearchResult,
 )
@@ -18,6 +21,7 @@ from woon_core.knowledge.ports import (
     CanonicalDocumentRepository,
     KnowledgeHistory,
     KnowledgeSearchIndex,
+    ReadOnlyKnowledgeCorpus,
 )
 
 CANONICAL_ID = re.compile(r"^[a-z0-9][a-z0-9-]*(?:/[a-z0-9][a-z0-9-]*)+$")
@@ -32,10 +36,12 @@ class KnowledgeService:
         repository: CanonicalDocumentRepository,
         index: KnowledgeSearchIndex,
         history: KnowledgeHistory,
+        corpus: ReadOnlyKnowledgeCorpus | None = None,
     ) -> None:
         self._repository = repository
         self._index = index
         self._history = history
+        self._corpus = corpus
 
     def get(self, canonical_id: str) -> CanonicalDocument:
         normalized_id = self._validate_id(canonical_id)
@@ -71,7 +77,12 @@ class KnowledgeService:
         return result
 
     def reindex(self) -> int:
-        return self._index.rebuild(self._repository.list_documents())
+        canonical = [_indexed(document) for document in self._repository.list_documents()]
+        documents = {document.document_id: document for document in canonical}
+        if self._corpus is not None:
+            for document in self._corpus.list_documents():
+                documents.setdefault(document.document_id, document)
+        return self._index.rebuild(documents.values())
 
     def search(self, query: str, limit: int = 5) -> list[SearchResult]:
         normalized_query = " ".join(query.split())
@@ -80,6 +91,16 @@ class KnowledgeService:
         if limit < 1 or limit > 20:
             raise WoonError("search limit must be between 1 and 20")
         return self._index.search(normalized_query, limit)
+
+    def read_excerpt(self, document_id: str, chunk_id: str) -> KnowledgeExcerpt:
+        normalized_document_id = document_id.strip()
+        normalized_chunk_id = chunk_id.strip()
+        if not normalized_document_id or not normalized_chunk_id:
+            raise WoonError("document_id and chunk_id must not be empty")
+        return self._index.read_excerpt(normalized_document_id, normalized_chunk_id)
+
+    def index_statistics(self) -> IndexStatistics:
+        return self._index.statistics()
 
     def audit(self) -> list[str]:
         errors = self._repository.validate()
@@ -186,3 +207,16 @@ class KnowledgeService:
 def _fingerprint(value: str) -> str:
     normalized = re.sub(r"[^0-9a-z가-힣]", "", value.lower())
     return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def _indexed(document: CanonicalDocument) -> IndexedDocument:
+    return IndexedDocument(
+        document_id=document.relative_path,
+        canonical_id=document.metadata.canonical_id,
+        title=document.metadata.title,
+        summary=document.metadata.summary,
+        body=document.body,
+        relative_path=document.relative_path,
+        revision=document.revision,
+        source_type="canonical",
+    )

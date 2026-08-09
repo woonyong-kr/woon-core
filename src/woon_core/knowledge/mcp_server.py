@@ -14,6 +14,9 @@ mcp = FastMCP(
     "Woon Canonical Knowledge",
     instructions=(
         "Search and update the user's private canonical Markdown vault. "
+        "Search with two to four discriminative topic terms, excluding generic intent words. "
+        "When a map result points to a more specific concept, search that concept "
+        "and read its excerpt. "
         "Read an existing document before updating it and pass its revision. "
         "Never create blog, portfolio, or alternate output variants."
     ),
@@ -31,7 +34,7 @@ mcp = FastMCP(
     ),
 )
 def search_knowledge(query: str, limit: int = 5) -> dict[str, object]:
-    """Search canonical documents and return bounded snippets plus stable IDs and revisions."""
+    """Search all configured knowledge and return bounded section hits with stable IDs."""
 
     _, service = build_knowledge_service()
     results = service.search(query, limit)
@@ -61,6 +64,22 @@ def get_knowledge(canonical_id: str) -> dict[str, object]:
 
 
 @mcp.tool(
+    name="woon_knowledge_read_excerpt",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def read_knowledge_excerpt(document_id: str, chunk_id: str) -> dict[str, object]:
+    """Read only the matched Markdown section instead of loading an entire source document."""
+
+    _, service = build_knowledge_service()
+    return asdict(service.read_excerpt(document_id, chunk_id))
+
+
+@mcp.tool(
     name="woon_knowledge_archive_conversation",
     annotations=ToolAnnotations(
         readOnlyHint=False,
@@ -82,7 +101,14 @@ def archive_conversation(
     source_session_ids: list[str] | None = None,
     expected_revision: str | None = None,
 ) -> dict[str, object]:
-    """Create or optimistically replace one deduplicated canonical document from a conversation."""
+    """Create or optimistically replace one deduplicated canonical document.
+
+    canonical_id must be a lowercase ``domain/slug`` path and domain must match
+    its first segment. prerequisites, next_concepts, and related accept only
+    existing canonical IDs in the same form; use empty lists when no verified
+    canonical relationship exists. They do not accept display titles or search
+    keywords.
+    """
 
     _, service = build_knowledge_service()
     result = service.archive(
