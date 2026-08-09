@@ -53,6 +53,7 @@ Profiles: `core`
 - 루트에는 도구가 위치를 강제하는 파일과 README, LICENSE만 남긴다.
 - 일반 폴더와 저장소 이름은 kebab-case, Python package는 lower_snake_case, Java package는 소문자 계층형 이름을 사용한다.
 - `.github` 같은 도구 고정 경로와 `__pycache__` 같은 runtime 경로는 이름 검사에서 제외한다.
+- GitHub Pages의 `owner.github.io`처럼 외부 서비스가 강제하는 output 저장소 이름은 예외로 기록하고 내부 폴더만 검사한다.
 - 정본은 역할이 드러나는 domain 폴더에 두고 생성물은 생성 전용 경로에 둔다.
 - Python 실행 코드는 src 하위의 도메인 package, 테스트는 tests, 사람이 편집하는 입력은 역할별 폴더, 검증 규격은 schema, 지속 문서는 docs에 둔다.
 - 머신별 값은 Git에서 제외된 local overlay에만 두고 기본값으로 커밋하지 않는다.
