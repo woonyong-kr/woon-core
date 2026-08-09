@@ -12,7 +12,16 @@ FRONTMATTER = re.compile(r"\A---\n(?P<yaml>.*?)\n---\n", re.DOTALL)
 H1 = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 FENCE = re.compile(r"^```", re.MULTILINE)
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
+MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+REPOSITORY_PATH = re.compile(
+    r"(?:^|[\s`'\"])((?:scripts|docs|config|maps|wiki|ai-reference|assets)/"
+    r"[^\s`'\"),]+)",
+    re.MULTILINE,
+)
 ABSOLUTE_LOCAL = re.compile(r"(?:^|[\s`'(\[])((?:/Users|/home)/[^\s`)'\]]+)")
+INACTIVE_PARTS = frozenset(
+    {".git", ".local", ".legacy-backup", "_quarantine", "catalog", "exports"}
+)
 PROTECTED_FRONTMATTER = (
     "type",
     "canonical_id",
@@ -34,9 +43,8 @@ def validate_markdown_candidate(
     errors: list[str] = []
     candidate_frontmatter, candidate_body = _parse(candidate, "candidate", errors)
     target_frontmatter: dict[str, Any] = {}
-    target_body = ""
     if target is not None:
-        target_frontmatter, target_body = _parse(target, "target", errors)
+        target_frontmatter, _ = _parse(target, "target", errors)
         for field in PROTECTED_FRONTMATTER:
             if target_frontmatter.get(field) != candidate_frontmatter.get(field):
                 errors.append(f"protected frontmatter field changed: {field}")
@@ -51,11 +59,18 @@ def validate_markdown_candidate(
         errors.append("candidate contains an unclosed fenced code block")
     if ABSOLUTE_LOCAL.search(candidate):
         errors.append("candidate exposes an absolute local path")
+    if (
+        candidate_frontmatter.get("publish") is True
+        and candidate_frontmatter.get("access") == "public"
+        and "projects/writing" in candidate_body
+    ):
+        errors.append("public candidate exposes the private writing locator")
 
-    old_links = _links(target_body) if target is not None else set()
-    for link in sorted(_links(candidate_body).difference(old_links)):
+    for link in sorted(_links(candidate_body)):
         if not _wikilink_exists(root, relative_path, link):
-            errors.append(f"new wikilink does not resolve: {link}")
+            errors.append(f"wikilink does not resolve: {link}")
+    for reference in unresolved_local_references(root, relative_path, candidate_body):
+        errors.append(f"local file reference does not resolve: {reference}")
     return errors
 
 
@@ -63,6 +78,22 @@ def unresolved_wikilinks(root: Path, relative_path: str, text: str) -> list[str]
     """Return wikilinks that cannot resolve against an Obsidian Markdown tree."""
 
     return sorted(link for link in _links(text) if not _wikilink_exists(root, relative_path, link))
+
+
+def unresolved_local_references(root: Path, relative_path: str, text: str) -> list[str]:
+    """Return actionable repository paths and Markdown links that do not exist."""
+
+    references = set(REPOSITORY_PATH.findall(text))
+    for raw in MARKDOWN_LINK.findall(text):
+        value = raw.strip().split(maxsplit=1)[0].strip("<>")
+        if not value or value.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        references.add(value.split("#", 1)[0])
+    return sorted(
+        reference.rstrip(".:;")
+        for reference in references
+        if not _local_reference_exists(root, relative_path, reference.rstrip(".:;"))
+    )
 
 
 def _parse(
@@ -100,7 +131,31 @@ def _wikilink_exists(root: Path, current_path: str, link: str) -> bool:
         return False
     direct = root / f"{normalized}.md"
     relative = root / Path(current_path).parent / f"{normalized}.md"
-    if direct.is_file() or relative.is_file():
+    if _active_file(root, direct) or _active_file(root, relative):
         return True
     basename = Path(normalized).name
-    return any(path.stem == basename for path in root.rglob("*.md"))
+    return any(path.stem == basename and _active_file(root, path) for path in root.rglob("*.md"))
+
+
+def _local_reference_exists(root: Path, current_path: str, reference: str) -> bool:
+    if "<" in reference or ">" in reference or "*" in reference or reference.startswith("repo://"):
+        return True
+    raw = Path(reference)
+    candidates = [root / raw, root / Path(current_path).parent / raw]
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(root.resolve())
+        except ValueError:
+            continue
+        if _active_file(root, resolved) or resolved.is_dir():
+            return True
+    return False
+
+
+def _active_file(root: Path, path: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return path.is_file() and not any(part in INACTIVE_PARTS for part in relative.parts)

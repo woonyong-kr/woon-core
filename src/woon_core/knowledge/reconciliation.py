@@ -15,6 +15,7 @@ import yaml
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write, encode_json, exclusive_file_lock
 from woon_core.knowledge.document_quality import (
+    unresolved_local_references,
     unresolved_wikilinks,
     validate_markdown_candidate,
 )
@@ -249,7 +250,6 @@ def _checkpoint_static_records(
             existing is not None
             and existing.get("source_sha256") == source_hash
             and existing.get("target_after_sha256") == target_hash
-            and existing.get("action") == action
             and existing.get("status") == "verified"
         ):
             continue
@@ -321,6 +321,13 @@ def _reconcile_one(
     evidence = {
         "required_target_path": target_relative,
         "unresolved_source_wikilinks": unresolved_wikilinks(target_root, locator, source_text),
+        "unresolved_target_wikilinks": unresolved_wikilinks(
+            target_root, target_relative, target_text or ""
+        ),
+        "unresolved_source_paths": unresolved_local_references(target_root, locator, source_text),
+        "unresolved_target_paths": unresolved_local_references(
+            target_root, target_relative, target_text or ""
+        ),
     }
     previous: dict[str, Any] | None = None
     violations: list[str] = []
@@ -369,7 +376,7 @@ def _reconcile_one(
             "protected-frontmatter",
             "single-h1",
             "balanced-fences",
-            "added-wikilink-resolution",
+            "active-wikilink-resolution",
             "absolute-path-privacy",
         ]
         review_prompt = _review_prompt(
