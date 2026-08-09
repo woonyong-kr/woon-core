@@ -1,0 +1,396 @@
+"""Command-line entry point."""
+
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import asdict
+from pathlib import Path
+from typing import TextIO
+
+from woon_core import __version__
+from woon_core.context import Compiler
+from woon_core.environment import apply as apply_environment
+from woon_core.environment import check as check_environment
+from woon_core.environment import doctor as doctor_environment
+from woon_core.environment import generate as generate_environment
+from woon_core.environment import plan as plan_environment
+from woon_core.environment import verify as verify_environment
+from woon_core.environment.machine import runtime_target
+from woon_core.errors import WoonError
+from woon_core.knowledge.factory import build_knowledge_service
+from woon_core.registry import Registry
+from woon_core.skills import doctor as doctor_skills
+from woon_core.skills import install as install_skills
+from woon_core.skills import plan as plan_skills
+from woon_core.skills import validate as validate_skills
+from woon_core.workspace import Workspace, discover, initialize
+
+USAGE = """woon - deterministic control plane for the Woon development system
+
+Usage:
+  woon init --root <path>
+  woon doctor [--root <path>]
+  woon repo sync [--root <path>]
+  woon resolve <repo-id|repo://id/path> [--root <path>]
+  woon context generate [--all|repo-id...] [--root <path>]
+  woon context check [--all|repo-id...] [--root <path>]
+  woon env generate [--target <macos|windows|linux>]
+  woon env doctor [--all]
+  woon env plan [--all]
+  woon env apply [--all]
+  woon env verify [--all]
+  woon env check [--target <macos|windows|linux>]
+  woon skills plan --profile <names> [--target <codex|claude>]
+  woon skills validate --profile <names>
+  woon skills install --profile <names> --target <codex|claude>
+  woon skills doctor
+  woon knowledge index [--vault <path>]
+  woon knowledge search <query> [--limit <1..20>] [--vault <path>]
+  woon knowledge get <canonical-id> [--vault <path>]
+  woon knowledge audit [--vault <path>]
+  woon knowledge history <canonical-id> [--limit <1..100>] [--vault <path>]
+  woon version
+"""
+
+
+def main() -> None:
+    try:
+        run(sys.argv[1:], sys.stdout)
+    except WoonError as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+
+def run(raw_arguments: list[str], output: TextIO) -> None:
+    root, arguments = _parse_global(raw_arguments)
+    if not arguments:
+        output.write(USAGE)
+        return
+    command, *remaining = arguments
+    if command in {"version", "--version", "-v"}:
+        print(__version__, file=output)
+    elif command in {"help", "--help", "-h"}:
+        output.write(USAGE)
+    elif command == "init":
+        if remaining:
+            raise WoonError("init takes no positional arguments")
+        if not root:
+            raise WoonError("init requires --root")
+        initialized = initialize(root)
+        print(
+            f"status: initialized\nroot: {initialized}\n"
+            "next_actions:\n  - woon doctor\n  - woon repo sync",
+            file=output,
+        )
+    elif command == "doctor":
+        workspace = discover(root)
+        registry = Registry.load(workspace.root)
+        missing = registry.missing(workspace.root)
+        print(
+            f"status: ok\nroot: {workspace.root}\nsource: {workspace.source}\n"
+            f"repositories: {len(registry.repositories)}\nmissing: {len(missing)}",
+            file=output,
+        )
+        for identifier in missing:
+            print(f"  - {identifier}", file=output)
+    elif command == "resolve":
+        if len(remaining) != 1:
+            raise WoonError("resolve requires one repository ID or repo URI")
+        workspace, registry = _load(root)
+        print(registry.resolve(workspace.root, remaining[0]), file=output)
+    elif command == "repo":
+        if remaining != ["sync"]:
+            raise WoonError("usage: woon repo sync")
+        workspace, registry = _load(root)
+        result = registry.sync(workspace.root)
+        print(f"status: ok\ncloned: {result.cloned}\nexisting: {result.existing}", file=output)
+    elif command == "context":
+        _run_context(root, remaining, output)
+    elif command == "env":
+        _run_environment(root, remaining, output)
+    elif command == "skills":
+        _run_skills(root, remaining, output)
+    elif command == "knowledge":
+        _run_knowledge(remaining, output)
+    else:
+        raise WoonError(f"unknown command {command!r}")
+
+
+def _run_context(root: str, arguments: list[str], output: TextIO) -> None:
+    if not arguments:
+        raise WoonError("usage: woon context <generate|check> [--all|repo-id]")
+    command, *targets = arguments
+    all_repositories = not targets or targets == ["--all"]
+    identifiers = [] if all_repositories else targets
+    if any(identifier.startswith("-") for identifier in identifiers):
+        raise WoonError("unknown context option")
+    workspace, registry = _load(root)
+    compiler = Compiler(workspace.root, registry)
+    if command == "generate":
+        result = compiler.generate(all_repositories, identifiers)
+    elif command == "check":
+        result = compiler.check(all_repositories, identifiers)
+    else:
+        raise WoonError(f"unknown context command {command!r}")
+    suffix = "\npath_violations: 0" if command == "check" else ""
+    print(
+        f"status: ok\nrepositories: {result.repositories}\nartifacts: {result.artifacts}{suffix}",
+        file=output,
+    )
+
+
+def _run_environment(root: str, arguments: list[str], output: TextIO) -> None:
+    if not arguments:
+        raise WoonError("usage: woon env <doctor|plan|generate|check|apply|verify> [--all]")
+    command, *raw_options = arguments
+    target, options = _parse_target(raw_options)
+    if options == ["--all"]:
+        options = []
+    if options:
+        raise WoonError(f"unexpected env arguments: {' '.join(options)}")
+    workspace, registry = _load(root)
+    if command == "doctor":
+        statuses = doctor_environment(workspace.root, registry, target)
+        print(f"status: ok\ntarget: {target}\ninstallations: {len(statuses)}", file=output)
+        for status in statuses:
+            print(
+                f"  - name: {status.name}\n    path: {status.path}\n"
+                f"    running: {str(status.running).lower()}",
+                file=output,
+            )
+            if status.extension_command:
+                print(
+                    f"    extension_command: {status.extension_command}\n"
+                    f"    extension_command_available: "
+                    f"{str(status.command_available).lower()}",
+                    file=output,
+                )
+    elif command in {"generate", "check"}:
+        environment_operation = generate_environment if command == "generate" else check_environment
+        generation_result = environment_operation(workspace.root, registry, target)
+        print(
+            f"status: ok\ntarget: {target}\nartifacts: {generation_result.artifacts}\n"
+            f"hash: {generation_result.hash}",
+            file=output,
+        )
+    elif command == "plan":
+        plan_result = plan_environment(workspace.root, registry, target)
+        print(
+            f"status: ok\ntarget: {target}\noperations: {len(plan_result.operations)}\n"
+            f"changes: {plan_result.changes}",
+            file=output,
+        )
+        for planned_operation in plan_result.operations:
+            if planned_operation.changed:
+                print(
+                    f"  - {planned_operation.target}/{planned_operation.kind}: "
+                    f"{planned_operation.destination}",
+                    file=output,
+                )
+    elif command == "apply":
+        apply_result = apply_environment(workspace.root, registry, target)
+        print(
+            f"status: ok\ntarget: {target}\napplied: {apply_result.applied}",
+            file=output,
+        )
+        if apply_result.backup_path:
+            print(f"backup: {apply_result.backup_path}", file=output)
+    elif command == "verify":
+        verify_result = verify_environment(workspace.root, registry, target)
+        print(
+            f"status: ok\ntarget: {target}\nverified: {len(verify_result.operations)}",
+            file=output,
+        )
+    else:
+        raise WoonError(f"unknown env command {command!r}")
+
+
+def _run_skills(root: str, arguments: list[str], output: TextIO) -> None:
+    if not arguments:
+        raise WoonError("usage: woon skills <plan|validate|install|doctor>")
+    command, *options = arguments
+    if command == "doctor":
+        if options:
+            raise WoonError("skills doctor takes no options")
+        print("status: ok", file=output)
+        for name, path in doctor_skills().items():
+            print(f"{name}: {path}", file=output)
+        return
+    profiles, target = _parse_skills_options(options)
+    workspace, registry = _load(root)
+    if command == "validate":
+        result = validate_skills(workspace.root, registry, profiles)
+    elif command == "plan":
+        result = plan_skills(workspace.root, registry, profiles, target)
+    elif command == "install":
+        installed = install_skills(workspace.root, registry, profiles, target)
+        print(
+            f"status: ok\ntarget: {installed.target}\ninstalled: {installed.installed}\n"
+            f"updated: {installed.updated}\nretired: {installed.retired}\n"
+            f"unchanged: {installed.unchanged}",
+            file=output,
+        )
+        if installed.backup:
+            print(f"backup: {installed.backup}", file=output)
+        return
+    else:
+        raise WoonError(f"unknown skills command {command!r}")
+    print(
+        f"status: ok\nprofiles: {','.join(result.profiles)}\nskills: {len(result.items)}",
+        file=output,
+    )
+    if result.target:
+        print(f"target: {result.target}", file=output)
+    for item in result.items:
+        print(f"  - {item.name}: {item.action} [{','.join(item.effects)}]", file=output)
+
+
+def _run_knowledge(arguments: list[str], output: TextIO) -> None:
+    if not arguments:
+        raise WoonError("usage: woon knowledge <index|search|get|audit|history>")
+    command, *raw_options = arguments
+    vault, options = _parse_knowledge_options(raw_options)
+    settings, service = build_knowledge_service(vault)
+    if command == "index":
+        if options:
+            raise WoonError("knowledge index takes no positional arguments")
+        count = service.reindex()
+        print(
+            f"status: ok\nadapter: {settings.search_adapter}\nindexed: {count}",
+            file=output,
+        )
+    elif command == "search":
+        query = " ".join(options).strip()
+        if not query:
+            raise WoonError("knowledge search requires a query")
+        results = service.search(query, _knowledge_limit(raw_options, 5))
+        print(
+            json.dumps([asdict(item) for item in results], ensure_ascii=False, indent=2),
+            file=output,
+        )
+    elif command == "get":
+        if len(options) != 1:
+            raise WoonError("knowledge get requires one canonical ID")
+        document = service.get(options[0])
+        print(
+            json.dumps(
+                {
+                    "metadata": asdict(document.metadata),
+                    "body": document.body,
+                    "relative_path": document.relative_path,
+                    "revision": document.revision,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file=output,
+        )
+    elif command == "audit":
+        if options:
+            raise WoonError("knowledge audit takes no positional arguments")
+        errors = service.audit()
+        print(
+            json.dumps(
+                {"status": "ok" if not errors else "invalid", "errors": errors},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file=output,
+        )
+        if errors:
+            raise WoonError(f"knowledge audit found {len(errors)} errors")
+    elif command == "history":
+        if len(options) != 1:
+            raise WoonError("knowledge history requires one canonical ID")
+        entries = service.history(options[0], _knowledge_limit(raw_options, 20))
+        print(
+            json.dumps([asdict(item) for item in entries], ensure_ascii=False, indent=2),
+            file=output,
+        )
+    else:
+        raise WoonError(f"unknown knowledge command {command!r}")
+
+
+def _parse_knowledge_options(arguments: list[str]) -> tuple[Path | None, list[str]]:
+    vault: Path | None = None
+    remaining: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option in {"--vault", "--limit"}:
+            if index + 1 >= len(arguments):
+                raise WoonError(f"{option} requires a value")
+            if option == "--vault":
+                vault = Path(arguments[index + 1])
+            index += 2
+            continue
+        remaining.append(option)
+        index += 1
+    return vault, remaining
+
+
+def _knowledge_limit(arguments: list[str], default: int) -> int:
+    if "--limit" not in arguments:
+        return default
+    index = arguments.index("--limit")
+    try:
+        return int(arguments[index + 1])
+    except (IndexError, ValueError) as error:
+        raise WoonError("--limit requires an integer") from error
+
+
+def _parse_global(arguments: list[str]) -> tuple[str, list[str]]:
+    root = ""
+    clean: list[str] = []
+    index = 0
+    while index < len(arguments):
+        if arguments[index] != "--root":
+            clean.append(arguments[index])
+            index += 1
+            continue
+        if index + 1 >= len(arguments) or not arguments[index + 1].strip():
+            raise WoonError("--root requires a path")
+        root = arguments[index + 1]
+        index += 2
+    return root, clean
+
+
+def _parse_target(arguments: list[str]) -> tuple[str, list[str]]:
+    target = runtime_target()
+    remaining: list[str] = []
+    index = 0
+    while index < len(arguments):
+        if arguments[index] != "--target":
+            remaining.append(arguments[index])
+            index += 1
+            continue
+        if index + 1 >= len(arguments):
+            raise WoonError("--target requires macos, windows, or linux")
+        target = arguments[index + 1]
+        index += 2
+    if target not in {"macos", "windows", "linux"}:
+        raise WoonError(f"unsupported target {target!r}")
+    return target, remaining
+
+
+def _parse_skills_options(arguments: list[str]) -> tuple[list[str], str]:
+    profiles: list[str] = []
+    target = ""
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--profile", "--target"} or index + 1 >= len(arguments):
+            raise WoonError(f"unexpected skills argument {option!r}")
+        value = arguments[index + 1]
+        if option == "--profile":
+            profiles.extend(part.strip() for part in value.split(",") if part.strip())
+        else:
+            target = value
+        index += 2
+    return sorted(profiles), target
+
+
+def _load(root: str) -> tuple[Workspace, Registry]:
+    workspace = discover(root)
+    return workspace, Registry.load(workspace.root)

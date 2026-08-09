@@ -12,31 +12,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: astral-sh/setup-uv@v7
         with:
-          go-version-file: go.mod
-          cache: true
-      - name: Build
+          python-version: "3.12"
+      - name: Verify tag and build distributions
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tag must be v<major>.<minor>.<patch>: $GITHUB_REF_NAME" >&2
-            exit 1
-          fi
-          ldflags="-s -w -X github.com/woonyong-kr/woon-core/internal/buildinfo.Version=$version"
-          mkdir -p dist
-          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64; do
-            os="${target%/*}"
-            arch="${target#*/}"
-            suffix=""
-            if [[ "$os" == windows ]]; then suffix=".exe"; fi
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="$ldflags" -o "dist/woon_${os}_${arch}${suffix}" ./cmd/woon
-          done
-          test "$(./dist/woon_linux_amd64 version)" = "$version"
-          cd dist
-          shasum -a 256 woon_* > SHA256SUMS
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(uv run python -c 'from woon_core import __version__; print(__version__)')"
+          test "$tag_version" = "$package_version"
+          uv build
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*

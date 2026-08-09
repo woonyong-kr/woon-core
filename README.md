@@ -1,24 +1,26 @@
 # woon-core
 
-경로에 종속되지 않는 Woon 개발 시스템의 통합 제어 도구다. 저장소를 탐색하고 `repo://` 참조를 해석하며 공통 정책과 표준을 AI별 지침으로 컴파일한다.
+경로에 종속되지 않는 Python 기반 Woon 제어 도구다. 저장소와 AI 지침을 관리하고, private Markdown 정본을 MCP로 검색·갱신·복구한다.
 
 ## 주요 기능
 
 - 충돌을 허용하지 않는 workspace root 탐색
 - 저장소 ID와 `repo://` URI 기반 경로 해석
 - 공통 정책·코드·문서·폴더 표준의 단일 정본 관리
-- Codex·Claude·Cursor·Copilot 지침의 결정적 생성과 drift 검사
+- Codex·Claude·Copilot 지침의 결정적 생성과 drift 검사
 - 운영 파일의 개인 절대경로와 토큰 예산 검사
+- 한 개념당 Markdown 정본 한 편과 optimistic revision 검사
+- 교체 가능한 document, search, history port와 local stdio MCP
 
 ## 설치
 
-GitHub Releases에서 운영체제에 맞는 바이너리와 `SHA256SUMS`를 내려받는다. release binary는 Go가 없어도 실행된다.
-
-소스에서 설치하려면 다음 명령을 사용한다.
+Python 3.12 이상과 `uv`를 사용한다. GitHub 저장소에서 CLI와 MCP를 설치한다.
 
 ```bash
-go install github.com/woonyong-kr/woon-core/cmd/woon@latest
+uv tool install git+https://github.com/woonyong-kr/woon-core.git
 ```
+
+개발 checkout에서는 `uv sync --all-extras --dev`를 사용한다.
 
 ## 사용법
 
@@ -28,6 +30,8 @@ woon doctor
 woon repo sync
 woon context generate --all
 woon context check --all
+woon knowledge index --vault /path/to/woon-knowledge
+woon knowledge search '검색어' --vault /path/to/woon-knowledge
 ```
 
 root 후보가 서로 다르면 임의로 선택하지 않고 실패한다. `--root`, `WOON_HOME`, platform config, 상위 `.woon-root`, 기본 workspace 순서로 확인한다.
@@ -39,6 +43,22 @@ repo://knowledge/wiki/os/page-fault.md
 ```
 
 공유 registry에는 Git URL과 상대 폴더만 기록한다. 머신 경로는 local Woon config에만 저장하고 Git에 커밋하지 않는다.
+
+## 정본 지식 MCP
+
+`woon-knowledge-mcp`는 client가 stdio 연결을 유지하는 동안에만 실행되며 background daemon을 만들지 않는다. `WOON_KNOWLEDGE_ROOT`에 private vault를 지정한다.
+
+Codex에는 설치된 실행 파일과 vault를 한 번 등록한다.
+
+```bash
+codex mcp add woon-knowledge \
+  --env WOON_KNOWLEDGE_ROOT=/path/to/woon-knowledge \
+  -- "$(uv tool dir --bin)/woon-knowledge-mcp"
+```
+
+등록 뒤 새 Codex 작업에서 `woon_knowledge_search`를 사용할 수 있다. 설정 확인과 제거는 각각 `codex mcp get woon-knowledge`, `codex mcp remove woon-knowledge`다.
+
+제공 도구는 정본 검색·전체 읽기·대화 병합·index rebuild·audit·Git history·확인된 복구다. 같은 개념의 블로그, 기술문서, AI 전용 변형은 생성하지 않는다.
 
 IDE 설정은 같은 바이너리에서 관리한다.
 
@@ -56,7 +76,6 @@ woon env verify --all
 - `woon-skills`: skill catalog, profiles, locks, and conflicts
 - `woon-env`: deterministic IDE configuration
 - `woon-knowledge`: private durable knowledge
-- `fullplate-helm`: independent local-first knowledge application; `woon-core` runtime과 분리
 - `woon-site`: private publishing source
 - `woonyong-kr`: generated GitHub profile output
 - `woonyong-kr.github.io`: protected Pages output
@@ -65,4 +84,4 @@ woon env verify --all
 
 ## 기여
 
-변경 전 [저장소 표준](docs/repository-standard.md)을 확인한다. `go test ./...`, `go vet ./...`, `woon context check core`를 모두 통과해야 한다.
+변경 전 [저장소 표준](docs/repository-standard.md)을 확인한다. `uv run ruff check src tests`, `uv run mypy src`, `uv run pytest`, `woon context check core`를 모두 통과해야 한다.

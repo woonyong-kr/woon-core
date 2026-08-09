@@ -1,0 +1,5 @@
+id: core
+profiles: [core]
+required_policies: [safety, evidence, privacy, side-effects]
+required_standards: [repository-layout, documentation, code]
+required_checks: [unit, path-audit, deterministic-output]

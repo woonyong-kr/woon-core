@@ -15,9 +15,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: astral-sh/setup-uv@v7
         with:
-          go-version-file: go.mod
-          cache: true
-      - run: go test ./...
-      - run: go build ./cmd/woon
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --all-extras --dev
+      - run: uv run ruff check src tests
+      - run: uv run mypy src
+      - run: uv run pytest
+      - run: uv build
