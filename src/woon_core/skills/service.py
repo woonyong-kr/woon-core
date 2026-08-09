@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -68,18 +69,44 @@ class InstallResult:
     backup: Path | None
 
 
+RoutingSelector = Callable[
+    [tuple[CatalogSkill, ...], dict[str, str]],
+    dict[str, list[str]],
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingCaseResult:
+    identifier: str
+    primary: str
+    selections: tuple[tuple[str, ...], ...]
+    passed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingEvalResult:
+    repeat: int
+    primary_recall: float
+    forbidden_selections: int
+    agreement: float
+    passed: bool
+    cases: tuple[RoutingCaseResult, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class _Resolved:
     repository_path: Path
     profiles: tuple[str, ...]
     skills: tuple[CatalogSkill, ...]
+    non_installable_profiles: tuple[str, ...]
 
 
 def validate(root: Path, registry: Registry, profiles: list[str]) -> PlanResult:
     resolved = _load_resolved(root, registry, profiles)
     _validate_sources(resolved.repository_path)
     _validate_catalog(resolved.repository_path)
-    _validate_routing_evals(resolved.repository_path)
+    _validate_profile_evals(resolved.repository_path)
+    _load_routing_evals(resolved.repository_path)
     return PlanResult(
         profiles=resolved.profiles,
         items=tuple(
@@ -90,8 +117,99 @@ def validate(root: Path, registry: Registry, profiles: list[str]) -> PlanResult:
     )
 
 
+def evaluate_routing(
+    root: Path,
+    registry: Registry,
+    selector: RoutingSelector,
+    repeat: int | None = None,
+) -> RoutingEvalResult:
+    repository_path = registry.resolve(root, "skills")
+    config, cases = _load_routing_evals(repository_path)
+    configured_repeat = _positive_int(config.get("repeat"), "routing repeat")
+    run_count = repeat if repeat is not None else configured_repeat
+    if run_count <= 0:
+        raise WoonError("routing repeat must be positive")
+
+    thresholds = _mapping(config.get("thresholds"))
+    required_recall = _ratio(thresholds.get("primary_recall"), "primary_recall")
+    required_agreement = _ratio(thresholds.get("agreement"), "agreement")
+    allowed_forbidden = _non_negative_int(
+        thresholds.get("forbidden_selections"), "forbidden_selections"
+    )
+
+    grouped: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for case in cases:
+        grouped.setdefault(tuple(_strings(case.get("profiles"))), []).append(case)
+
+    selections_by_case: dict[str, list[tuple[str, ...]]] = {str(case["id"]): [] for case in cases}
+    for profiles, group in grouped.items():
+        resolved = _load_resolved(root, registry, list(profiles))
+        prompts = {str(case["id"]): str(case["prompt"]) for case in group}
+        available = {skill.name for skill in resolved.skills}
+        for _ in range(run_count):
+            selection_response = selector(resolved.skills, prompts)
+            if set(selection_response) != set(prompts):
+                raise WoonError("routing selector returned missing or unexpected case IDs")
+            for identifier, names in selection_response.items():
+                if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+                    raise WoonError(f"routing selector returned invalid result for {identifier!r}")
+                unknown = set(names).difference(available)
+                if unknown:
+                    raise WoonError(
+                        f"routing selector returned unavailable skill {min(unknown)!r} "
+                        f"for {identifier!r}"
+                    )
+                selections_by_case[identifier].append(tuple(sorted(set(names))))
+
+    primary_hits = 0
+    forbidden_count = 0
+    agreements = 0
+    results: list[RoutingCaseResult] = []
+    for case in cases:
+        identifier = str(case["id"])
+        primary = str(case["expect_primary"])
+        allowed = {primary, *_strings(case.get("allow_support", []))}
+        rejected = set(_strings(case.get("reject", [])))
+        max_selected = _positive_int(case.get("max_selected"), f"{identifier} max_selected")
+        runs = selections_by_case[identifier]
+        run_passes: list[bool] = []
+        for selected_names in runs:
+            selected_set = set(selected_names)
+            primary_hits += int(primary in selected_set)
+            forbidden_count += len(selected_set.intersection(rejected))
+            run_passes.append(
+                primary in selected_set
+                and not selected_set.intersection(rejected)
+                and selected_set.issubset(allowed)
+                and len(selected_set) <= max_selected
+            )
+        agrees = len(set(runs)) == 1
+        agreements += int(agrees)
+        results.append(RoutingCaseResult(identifier, primary, tuple(runs), all(run_passes)))
+
+    total_runs = len(cases) * run_count
+    primary_recall = primary_hits / total_runs
+    agreement = agreements / len(cases)
+    passed = (
+        primary_recall >= required_recall
+        and forbidden_count <= allowed_forbidden
+        and agreement >= required_agreement
+        and all(result.passed for result in results)
+    )
+    return RoutingEvalResult(
+        repeat=run_count,
+        primary_recall=primary_recall,
+        forbidden_selections=forbidden_count,
+        agreement=agreement,
+        passed=passed,
+        cases=tuple(results),
+    )
+
+
 def plan(root: Path, registry: Registry, profiles: list[str], target_name: str) -> PlanResult:
     resolved = _load_resolved(root, registry, profiles)
+    if target_name:
+        _require_installable(resolved)
     _validate_sources(resolved.repository_path)
     target = _target_path(target_name) if target_name else None
     manifest = _read_install_manifest(target) if target else {"skills": {}}
@@ -128,6 +246,7 @@ def install(root: Path, registry: Registry, profiles: list[str], target_name: st
     if not target_name:
         raise WoonError("skills install requires --target codex or claude")
     resolved = _load_resolved(root, registry, profiles)
+    _require_installable(resolved)
     installation_plan = plan(root, registry, profiles, target_name)
     assert installation_plan.target is not None
     target = installation_plan.target
@@ -214,9 +333,15 @@ def doctor() -> dict[str, Path]:
     return {target: _target_path(target) for target in ("codex", "claude")}
 
 
+def _require_installable(resolved: _Resolved) -> None:
+    if resolved.non_installable_profiles:
+        names = ", ".join(resolved.non_installable_profiles)
+        raise WoonError(f"profile is not installable: {names}")
+
+
 def _load_resolved(root: Path, registry: Registry, requested: list[str]) -> _Resolved:
     repository_path = registry.resolve(root, "skills")
-    profile_names, references, max_active = _resolve_profiles(
+    profile_names, references, max_active, non_installable_profiles = _resolve_profiles(
         repository_path, requested or ["core"]
     )
     if len(references) > max_active:
@@ -255,16 +380,22 @@ def _load_resolved(root: Path, registry: Registry, requested: list[str]) -> _Res
             )
         )
     _validate_conflicts(repository_path, references)
-    return _Resolved(repository_path, tuple(profile_names), tuple(catalog))
+    return _Resolved(
+        repository_path,
+        tuple(profile_names),
+        tuple(catalog),
+        tuple(non_installable_profiles),
+    )
 
 
 def _resolve_profiles(
     repository_path: Path, requested: list[str]
-) -> tuple[list[str], list[str], int]:
+) -> tuple[list[str], list[str], int, list[str]]:
     profiles: dict[str, dict[str, Any]] = {}
     visiting: set[str] = set()
     selected_profiles: set[str] = set()
     selected_skills: set[str] = set()
+    non_installable_profiles: set[str] = set()
     max_active = sys_max = 2**63 - 1
 
     def visit(name: str) -> None:
@@ -275,11 +406,13 @@ def _resolve_profiles(
             return
         item = profiles.setdefault(name, load_yaml(repository_path / "profiles" / f"{name}.yaml"))
         item_max = item.get("max_active")
+        installable = item.get("installable", True)
         if (
             item.get("version") != 1
             or item.get("name") != name
             or not isinstance(item_max, int)
             or item_max <= 0
+            or not isinstance(installable, bool)
         ):
             raise WoonError(f"invalid profile {name!r}")
         visiting.add(name)
@@ -287,6 +420,8 @@ def _resolve_profiles(
             visit(parent)
         visiting.remove(name)
         selected_profiles.add(name)
+        if not installable:
+            non_installable_profiles.add(name)
         max_active = min(max_active, item_max)
         selected_skills.update(_strings(item.get("skills", [])))
 
@@ -296,6 +431,7 @@ def _resolve_profiles(
         sorted(selected_profiles),
         sorted(selected_skills),
         max_active if max_active != sys_max else 0,
+        sorted(non_installable_profiles),
     )
 
 
@@ -345,11 +481,11 @@ def _validate_catalog(repository_path: Path) -> None:
     for _origin_name, raw_origin in sorted(_mapping(sources.get("origins")).items()):
         origin_path = str(_mapping(raw_origin)["path"])
         directory = repository_path / origin_path
-        for entry in sorted(directory.iterdir()):
-            if not entry.is_dir() or not (entry / "SKILL.md").exists():
-                continue
-            reference = f"{origin_path}/{entry.name}"
-            metadata = _read_frontmatter(entry / "SKILL.md")
+        for skill_file in sorted(directory.rglob("SKILL.md")):
+            entry = skill_file.parent
+            relative = entry.relative_to(directory).as_posix()
+            reference = f"{origin_path}/{relative}"
+            metadata = _read_frontmatter(skill_file)
             name = str(metadata["name"])
             if name != entry.name:
                 raise WoonError(f"{reference} frontmatter name {name!r} does not match directory")
@@ -384,27 +520,82 @@ def _validate_catalog(repository_path: Path) -> None:
             raise WoonError(f"effects reference missing skill {reference!r}")
 
 
-def _validate_routing_evals(repository_path: Path) -> None:
-    evaluations = load_yaml(repository_path / "evals/routing.yaml")
+def _validate_profile_evals(repository_path: Path) -> None:
+    evaluations = load_yaml(repository_path / "evals/profile-resolution.yaml")
     cases = _list(evaluations.get("cases"))
     if evaluations.get("version") != 1 or not cases:
-        raise WoonError("routing evals require version 1 and at least one case")
+        raise WoonError("profile evals require version 1 and at least one case")
     seen: set[str] = set()
     for raw_case in cases:
         case = _mapping(raw_case)
         identifier = str(case.get("id", ""))
         if not identifier or identifier in seen:
-            raise WoonError(f"routing eval case IDs must be non-empty and unique: {identifier!r}")
+            raise WoonError(f"profile eval case IDs must be non-empty and unique: {identifier!r}")
         seen.add(identifier)
         profiles = _strings(case.get("profiles"))
-        _, references, _ = _resolve_profiles(repository_path, profiles)
+        _, references, _, _ = _resolve_profiles(repository_path, profiles)
         selected = set(references)
         for expected in _strings(case.get("expect_skills")):
             if expected not in selected:
-                raise WoonError(f"routing eval {identifier!r} expected missing skill {expected!r}")
+                raise WoonError(f"profile eval {identifier!r} expected missing skill {expected!r}")
         for rejected in _strings(case.get("reject_skills", [])):
             if rejected in selected:
-                raise WoonError(f"routing eval {identifier!r} selected rejected skill {rejected!r}")
+                raise WoonError(f"profile eval {identifier!r} selected rejected skill {rejected!r}")
+
+
+def _load_routing_evals(repository_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    directory = repository_path / "evals/routing"
+    config = load_yaml(directory / "config.yaml")
+    if config.get("version") != 1:
+        raise WoonError("routing config requires version 1")
+    _positive_int(config.get("repeat"), "routing repeat")
+    thresholds = _mapping(config.get("thresholds"))
+    _ratio(thresholds.get("primary_recall"), "primary_recall")
+    _ratio(thresholds.get("agreement"), "agreement")
+    _non_negative_int(thresholds.get("forbidden_selections"), "forbidden_selections")
+
+    cases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in sorted(directory.glob("*.yaml")):
+        if path.name == "config.yaml":
+            continue
+        document = load_yaml(path)
+        raw_cases = _list(document.get("cases"))
+        if document.get("version") != 1 or not raw_cases:
+            raise WoonError(f"routing eval file {path.name!r} requires version 1 and cases")
+        for raw_case in raw_cases:
+            case = _mapping(raw_case)
+            identifier = str(case.get("id", ""))
+            prompt = str(case.get("prompt", "")).strip()
+            profiles = _strings(case.get("profiles"))
+            primary = str(case.get("expect_primary", ""))
+            if not identifier or identifier in seen or not prompt or not profiles or not primary:
+                raise WoonError(f"invalid or duplicate routing case {identifier!r}")
+            seen.add(identifier)
+            _, references, _, _ = _resolve_profiles(repository_path, profiles)
+            available: set[str] = set()
+            for reference in references:
+                metadata = _read_frontmatter(
+                    _safe_skill_path(repository_path, reference) / "SKILL.md"
+                )
+                available.add(str(metadata["name"]))
+            support = _strings(case.get("allow_support", []))
+            rejected = _strings(case.get("reject", []))
+            declared = {primary, *support, *rejected}
+            missing = declared.difference(available)
+            if missing:
+                raise WoonError(
+                    f"routing case {identifier!r} references unavailable skill {min(missing)!r}"
+                )
+            if set(rejected).intersection({primary, *support}):
+                raise WoonError(f"routing case {identifier!r} both allows and rejects a skill")
+            max_selected = _positive_int(case.get("max_selected"), f"{identifier} max_selected")
+            if max_selected > len({primary, *support}):
+                raise WoonError(f"routing case {identifier!r} max_selected exceeds allowed skills")
+            cases.append(case)
+    if not cases:
+        raise WoonError("routing evals require at least one case file")
+    return config, cases
 
 
 def _read_frontmatter(path: Path) -> dict[str, Any]:
@@ -518,3 +709,24 @@ def _strings(value: object) -> list[str]:
     if any(not isinstance(item, str) for item in items):
         raise WoonError("expected list of strings")
     return items
+
+
+def _positive_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise WoonError(f"{field} must be a positive integer")
+    return value
+
+
+def _non_negative_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise WoonError(f"{field} must be a non-negative integer")
+    return value
+
+
+def _ratio(value: object, field: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise WoonError(f"{field} must be a number from 0 to 1")
+    ratio = float(value)
+    if not 0 <= ratio <= 1:
+        raise WoonError(f"{field} must be a number from 0 to 1")
+    return ratio

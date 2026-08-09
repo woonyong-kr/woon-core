@@ -20,6 +20,7 @@ from woon_core.environment.machine import runtime_target
 from woon_core.errors import WoonError
 from woon_core.knowledge.factory import build_knowledge_service
 from woon_core.registry import Registry
+from woon_core.skills import ClaudeRoutingSelector, CodexRoutingSelector, evaluate_routing
 from woon_core.skills import doctor as doctor_skills
 from woon_core.skills import install as install_skills
 from woon_core.skills import plan as plan_skills
@@ -44,6 +45,7 @@ Usage:
   woon skills plan --profile <names> [--target <codex|claude>]
   woon skills validate --profile <names>
   woon skills install --profile <names> --target <codex|claude>
+  woon skills eval-routing [--executor <all|codex|claude>] [--repeat <count>]
   woon skills doctor
   woon knowledge index [--vault <path>]
   woon knowledge search <query> [--limit <1..20>] [--vault <path>]
@@ -208,7 +210,7 @@ def _run_environment(root: str, arguments: list[str], output: TextIO) -> None:
 
 def _run_skills(root: str, arguments: list[str], output: TextIO) -> None:
     if not arguments:
-        raise WoonError("usage: woon skills <plan|validate|install|doctor>")
+        raise WoonError("usage: woon skills <plan|validate|install|eval-routing|doctor>")
     command, *options = arguments
     if command == "doctor":
         if options:
@@ -216,6 +218,33 @@ def _run_skills(root: str, arguments: list[str], output: TextIO) -> None:
         print("status: ok", file=output)
         for name, path in doctor_skills().items():
             print(f"{name}: {path}", file=output)
+        return
+    if command == "eval-routing":
+        repeat, executor = _parse_routing_options(options)
+        workspace, registry = _load(root)
+        failed = False
+        for executor_name, selector in _routing_selectors(executor):
+            evaluation = evaluate_routing(
+                workspace.root,
+                registry,
+                selector,
+                repeat=repeat,
+            )
+            status = "ok" if evaluation.passed else "failed"
+            print(
+                f"executor: {executor_name}\nstatus: {status}\n"
+                f"cases: {len(evaluation.cases)}\nrepeat: {evaluation.repeat}\n"
+                f"primary_recall: {evaluation.primary_recall:.4f}\n"
+                f"forbidden_selections: {evaluation.forbidden_selections}\n"
+                f"agreement: {evaluation.agreement:.4f}",
+                file=output,
+            )
+            for case in evaluation.cases:
+                if not case.passed:
+                    print(f"  - failed: {case.identifier}", file=output)
+            failed = failed or not evaluation.passed
+        if failed:
+            raise WoonError("semantic routing evaluation did not meet thresholds")
         return
     profiles, target = _parse_skills_options(options)
     workspace, registry = _load(root)
@@ -389,6 +418,49 @@ def _parse_skills_options(arguments: list[str]) -> tuple[list[str], str]:
             target = value
         index += 2
     return sorted(profiles), target
+
+
+def _parse_routing_options(arguments: list[str]) -> tuple[int | None, str]:
+    repeat: int | None = None
+    executor = "all"
+    seen: set[str] = set()
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if (
+            option not in {"--repeat", "--executor"}
+            or option in seen
+            or index + 1 >= len(arguments)
+        ):
+            raise WoonError(
+                "usage: woon skills eval-routing [--executor <all|codex|claude>] [--repeat <count>]"
+            )
+        seen.add(option)
+        value = arguments[index + 1]
+        if option == "--executor":
+            if value not in {"all", "codex", "claude"}:
+                raise WoonError("--executor must be all, codex, or claude")
+            executor = value
+        else:
+            try:
+                repeat = int(value)
+            except ValueError as error:
+                raise WoonError("--repeat must be a positive integer") from error
+            if repeat <= 0:
+                raise WoonError("--repeat must be a positive integer")
+        index += 2
+    return repeat, executor
+
+
+def _routing_selectors(
+    executor: str,
+) -> list[tuple[str, CodexRoutingSelector | ClaudeRoutingSelector]]:
+    selectors: dict[str, CodexRoutingSelector | ClaudeRoutingSelector] = {
+        "codex": CodexRoutingSelector(),
+        "claude": ClaudeRoutingSelector(),
+    }
+    names = ("codex", "claude") if executor == "all" else (executor,)
+    return [(name, selectors[name]) for name in names]
 
 
 def _load(root: str) -> tuple[Workspace, Registry]:
