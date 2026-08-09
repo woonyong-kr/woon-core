@@ -17,10 +17,6 @@
       "path": "../woon-knowledge"
     },
     {
-      "name": "fullplate-helm",
-      "path": "../fullplate-helm"
-    },
-    {
       "name": "woon-site",
       "path": "../woon-site"
     },

@@ -16,10 +16,6 @@ repositories:
     remote: https://github.com/woonyong-kr/woon-knowledge.git
     directory: woon-knowledge
     role: knowledge
-  helm:
-    remote: https://github.com/woonyong-kr/fullplate-helm.git
-    directory: fullplate-helm
-    role: application
   site:
     remote: https://github.com/woonyong-kr/woon-site.git
     directory: woon-site

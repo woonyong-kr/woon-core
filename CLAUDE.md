@@ -6,7 +6,7 @@ Profiles: `core`
 
 ## 필수 작업 순서
 
-1. `woon.yaml`을 읽고 교차 저장소 링크는 `woon resolve`로 해석한다.
+1. `.woon/repository.yaml`을 읽고 교차 저장소 링크는 `woon resolve`로 해석한다.
 2. 관련 없는 변경을 보존하고 정본 파일만 편집한다.
 3. `required_checks`에 선언된 검증을 실행한다.
 4. 생성 파일을 직접 편집하지 않고 정본에서 다시 생성한다.
@@ -48,8 +48,13 @@ Profiles: `core`
 - interface, 폴더 구조, workflow 또는 소유 경계가 바뀌면 같은 변경에서 문서도 갱신한다.
 
 ## 표준: repository-layout
+- 저장소 공통 메타데이터는 루트가 아니라 `.woon/repository.yaml`에 둔다.
+- 제품 설정은 `config/`, CI는 `.github/workflows/`, 도메인 전용 YAML은 해당 모듈 안에 둔다.
+- 루트에는 도구가 위치를 강제하는 파일과 README, LICENSE만 남긴다.
+- 일반 폴더와 저장소 이름은 kebab-case, Python package는 lower_snake_case, Java package는 소문자 계층형 이름을 사용한다.
+- `.github` 같은 도구 고정 경로와 `__pycache__` 같은 runtime 경로는 이름 검사에서 제외한다.
 - 정본은 역할이 드러나는 domain 폴더에 두고 생성물은 생성 전용 경로에 둔다.
-- Go 실행 파일은 cmd와 internal, 사람이 편집하는 입력은 config, 검증 규격은 schema, 테스트는 언어 표준 위치, 지속 문서는 docs에 둔다.
+- Python 실행 코드는 src 하위의 도메인 package, 테스트는 tests, 사람이 편집하는 입력은 역할별 폴더, 검증 규격은 schema, 지속 문서는 docs에 둔다.
 - 머신별 값은 Git에서 제외된 local overlay에만 두고 기본값으로 커밋하지 않는다.
 - 대체된 파일은 참조, 실행 경로, fixture와 rollback 필요성을 확인한 뒤 제거한다.
 - 빈 placeholder 폴더와 필요가 입증되지 않은 추상화 계층을 만들지 않는다.
