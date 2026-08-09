@@ -35,7 +35,13 @@ class CodexRoutingSelector:
             schema_path = directory / "schema.json"
             output_path = directory / "result.json"
             schema_path.write_text(
-                json.dumps(routing_schema(sorted(prompts)), ensure_ascii=False),
+                json.dumps(
+                    routing_schema(
+                        sorted(prompts),
+                        sorted(skill.name for skill in catalog),
+                    ),
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
             command = [

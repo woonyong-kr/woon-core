@@ -30,7 +30,7 @@ Cases:
 """
 
 
-def routing_schema(identifiers: list[str]) -> dict[str, Any]:
+def routing_schema(identifiers: list[str], skill_names: list[str]) -> dict[str, Any]:
     """Return the strict JSON schema shared by Codex and Claude."""
     return {
         "type": "object",
@@ -45,7 +45,7 @@ def routing_schema(identifiers: list[str]) -> dict[str, Any]:
                         "id": {"type": "string", "enum": identifiers},
                         "skills": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "items": {"type": "string", "enum": skill_names},
                         },
                     },
                     "required": ["id", "skills"],

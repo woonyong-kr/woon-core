@@ -204,6 +204,9 @@ def test_codex_selector_uses_isolated_strict_json(
         schema_path = Path(command[command.index("--output-schema") + 1])
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         assert "uniqueItems" not in json.dumps(schema)
+        assert schema["properties"]["cases"]["items"]["properties"]["skills"]["items"]["enum"] == [
+            "demo"
+        ]
         output_path = Path(command[command.index("--output-last-message") + 1])
         output_path.write_text('{"cases":[{"id":"case","skills":["demo"]}]}', encoding="utf-8")
         assert "Available skills:\n- demo: Test skill." in str(options["input"])
@@ -227,6 +230,9 @@ def test_claude_selector_disables_customization_and_tools(
         assert "--strict-mcp-config" in command
         schema = json.loads(command[command.index("--json-schema") + 1])
         assert "uniqueItems" not in json.dumps(schema)
+        assert schema["properties"]["cases"]["items"]["properties"]["skills"]["items"]["enum"] == [
+            "demo"
+        ]
         assert "Available skills:\n- demo: Test skill." in str(options["input"])
         output = json.dumps(
             {

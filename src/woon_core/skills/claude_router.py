@@ -28,7 +28,13 @@ class ClaudeRoutingSelector:
     ) -> dict[str, list[str]]:
         if not catalog or not prompts:
             raise WoonError("routing evaluation requires catalog skills and prompts")
-        schema = json.dumps(routing_schema(sorted(prompts)), ensure_ascii=False)
+        schema = json.dumps(
+            routing_schema(
+                sorted(prompts),
+                sorted(skill.name for skill in catalog),
+            ),
+            ensure_ascii=False,
+        )
         command = [
             "claude",
             "--print",
