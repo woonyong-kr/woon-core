@@ -1,0 +1,202 @@
+"""Local stdio MCP server for canonical knowledge retrieval and updates."""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+
+from woon_core.knowledge.domain import DocumentMetadata
+from woon_core.knowledge.factory import build_knowledge_service
+
+mcp = FastMCP(
+    "Woon Canonical Knowledge",
+    instructions=(
+        "Search and update the user's private canonical Markdown vault. "
+        "Read an existing document before updating it and pass its revision. "
+        "Never create blog, portfolio, or alternate output variants."
+    ),
+    json_response=True,
+)
+
+
+@mcp.tool(
+    name="woon_knowledge_search",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def search_knowledge(query: str, limit: int = 5) -> dict[str, object]:
+    """Search canonical documents and return bounded snippets plus stable IDs and revisions."""
+
+    _, service = build_knowledge_service()
+    results = service.search(query, limit)
+    return {"query": query, "count": len(results), "results": [asdict(item) for item in results]}
+
+
+@mcp.tool(
+    name="woon_knowledge_get",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def get_knowledge(canonical_id: str) -> dict[str, object]:
+    """Read one complete canonical document before answering or preparing an update."""
+
+    _, service = build_knowledge_service()
+    document = service.get(canonical_id)
+    return {
+        "metadata": asdict(document.metadata),
+        "body": document.body,
+        "relative_path": document.relative_path,
+        "revision": document.revision,
+    }
+
+
+@mcp.tool(
+    name="woon_knowledge_archive_conversation",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def archive_conversation(
+    canonical_id: str,
+    title: str,
+    domain: str,
+    summary: str,
+    body: str,
+    difficulty: str = "foundation",
+    prerequisites: list[str] | None = None,
+    next_concepts: list[str] | None = None,
+    related: list[str] | None = None,
+    source_session_ids: list[str] | None = None,
+    expected_revision: str | None = None,
+) -> dict[str, object]:
+    """Create or optimistically replace one deduplicated canonical document from a conversation."""
+
+    _, service = build_knowledge_service()
+    result = service.archive(
+        DocumentMetadata(
+            canonical_id=canonical_id,
+            title=title,
+            domain=domain,
+            summary=summary,
+            difficulty=difficulty,
+            prerequisites=tuple(prerequisites or ()),
+            next_concepts=tuple(next_concepts or ()),
+            related=tuple(related or ()),
+            source_ids=tuple(source_session_ids or ()),
+        ),
+        body,
+        expected_revision,
+    )
+    return {
+        "created": result.created,
+        "changed": result.changed,
+        "canonical_id": result.document.metadata.canonical_id,
+        "relative_path": result.document.relative_path,
+        "revision": result.document.revision,
+    }
+
+
+@mcp.tool(
+    name="woon_knowledge_reindex",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def reindex_knowledge() -> dict[str, object]:
+    """Rebuild the replaceable local search index from canonical Markdown files, then exit."""
+
+    settings, service = build_knowledge_service()
+    count = service.reindex()
+    return {"indexed": count, "adapter": settings.search_adapter}
+
+
+@mcp.tool(
+    name="woon_knowledge_audit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def audit_knowledge() -> dict[str, object]:
+    """Check identity, duplicate titles, paths, and learning-relationship integrity."""
+
+    _, service = build_knowledge_service()
+    errors = service.audit()
+    return {"status": "ok" if not errors else "invalid", "errors": errors}
+
+
+@mcp.tool(
+    name="woon_knowledge_history",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def knowledge_history(canonical_id: str, limit: int = 20) -> dict[str, object]:
+    """List Git recovery points for one canonical document."""
+
+    _, service = build_knowledge_service()
+    entries = service.history(canonical_id, limit)
+    return {"canonical_id": canonical_id, "history": [asdict(item) for item in entries]}
+
+
+@mcp.tool(
+    name="woon_knowledge_restore",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+)
+def restore_knowledge(
+    canonical_id: str,
+    git_revision: str,
+    expected_revision: str,
+    confirmed: bool,
+) -> dict[str, object]:
+    """Restore one document from Git after explicit confirmation and revision checks."""
+
+    _, service = build_knowledge_service()
+    result = service.restore(
+        canonical_id,
+        git_revision,
+        expected_revision,
+        confirmed=confirmed,
+    )
+    return {
+        "changed": result.changed,
+        "canonical_id": result.document.metadata.canonical_id,
+        "relative_path": result.document.relative_path,
+        "revision": result.document.revision,
+    }
+
+
+def main() -> None:
+    """Run only while an MCP client owns the local stdio connection."""
+
+    mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
