@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import tempfile
@@ -58,28 +59,20 @@ def exclusive_file_lock(path: Path) -> Iterator[None]:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         with resolved.open("a+b") as stream:
             if os.name == "nt":
-                import msvcrt
+                msvcrt: Any = importlib.import_module("msvcrt")
 
                 stream.seek(0)
                 stream.write(b"\0")
                 stream.flush()
                 stream.seek(0)
-                msvcrt.locking(  # type: ignore[attr-defined]
-                    stream.fileno(),
-                    msvcrt.LK_LOCK,  # type: ignore[attr-defined]
-                    1,
-                )
+                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
                 try:
                     yield
                 finally:
                     stream.seek(0)
-                    msvcrt.locking(  # type: ignore[attr-defined]
-                        stream.fileno(),
-                        msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
-                        1,
-                    )
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
             else:
-                import fcntl
+                fcntl: Any = importlib.import_module("fcntl")
 
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
                 try:
