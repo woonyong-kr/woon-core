@@ -170,9 +170,42 @@ def _apply_source_decisions(
     raw_decisions = raw.get("records")
     if not isinstance(raw_decisions, list):
         raise WoonError(f"source decision manifest requires records: {path}")
+    raw_groups = raw.get("groups", [])
+    if not isinstance(raw_groups, list):
+        raise WoonError(f"source decision manifest groups must be a list: {path}")
+    expanded_decisions = list(raw_decisions)
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            raise WoonError(f"invalid source decision group: {path}")
+        action = group.get("action")
+        reason = group.get("reason")
+        target_mode = group.get("target")
+        items = group.get("records")
+        if (
+            action != "keep-target"
+            or not isinstance(reason, str)
+            or not reason.strip()
+            or target_mode != "same"
+            or not isinstance(items, list)
+        ):
+            raise WoonError(f"invalid compact source decision group: {group!r}")
+        for item in items:
+            if not isinstance(item, dict):
+                raise WoonError(f"invalid compact source decision item: {item!r}")
+            locator = item.get("locator")
+            digest = item.get("source_sha256")
+            expanded_decisions.append(
+                {
+                    "locator": locator,
+                    "source_sha256": digest,
+                    "action": action,
+                    "target": locator,
+                    "reason": reason,
+                }
+            )
     by_locator = {record["locator"]: record for record in prepared}
     seen: set[str] = set()
-    for item in raw_decisions:
+    for item in expanded_decisions:
         if not isinstance(item, dict):
             raise WoonError(f"invalid source decision record: {path}")
         locator = item.get("locator")
@@ -382,8 +415,6 @@ def _checkpoint_source_decisions(
         existing = _ledger_record(ledger, record["source_id"])
         if existing is not None and _is_current(existing, source_root, target_root):
             continue
-        if existing is not None and existing.get("status") == "failed":
-            continue
         target_relative = record.get("target")
         target_text: str | None = None
         target_hash: str | None = None
@@ -457,8 +488,8 @@ def _checkpoint_content_supersets(
         target_hash = _sha256(target_path)
         if source_hash != record["sha256"] or target_hash != record.get("target_sha256"):
             continue
-        source_text = source_path.read_text(encoding="utf-8")
-        target_text = target_path.read_text(encoding="utf-8")
+        source_text = _sanitize_absolute_local_paths(source_path.read_text(encoding="utf-8"))
+        target_text = _sanitize_absolute_local_paths(target_path.read_text(encoding="utf-8"))
         candidate, heading_repairs = _restore_truncated_headings(source_text, target_text)
         if not _normalized_content_subset(source_text, candidate):
             continue
@@ -525,7 +556,7 @@ def _normalized_content_subset(source: str, target: str) -> bool:
 
 
 def _normalized_content_lines(markdown: str) -> list[str]:
-    text = markdown.replace("\r\n", "\n")
+    text = _sanitize_absolute_local_paths(markdown).replace("\r\n", "\n")
     if text.startswith("---\n"):
         parts = text.split("---\n", 2)
         if len(parts) == 3:
@@ -561,6 +592,29 @@ def _normalized_content_lines(markdown: str) -> list[str]:
     return normalized
 
 
+def _sanitize_absolute_local_paths(markdown: str) -> str:
+    text = re.sub(
+        r"(?:/Users|/home)/[^/\s`)'\]]+/workspace/Krafton-Jungle/",
+        "",
+        markdown,
+    )
+    text = re.sub(
+        r"(?:/Users|/home)/[^/\s`)'\]]+/workspace/",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"(?:/Users|/home)/[^/\s`)'\]]+/Downloads/",
+        "<local-source>/",
+        text,
+    )
+    return re.sub(
+        r"(?:/Users|/home)/[^/\s`)'\]]+/",
+        "<local-home>/",
+        text,
+    )
+
+
 def _technical_heading_claims(markdown: str) -> set[str]:
     claims: set[str] = set()
     for _, _, heading in _structural_headings(markdown):
@@ -576,15 +630,20 @@ def _technical_heading_claims(markdown: str) -> set[str]:
 
 def _has_truncated_heading(source: str, target: str) -> bool:
     source_headings = [
-        _heading_fingerprint(raw) for _, level, raw in _structural_headings(source) if level > 1
+        (level, _heading_fingerprint(raw))
+        for _, level, raw in _structural_headings(source)
+        if level > 1
     ]
     target_headings = [
-        _heading_fingerprint(raw) for _, level, raw in _structural_headings(target) if level > 1
+        (level, _heading_fingerprint(raw))
+        for _, level, raw in _structural_headings(target)
+        if level > 1
     ]
-    for source_heading in source_headings:
-        for target_heading in target_headings:
+    for source_level, source_heading in source_headings:
+        for target_level, target_heading in target_headings:
             if (
-                len(source_heading) >= 24
+                source_level == target_level
+                and len(source_heading) >= 24
                 and source_heading.startswith(target_heading)
                 and len(target_heading) < len(source_heading) * 0.9
             ):
@@ -661,8 +720,10 @@ def _reconcile_one(
     source_path = _inside(source_root, locator, "source")
     target_relative = record.get("target") or locator
     target_path = _inside(target_root, target_relative, "target")
-    source_text = source_path.read_text(encoding="utf-8")
-    target_text = target_path.read_text(encoding="utf-8") if target_path.is_file() else None
+    source_raw = source_path.read_text(encoding="utf-8")
+    target_raw = target_path.read_text(encoding="utf-8") if target_path.is_file() else None
+    source_text = _sanitize_absolute_local_paths(source_raw)
+    target_text = _sanitize_absolute_local_paths(target_raw) if target_raw is not None else None
     source_hash = _sha256(source_path)
     if source_hash != record["sha256"]:
         raise WoonError(f"source changed after cataloging: {locator}; rebuild the catalog")
@@ -685,8 +746,8 @@ def _reconcile_one(
         "unresolved_target_paths": unresolved_local_references(
             target_root, target_relative, target_text or ""
         ),
-        "source_contains_absolute_local": contains_absolute_local(source_text),
-        "target_contains_absolute_local": contains_absolute_local(target_text or ""),
+        "source_contains_absolute_local": contains_absolute_local(source_raw),
+        "target_contains_absolute_local": contains_absolute_local(target_raw or ""),
         "repository_contract": (
             "vault는 read-only source corpus다. woon-knowledge는 private 지식 정본이며 "
             "Obsidian은 이를 직접 읽는다. 공개 Blog의 편집·build는 repo://site, 생성된 "

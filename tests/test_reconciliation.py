@@ -209,6 +209,31 @@ def test_restore_truncated_headings_preserves_level_and_body() -> None:
     assert candidate.endswith("본문은 동일하다.\n")
 
 
+def test_truncated_heading_detection_does_not_cross_heading_levels() -> None:
+    source = "# 문서\n\n### QEMU는 kernel write와 CR0.WP를 함께 본다\n"
+    target = "# 문서\n\n## QEMU\n\n### QEMU는 kernel write와 CR0.WP를 함께 본다\n"
+
+    assert not reconciliation._has_truncated_heading(source, target)
+
+
+def test_sanitize_absolute_local_paths_keeps_repository_relative_identity() -> None:
+    markdown = (
+        "`/Users/alice/workspace/Krafton-Jungle/SW_AI-W11-pintos/pintos/vm/vm.c`\n"
+        "`/home/bob/workspace/vault/wiki/os/page.md`\n"
+        "`/Users/alice/Downloads/course.pdf`\n"
+        "`/Users/alice/private/note.md`\n"
+    )
+
+    sanitized = reconciliation._sanitize_absolute_local_paths(markdown)
+
+    assert "`SW_AI-W11-pintos/pintos/vm/vm.c`" in sanitized
+    assert "`vault/wiki/os/page.md`" in sanitized
+    assert "`<local-source>/course.pdf`" in sanitized
+    assert "`<local-home>/private/note.md`" in sanitized
+    assert "/Users/" not in sanitized
+    assert "/home/" not in sanitized
+
+
 def test_review_prompt_sends_only_source_target_and_candidate_deltas() -> None:
     common = "\n".join(f"공통 설명 {index}" for index in range(100))
     source = f"# 예제\n\n{common}\n\nsource 고유 정보\n"
@@ -371,6 +396,26 @@ def test_source_decision_catalog_only_is_hash_bound_and_uses_zero_model_tokens(
         ),
         encoding="utf-8",
     )
+    ledger.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "source": "fixture",
+                "records": [
+                    {
+                        "source_id": "source/legacy",
+                        "locator": "legacy-prompt.md",
+                        "source_sha256": digest,
+                        "status": "failed",
+                        "target": None,
+                    }
+                ],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
 
     def unexpected_codex(*_: object, **__: object) -> reconciliation._ModelResult:
         raise AssertionError("catalog-only decision must not call Codex")
@@ -439,3 +484,73 @@ def test_source_decision_rejects_changed_source_hash(tmp_path: Path) -> None:
 
     with pytest.raises(Exception, match="stale source decision hash"):
         reconciliation.reconcile_catalog(source_root, target_root, catalog, ledger)
+
+
+def test_compact_same_target_decision_group_is_hash_bound(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    locator = "wiki/example.md"
+    source_path = source_root / locator
+    target_path = target_root / locator
+    source_path.parent.mkdir(parents=True)
+    target_path.parent.mkdir(parents=True)
+    source_path.write_text("# 이전 설명\n", encoding="utf-8")
+    target_path.write_text(
+        "---\ntype: Wiki\ntitle: 현행 설명\npublish: true\naccess: public\n"
+        "status: Evergreen\n---\n\n# 현행 설명\n\n## 내용\n\n검증된 설명이다.\n",
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    target_digest = hashlib.sha256(target_path.read_bytes()).hexdigest()
+    catalog = target_root / "catalog.yaml"
+    ledger = target_root / "ledger.yaml"
+    catalog.write_text(
+        json.dumps(
+            {
+                "source": "fixture",
+                "records": [
+                    {
+                        "source_id": "source/example",
+                        "locator": locator,
+                        "sha256": digest,
+                        "role": "document",
+                        "state": "merge-required",
+                        "target": locator,
+                        "target_sha256": target_digest,
+                    }
+                ],
+                "excluded": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    decisions = target_root / "catalog/source-decisions/fixture.yaml"
+    decisions.parent.mkdir(parents=True)
+    decisions.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "source": "fixture",
+                "records": [],
+                "groups": [
+                    {
+                        "action": "keep-target",
+                        "target": "same",
+                        "reason": "검토 후 현행 정본을 유지한다.",
+                        "records": [{"locator": locator, "source_sha256": digest}],
+                    }
+                ],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = reconciliation.reconcile_catalog(source_root, target_root, catalog, ledger, limit=0)
+    record = yaml.safe_load(ledger.read_text(encoding="utf-8"))["records"][0]
+
+    assert summary.input_tokens == 0
+    assert record["action"] == "keep-target"
+    assert record["target"] == locator
+    assert record["target_after_sha256"] == target_digest
