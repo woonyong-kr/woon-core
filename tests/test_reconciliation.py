@@ -59,6 +59,24 @@ def test_markdown_delta_only_adds_to_an_existing_h2() -> None:
     assert candidate.startswith("---\ntitle: 예제\n---")
 
 
+def test_markdown_delta_adds_to_an_existing_h3_before_its_next_peer() -> None:
+    target = (
+        "# 예제\n\n"
+        "## 상세 설명\n\n"
+        "### PintOS\n\n기존 A.\n\n"
+        "### QEMU\n\n기존 B.\n\n"
+        "## 검증\n\n확인.\n"
+    )
+
+    candidate, errors = reconciliation.apply_markdown_additions(
+        target,
+        [{"after_heading": "### PintOS", "markdown": "추가 경계."}],
+    )
+
+    assert errors == []
+    assert "### PintOS\n\n기존 A.\n\n추가 경계.\n\n### QEMU" in candidate
+
+
 def test_markdown_delta_rejects_unknown_heading_and_h1() -> None:
     target = "# 예제\n\n## 흐름\n\n기존.\n"
 

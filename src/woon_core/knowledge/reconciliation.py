@@ -760,11 +760,11 @@ def _addition_position(text: str, heading: str) -> int | None:
         return first_h2[0] if first_h2 is not None else len(text)
     expected = heading.strip()
     selected = [item for item in headings if item[2] == expected]
-    if len(selected) != 1 or selected[0][1] != 2:
+    if len(selected) != 1 or selected[0][1] not in {2, 3}:
         return None
     current = selected[0]
     following = next(
-        (item for item in headings if item[0] > current[0] and item[1] <= 2),
+        (item for item in headings if item[0] > current[0] and item[1] <= current[1]),
         None,
     )
     return following[0] if following is not None else len(text)
@@ -847,7 +847,9 @@ def _delta_prompt(
         "source": source,
         "target_path": target_path,
         "target": target,
-        "target_h2": [raw for _, level, raw in _structural_headings(target) if level == 2],
+        "target_headings": [
+            raw for _, level, raw in _structural_headings(target) if level in {2, 3}
+        ],
         "deterministic_evidence": evidence,
     }
     if previous is not None:
@@ -856,7 +858,7 @@ def _delta_prompt(
     return (
         "다음 Wiki 한 파일의 additive delta만 작성하라. target 전체를 다시 출력하거나 기존 "
         "문장을 수정·삭제·이동하지 않는다. source의 검증 가능한 고유 정보만 additions에 넣는다. "
-        "after_heading은 target_h2의 정확한 H2 전체 문자열 또는 도입부 끝을 뜻하는 "
+        "after_heading은 target_headings의 정확한 H2/H3 전체 문자열 또는 도입부 끝을 뜻하는 "
         "__before_first_h2__만 허용한다. markdown은 그 section 끝에 한 번 삽입할 완성 조각이며 "
         "frontmatter와 H1을 포함하지 않는다. 고유 정보가 이미 target에 있으면 keep-target과 빈 "
         "additions를 반환한다. 같은 정의·예제·링크를 표현만 바꾸어 추가하지 않는다. "
