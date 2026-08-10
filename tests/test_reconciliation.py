@@ -100,6 +100,21 @@ def test_markdown_delta_ignores_heading_like_code_comments() -> None:
     assert "```\n\n### 경계\n\n추가.\n\n## 검증" in candidate
 
 
+def test_delta_review_does_not_repeat_the_full_candidate() -> None:
+    prompt = reconciliation._delta_review_prompt(
+        "기준",
+        "SOURCE_UNIQUE_TOKEN",
+        "TARGET_UNIQUE_TOKEN",
+        {"additions": [{"after_heading": "## 흐름", "markdown": "ADDITION_UNIQUE_TOKEN"}]},
+        {},
+    )
+
+    assert prompt.count("SOURCE_UNIQUE_TOKEN") == 1
+    assert prompt.count("TARGET_UNIQUE_TOKEN") == 1
+    assert prompt.count("ADDITION_UNIQUE_TOKEN") == 1
+    assert '"target_before"' in prompt
+
+
 def test_existing_wiki_reconciliation_applies_only_reviewed_delta(
     tmp_path: Path, monkeypatch: object
 ) -> None:
