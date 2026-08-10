@@ -553,3 +553,29 @@ Demand Paging은 페이지 폴트가 발생한 시점에 필요한 페이지를 
     assert result.document_id == "maps/virtual-memory.md"
     assert result.heading == "학습 흐름"
     assert "상위 링크" not in excerpt.text
+
+
+def test_search_falls_back_to_any_discriminative_term(tmp_path: Path) -> None:
+    canonical_root = tmp_path / "wiki/canonical"
+    canonical_root.mkdir(parents=True)
+    source = tmp_path / "wiki/backend/transaction.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "# 트랜잭션 경계\n\n멱등성 키로 중복 요청을 막는다.\n",
+        encoding="utf-8",
+    )
+    service = KnowledgeService(
+        MarkdownDocumentRepository(tmp_path, canonical_root),
+        SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
+        GitKnowledgeHistory(tmp_path),
+        MarkdownKnowledgeCorpus(
+            tmp_path,
+            (CorpusRoot(tmp_path / "wiki", "wiki"),),
+            (),
+        ),
+    )
+    service.reindex()
+
+    result = service.search("트랜잭션 멱등성 원자성", 1)
+
+    assert result[0].relative_path == "wiki/backend/transaction.md"

@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from woon_core.errors import WoonError
 from woon_core.knowledge.domain import (
@@ -104,20 +105,9 @@ class SQLiteFtsSearchIndex:
         with sqlite3.connect(self._database) as connection:
             _initialize(connection)
             try:
-                rows = connection.execute(
-                    """
-                    SELECT document_id, canonical_id, title, summary, relative_path,
-                           revision, source_type, chunk_id, heading,
-                           bm25(knowledge_chunks, 0.0, 0.0, 5.0, 3.0, 2.0, 1.0,
-                                0.0, 0.0, 0.0, 0.0),
-                           snippet(knowledge_chunks, 5, '[', ']', ' … ', 32)
-                      FROM knowledge_chunks
-                     WHERE knowledge_chunks MATCH ?
-                     ORDER BY 10
-                     LIMIT ?
-                    """,
-                    (_fts_query(query), limit * 8),
-                ).fetchall()
+                rows = _search_rows(connection, _fts_query(query, "AND"), limit)
+                if not rows and len(_fts_tokens(query)) > 1:
+                    rows = _search_rows(connection, _fts_query(query, "OR"), limit)
             except sqlite3.OperationalError as error:
                 raise WoonError(f"knowledge search failed: {error}") from error
         results: list[SearchResult] = []
@@ -138,7 +128,7 @@ class SQLiteFtsSearchIndex:
                     source_type=str(row[6]),
                     chunk_id=str(row[7]),
                     heading=str(row[8]),
-                    score=float(-row[9]),
+                    score=-float(row[9]),
                     snippet=str(row[10]),
                 )
             )
@@ -224,7 +214,7 @@ def _initialize(connection: sqlite3.Connection) -> None:
         raise WoonError("this Python build does not provide SQLite FTS5") from error
 
 
-def _fts_query(query: str) -> str:
+def _fts_tokens(query: str) -> list[str]:
     tokens = [
         token.replace('"', '""')
         for token in query.split()
@@ -232,7 +222,28 @@ def _fts_query(query: str) -> str:
     ]
     if not tokens:
         tokens = [token.replace('"', '""') for token in query.split() if token]
-    return " AND ".join(f'"{token}"*' for token in tokens)
+    return tokens
+
+
+def _fts_query(query: str, operator: str) -> str:
+    return f" {operator} ".join(f'"{token}"*' for token in _fts_tokens(query))
+
+
+def _search_rows(connection: sqlite3.Connection, query: str, limit: int) -> list[tuple[Any, ...]]:
+    return connection.execute(
+        """
+        SELECT document_id, canonical_id, title, summary, relative_path,
+               revision, source_type, chunk_id, heading,
+               bm25(knowledge_chunks, 0.0, 0.0, 5.0, 3.0, 2.0, 1.0,
+                    0.0, 0.0, 0.0, 0.0),
+               snippet(knowledge_chunks, 5, '[', ']', ' … ', 32)
+          FROM knowledge_chunks
+         WHERE knowledge_chunks MATCH ?
+         ORDER BY 10
+         LIMIT ?
+        """,
+        (query, limit * 8),
+    ).fetchall()
 
 
 def _chunk_document(document: IndexedDocument, max_chars: int) -> list[_Chunk]:
