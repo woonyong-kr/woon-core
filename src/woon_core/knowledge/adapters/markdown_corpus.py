@@ -49,7 +49,9 @@ class MarkdownKnowledgeCorpus:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
                 continue
-            documents.append(_parse(relative, text, source_type))
+            document = _parse(relative, text, source_type)
+            if document is not None:
+                documents.append(document)
         return documents
 
     def state_token(self) -> tuple[tuple[str, int, int, int, int], ...]:
@@ -86,7 +88,7 @@ class MarkdownKnowledgeCorpus:
         )
 
 
-def _parse(relative_path: str, text: str, source_type: str) -> IndexedDocument:
+def _parse(relative_path: str, text: str, source_type: str) -> IndexedDocument | None:
     raw: dict[str, Any] = {}
     body = text
     match = FRONTMATTER.match(text)
@@ -98,6 +100,8 @@ def _parse(relative_path: str, text: str, source_type: str) -> IndexedDocument:
         if isinstance(loaded, dict):
             raw = loaded
         body = text[match.end() :]
+    if _string(raw.get("status")).casefold() == "archived":
+        return None
     body = GENERATED_BLOCK.sub("", body).strip()
     title = _string(raw.get("title")) or _heading(body) or Path(relative_path).stem
     summary = _string(raw.get("summary")) or _summary(body, title)

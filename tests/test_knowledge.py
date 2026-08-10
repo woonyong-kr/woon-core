@@ -492,6 +492,30 @@ def test_read_only_corpus_tolerates_legacy_invalid_frontmatter(tmp_path: Path) -
     assert service.search("본문", 1)[0].title == "레거시 문서"
 
 
+def test_read_only_corpus_excludes_archived_documents(tmp_path: Path) -> None:
+    canonical_root = tmp_path / "wiki/canonical"
+    canonical_root.mkdir(parents=True)
+    source = tmp_path / "maps/retired.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "---\ntitle: 퇴역 지도\nstatus: Archived\n---\n\n# 퇴역 지도\n\n이전 검색 문서.\n",
+        encoding="utf-8",
+    )
+    service = KnowledgeService(
+        MarkdownDocumentRepository(tmp_path, canonical_root),
+        SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
+        GitKnowledgeHistory(tmp_path),
+        MarkdownKnowledgeCorpus(
+            tmp_path,
+            (CorpusRoot(tmp_path / "maps", "map"),),
+            (),
+        ),
+    )
+
+    assert service.reindex() == 0
+    assert service.search("이전 검색 문서", 1) == []
+
+
 def test_search_ignores_generic_intent_words_and_generated_breadcrumbs(tmp_path: Path) -> None:
     canonical_root = tmp_path / "wiki/canonical"
     canonical_root.mkdir(parents=True)
