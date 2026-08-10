@@ -44,6 +44,28 @@ class MarkdownKnowledgeCorpus:
 
     def list_documents(self) -> list[IndexedDocument]:
         documents: list[IndexedDocument] = []
+        for path, relative, source_type in self._paths():
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            documents.append(_parse(relative, text, source_type))
+        return documents
+
+    def state_token(self) -> tuple[tuple[str, int, int, int, int], ...]:
+        """Return metadata-only file state for a bounded freshness fast path."""
+
+        states: list[tuple[str, int, int, int, int]] = []
+        for path, relative, _ in self._paths():
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            states.append((relative, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino))
+        return tuple(states)
+
+    def _paths(self) -> list[tuple[Path, str, str]]:
+        paths: list[tuple[Path, str, str]] = []
         seen: set[str] = set()
         for root in self._roots:
             if not root.path.is_dir():
@@ -53,12 +75,8 @@ class MarkdownKnowledgeCorpus:
                 if relative in seen or self._excluded(relative):
                     continue
                 seen.add(relative)
-                try:
-                    text = path.read_text(encoding="utf-8")
-                except (OSError, UnicodeError):
-                    continue
-                documents.append(_parse(relative, text, root.source_type))
-        return documents
+                paths.append((path, relative, root.source_type))
+        return paths
 
     def _excluded(self, relative_path: str) -> bool:
         return any(

@@ -43,6 +43,8 @@ class KnowledgeService:
         self._index = index
         self._history = history
         self._corpus = corpus
+        self._cached_state_token: tuple[object, ...] | None = None
+        self._cached_generation: str | None = None
 
     def get(self, canonical_id: str) -> CanonicalDocument:
         normalized_id = self._validate_id(canonical_id)
@@ -195,7 +197,15 @@ class KnowledgeService:
         return list(documents.values())
 
     def _reindex_unlocked(self) -> int:
-        return self._index.rebuild(self._index_documents())
+        before = self._state_token()
+        documents = self._index_documents()
+        after = self._state_token()
+        if before != after:
+            raise WoonError("knowledge files changed while indexing; retry reindex")
+        count = self._index.rebuild(documents)
+        self._cached_state_token = after
+        self._cached_generation = knowledge_generation(documents)
+        return count
 
     def _reindex_or_restore(self, canonical_id: str, snapshot: bytes | None) -> None:
         try:
@@ -218,9 +228,23 @@ class KnowledgeService:
                 "knowledge index does not exist or has no generation; call "
                 "woon_knowledge_reindex and retry"
             )
-        expected = knowledge_generation(self._index_documents())
+        before = self._state_token()
+        if before == self._cached_state_token and self._cached_generation is not None:
+            expected = self._cached_generation
+        else:
+            documents = self._index_documents()
+            after = self._state_token()
+            if before != after:
+                raise WoonError("knowledge files changed during freshness check; retry")
+            expected = knowledge_generation(documents)
+            self._cached_state_token = after
+            self._cached_generation = expected
         if actual != expected:
             raise WoonError("knowledge index is stale; call woon_knowledge_reindex and retry")
+
+    def _state_token(self) -> tuple[object, ...]:
+        corpus = self._corpus.state_token() if self._corpus is not None else ()
+        return (self._repository.state_token(), corpus)
 
     @staticmethod
     def _validate_id(canonical_id: str) -> str:

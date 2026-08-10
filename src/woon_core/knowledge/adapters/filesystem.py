@@ -63,6 +63,13 @@ class MarkdownDocumentRepository:
                 raise WoonError(f"invalid canonical document {relative}: {error}") from error
         return documents
 
+    def state_token(self) -> tuple[tuple[str, int, int, int, int], ...]:
+        """Return a cheap token that changes whenever a canonical file changes."""
+
+        if not self._root.is_dir():
+            return ()
+        return tuple(_file_state(path, self._vault) for path in sorted(self._root.rglob("*.md")))
+
     @contextmanager
     def exclusive(self) -> Iterator[None]:
         """Serialize all canonical validation, writes, and index rebuilds."""
@@ -238,6 +245,17 @@ def _navigation(metadata: DocumentMetadata) -> str:
     if len(lines) == 3:
         lines.append("- 연결할 개념 없음")
     return "\n".join(lines) + "\n"
+
+
+def _file_state(path: Path, vault: Path) -> tuple[str, int, int, int, int]:
+    stat = path.stat()
+    return (
+        path.relative_to(vault).as_posix(),
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        stat.st_ino,
+    )
 
 
 def _required(raw: dict[str, Any], key: str) -> str:

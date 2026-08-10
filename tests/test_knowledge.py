@@ -17,7 +17,7 @@ from woon_core.knowledge.adapters import (
     SQLiteFtsSearchIndex,
 )
 from woon_core.knowledge.config import KnowledgeSettings
-from woon_core.knowledge.domain import DocumentMetadata, IndexedDocument
+from woon_core.knowledge.domain import CanonicalDocument, DocumentMetadata, IndexedDocument
 from woon_core.knowledge.factory import build_knowledge_service
 from woon_core.knowledge.service import KnowledgeService
 
@@ -32,6 +32,16 @@ class FailOnceIndex(SQLiteFtsSearchIndex):
             self.fail_next = False
             raise RuntimeError("injected index failure")
         return super().rebuild(documents)
+
+
+class CountingRepository(MarkdownDocumentRepository):
+    def __init__(self, vault: Path, canonical_root: Path) -> None:
+        super().__init__(vault, canonical_root)
+        self.list_calls = 0
+
+    def list_documents(self) -> Iterable[CanonicalDocument]:
+        self.list_calls += 1
+        return super().list_documents()
 
 
 def make_service(tmp_path: Path) -> KnowledgeService:
@@ -223,6 +233,24 @@ def test_search_fails_closed_when_canonical_file_changes_outside_service(tmp_pat
 
     with pytest.raises(WoonError, match="index is stale"):
         service.search("첫 문서", 1)
+
+
+def test_search_reuses_generation_while_file_state_is_unchanged(tmp_path: Path) -> None:
+    canonical_root = tmp_path / "wiki/canonical"
+    canonical_root.mkdir(parents=True)
+    repository = CountingRepository(tmp_path, canonical_root)
+    service = KnowledgeService(
+        repository,
+        SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
+        GitKnowledgeHistory(tmp_path),
+    )
+    service.archive(metadata(), "## 설명\n\n반복 검색 문서.")
+    repository.list_calls = 0
+
+    assert service.search("반복 검색", 1)
+    assert service.search("반복 검색", 1)
+
+    assert repository.list_calls == 0
 
 
 def test_invalid_canonical_file_is_not_silently_omitted(tmp_path: Path) -> None:

@@ -25,6 +25,8 @@ class CanonicalDocumentRepository(Protocol):
 
     def list_documents(self) -> Iterable[CanonicalDocument]: ...
 
+    def state_token(self) -> tuple[tuple[str, int, int, int, int], ...]: ...
+
     def save(
         self,
         metadata: DocumentMetadata,
@@ -61,6 +63,8 @@ class ReadOnlyKnowledgeCorpus(Protocol):
     """Read-only source documents that may be searched but never overwritten."""
 
     def list_documents(self) -> Iterable[IndexedDocument]: ...
+
+    def state_token(self) -> tuple[tuple[str, int, int, int, int], ...]: ...
 
 
 class KnowledgeHistory(Protocol):

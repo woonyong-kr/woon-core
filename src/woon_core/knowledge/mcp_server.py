@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from functools import lru_cache
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from woon_core.knowledge.domain import DocumentMetadata
 from woon_core.knowledge.factory import build_knowledge_service
+from woon_core.knowledge.service import KnowledgeService
 
 mcp = FastMCP(
     "Woon Canonical Knowledge",
@@ -24,6 +26,13 @@ mcp = FastMCP(
 )
 
 
+@lru_cache(maxsize=1)
+def _service() -> KnowledgeService:
+    """Reuse one stat-aware service for the lifetime of the stdio MCP process."""
+
+    return build_knowledge_service()[1]
+
+
 @mcp.tool(
     name="woon_knowledge_search",
     annotations=ToolAnnotations(
@@ -36,7 +45,7 @@ mcp = FastMCP(
 def search_knowledge(query: str, limit: int = 5) -> dict[str, object]:
     """Search all configured knowledge and return bounded section hits with stable IDs."""
 
-    _, service = build_knowledge_service()
+    service = _service()
     results = service.search(query, limit)
     return {"query": query, "count": len(results), "results": [asdict(item) for item in results]}
 
@@ -53,7 +62,7 @@ def search_knowledge(query: str, limit: int = 5) -> dict[str, object]:
 def get_knowledge(canonical_id: str) -> dict[str, object]:
     """Read one complete canonical document before answering or preparing an update."""
 
-    _, service = build_knowledge_service()
+    service = _service()
     document = service.get(canonical_id)
     return {
         "metadata": asdict(document.metadata),
@@ -75,7 +84,7 @@ def get_knowledge(canonical_id: str) -> dict[str, object]:
 def read_knowledge_excerpt(document_id: str, chunk_id: str) -> dict[str, object]:
     """Read only the matched Markdown section instead of loading an entire source document."""
 
-    _, service = build_knowledge_service()
+    service = _service()
     return asdict(service.read_excerpt(document_id, chunk_id))
 
 
@@ -110,7 +119,7 @@ def archive_conversation(
     keywords.
     """
 
-    _, service = build_knowledge_service()
+    service = _service()
     result = service.archive(
         DocumentMetadata(
             canonical_id=canonical_id,
@@ -147,7 +156,8 @@ def archive_conversation(
 def reindex_knowledge() -> dict[str, object]:
     """Rebuild the replaceable local search index from canonical Markdown files, then exit."""
 
-    settings, service = build_knowledge_service()
+    settings, _ = build_knowledge_service()
+    service = _service()
     count = service.reindex()
     return {"indexed": count, "adapter": settings.search_adapter}
 
@@ -164,7 +174,7 @@ def reindex_knowledge() -> dict[str, object]:
 def audit_knowledge() -> dict[str, object]:
     """Check identity, duplicate titles, paths, and learning-relationship integrity."""
 
-    _, service = build_knowledge_service()
+    service = _service()
     errors = service.audit()
     return {"status": "ok" if not errors else "invalid", "errors": errors}
 
@@ -181,7 +191,7 @@ def audit_knowledge() -> dict[str, object]:
 def knowledge_history(canonical_id: str, limit: int = 20) -> dict[str, object]:
     """List Git recovery points for one canonical document."""
 
-    _, service = build_knowledge_service()
+    service = _service()
     entries = service.history(canonical_id, limit)
     return {"canonical_id": canonical_id, "history": [asdict(item) for item in entries]}
 
@@ -203,7 +213,7 @@ def restore_knowledge(
 ) -> dict[str, object]:
     """Restore one document from Git after explicit confirmation and revision checks."""
 
-    _, service = build_knowledge_service()
+    service = _service()
     result = service.restore(
         canonical_id,
         git_revision,
