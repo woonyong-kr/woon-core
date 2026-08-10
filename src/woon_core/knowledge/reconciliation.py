@@ -742,28 +742,50 @@ def apply_markdown_additions(target: str, additions: list[object]) -> tuple[str,
 
 FRONTMATTER_MARKER = re.compile(r"\A---(?:\n|$)")
 H1_HEADING = re.compile(r"^#\s+", re.MULTILINE)
-MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+MARKDOWN_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$")
+FENCE_OPEN = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 
 
 def _addition_position(text: str, heading: str) -> int | None:
-    matches = list(MARKDOWN_HEADING.finditer(text))
+    headings = _structural_headings(text)
     if heading == "__before_first_h2__":
-        first_h2 = next((match for match in matches if len(match.group(1)) == 2), None)
-        return first_h2.start() if first_h2 is not None else len(text)
+        first_h2 = next((item for item in headings if item[1] == 2), None)
+        return first_h2[0] if first_h2 is not None else len(text)
     expected = heading.strip()
-    selected = [match for match in matches if match.group(0).strip() == expected]
-    if len(selected) != 1 or len(selected[0].group(1)) != 2:
+    selected = [item for item in headings if item[2] == expected]
+    if len(selected) != 1 or selected[0][1] != 2:
         return None
     current = selected[0]
     following = next(
-        (
-            match
-            for match in matches
-            if match.start() > current.start() and len(match.group(1)) <= 2
-        ),
+        (item for item in headings if item[0] > current[0] and item[1] <= 2),
         None,
     )
-    return following.start() if following is not None else len(text)
+    return following[0] if following is not None else len(text)
+
+
+def _structural_headings(text: str) -> list[tuple[int, int, str]]:
+    """Return ATX headings outside fenced code while preserving source offsets."""
+
+    headings: list[tuple[int, int, str]] = []
+    fence: str | None = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        fence_match = FENCE_OPEN.match(content)
+        if fence_match is not None:
+            marker = fence_match.group(1)[0]
+            if fence is None:
+                fence = marker
+            elif fence == marker:
+                fence = None
+            offset += len(line)
+            continue
+        if fence is None:
+            match = MARKDOWN_HEADING.match(content)
+            if match is not None:
+                headings.append((offset, len(match.group(1)), match.group(0).strip()))
+        offset += len(line)
+    return headings
 
 
 def _decision_prompt(
@@ -818,11 +840,7 @@ def _delta_prompt(
         "source": source,
         "target_path": target_path,
         "target": target,
-        "target_h2": [
-            match.group(0).strip()
-            for match in MARKDOWN_HEADING.finditer(target)
-            if len(match.group(1)) == 2
-        ],
+        "target_h2": [raw for _, level, raw in _structural_headings(target) if level == 2],
         "deterministic_evidence": evidence,
     }
     if previous is not None:

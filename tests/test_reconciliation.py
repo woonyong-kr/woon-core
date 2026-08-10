@@ -77,6 +77,29 @@ def test_markdown_delta_rejects_unknown_heading_and_h1() -> None:
     ]
 
 
+def test_markdown_delta_ignores_heading_like_code_comments() -> None:
+    target = (
+        "# 예제\n\n"
+        "## 사용법\n\n"
+        "```python\n"
+        "## 사용법\n"
+        "# 코드 주석\n"
+        "print('ok')\n"
+        "```\n\n"
+        "## 검증\n\n"
+        "확인.\n"
+    )
+
+    candidate, errors = reconciliation.apply_markdown_additions(
+        target,
+        [{"after_heading": "## 사용법", "markdown": "### 경계\n\n추가."}],
+    )
+
+    assert errors == []
+    assert "```python\n## 사용법\n# 코드 주석\nprint('ok')\n```" in candidate
+    assert "```\n\n### 경계\n\n추가.\n\n## 검증" in candidate
+
+
 def test_existing_wiki_reconciliation_applies_only_reviewed_delta(
     tmp_path: Path, monkeypatch: object
 ) -> None:
