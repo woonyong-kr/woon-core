@@ -11,11 +11,12 @@ import yaml
 FRONTMATTER = re.compile(r"\A---\n(?P<yaml>.*?)\n---\n", re.DOTALL)
 H1 = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 FENCE = re.compile(r"^```", re.MULTILINE)
+FENCED_BLOCK = re.compile(r"^```.*?^```\s*$", re.MULTILINE | re.DOTALL)
+INLINE_CODE = re.compile(r"`[^`\n]*`")
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 REPOSITORY_PATH = re.compile(
-    r"(?:^|[\s`'\"])((?:scripts|docs|config|maps|wiki|ai-reference|assets)/"
-    r"[^\s`'\"),]+)",
+    r"(?:^|[\s`'\"])(scripts/[^\s`'\"),]+)",
     re.MULTILINE,
 )
 ABSOLUTE_LOCAL = re.compile(r"(?:^|[\s`'(\[])((?:/Users|/home)/[^\s`)'\]]+)")
@@ -49,7 +50,8 @@ def validate_markdown_candidate(
             if target_frontmatter.get(field) != candidate_frontmatter.get(field):
                 errors.append(f"protected frontmatter field changed: {field}")
 
-    headings = H1.findall(candidate_body)
+    link_prose = _link_prose(candidate_body)
+    headings = H1.findall(link_prose)
     if len(headings) != 1:
         errors.append(f"candidate must contain exactly one H1, found {len(headings)}")
     title = candidate_frontmatter.get("title")
@@ -57,7 +59,7 @@ def validate_markdown_candidate(
         errors.append("candidate H1 does not match frontmatter title")
     if len(FENCE.findall(candidate_body)) % 2:
         errors.append("candidate contains an unclosed fenced code block")
-    if ABSOLUTE_LOCAL.search(candidate):
+    if contains_absolute_local(candidate):
         errors.append("candidate exposes an absolute local path")
     if (
         candidate_frontmatter.get("publish") is True
@@ -66,7 +68,7 @@ def validate_markdown_candidate(
     ):
         errors.append("public candidate exposes the private writing locator")
 
-    for link in sorted(_links(candidate_body)):
+    for link in sorted(_links(link_prose)):
         if not _wikilink_exists(root, relative_path, link):
             errors.append(f"wikilink does not resolve: {link}")
     for reference in unresolved_local_references(root, relative_path, candidate_body):
@@ -74,19 +76,32 @@ def validate_markdown_candidate(
     return errors
 
 
+def contains_absolute_local(text: str) -> bool:
+    """Return whether Markdown exposes a machine-specific home path."""
+
+    return ABSOLUTE_LOCAL.search(text) is not None
+
+
 def unresolved_wikilinks(root: Path, relative_path: str, text: str) -> list[str]:
     """Return wikilinks that cannot resolve against an Obsidian Markdown tree."""
 
-    return sorted(link for link in _links(text) if not _wikilink_exists(root, relative_path, link))
+    return sorted(
+        link
+        for link in _links(_link_prose(text))
+        if not _wikilink_exists(root, relative_path, link)
+    )
 
 
 def unresolved_local_references(root: Path, relative_path: str, text: str) -> list[str]:
     """Return actionable repository paths and Markdown links that do not exist."""
 
-    references = set(REPOSITORY_PATH.findall(text))
-    for raw in MARKDOWN_LINK.findall(text):
+    prose = FENCED_BLOCK.sub("", text)
+    references = set(REPOSITORY_PATH.findall(prose))
+    for raw in MARKDOWN_LINK.findall(INLINE_CODE.sub("", prose)):
         value = raw.strip().split(maxsplit=1)[0].strip("<>")
         if not value or value.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        if "/" not in value and "." not in value:
             continue
         references.add(value.split("#", 1)[0])
     return sorted(
@@ -123,6 +138,10 @@ def _links(text: str) -> set[str]:
         if target:
             links.add(target)
     return links
+
+
+def _link_prose(text: str) -> str:
+    return INLINE_CODE.sub("", FENCED_BLOCK.sub("", text))
 
 
 def _wikilink_exists(root: Path, current_path: str, link: str) -> bool:

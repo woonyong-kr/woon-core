@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from woon_core.knowledge.document_quality import validate_markdown_candidate
+from woon_core.knowledge.document_quality import (
+    contains_absolute_local,
+    validate_markdown_candidate,
+)
 
 
 def document(body: str, *, publish: bool = False) -> str:
@@ -74,3 +77,21 @@ def test_candidate_rejects_unclosed_fence_and_absolute_local_path(tmp_path: Path
 
     assert "candidate contains an unclosed fenced code block" in errors
     assert "candidate exposes an absolute local path" in errors
+    assert contains_absolute_local(candidate) is True
+
+
+def test_candidate_ignores_markdown_syntax_examples_inside_code(tmp_path: Path) -> None:
+    candidate = document(
+        """문법 예시다.
+
+```markdown
+# 예시 H1
+[[wikilink]]
+maps/not-a-real-tree/
+```
+
+인라인 `[[placeholder]]`도 링크가 아니다.
+"""
+    )
+
+    assert validate_markdown_candidate(tmp_path, "wiki/example.md", None, candidate) == []
