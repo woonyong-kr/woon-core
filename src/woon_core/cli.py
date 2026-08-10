@@ -431,6 +431,8 @@ def _run_knowledge_source_reconcile(arguments: list[str], output: TextIO) -> Non
             "--limit",
             "--model",
             "--state",
+            "--max-attempts",
+            "--reasoning-effort",
         }:
             raise WoonError(f"unexpected source-reconcile argument: {option}")
         if index + 1 >= len(arguments) or option in values:
@@ -443,6 +445,13 @@ def _run_knowledge_source_reconcile(arguments: list[str], output: TextIO) -> Non
         limit = int(values.get("--limit", "1"))
     except ValueError as error:
         raise WoonError("source-reconcile --limit must be an integer") from error
+    try:
+        max_attempts = int(values.get("--max-attempts", "3"))
+    except ValueError as error:
+        raise WoonError("source-reconcile --max-attempts must be an integer") from error
+    reasoning_effort = values.get("--reasoning-effort", "high")
+    if reasoning_effort not in {"low", "medium", "high"}:
+        raise WoonError("source-reconcile --reasoning-effort must be low, medium, or high")
     state = values.get("--state")
     if state is not None and state not in {"merge-required", "semantic-match", "new"}:
         raise WoonError("source-reconcile --state must be merge-required, semantic-match, or new")
@@ -455,6 +464,8 @@ def _run_knowledge_source_reconcile(arguments: list[str], output: TextIO) -> Non
         target / f"catalog/reconciliation/{name}.yaml",
         limit=limit,
         model=values.get("--model", "gpt-5.6-terra"),
+        max_attempts=max_attempts,
+        reasoning_effort=reasoning_effort,
         states=(state,) if state is not None else ("merge-required", "semantic-match", "new"),
     )
     print(json.dumps(asdict(summary), ensure_ascii=False, indent=2), file=output)

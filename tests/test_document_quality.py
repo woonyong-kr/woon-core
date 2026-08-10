@@ -55,6 +55,27 @@ def test_candidate_does_not_resolve_links_from_quarantine(tmp_path: Path) -> Non
     ]
 
 
+def test_candidate_does_not_resolve_archived_markdown(tmp_path: Path) -> None:
+    archived = tmp_path / "maps/old.md"
+    archived.parent.mkdir(parents=True)
+    archived.write_text(
+        document("이전 색인.")
+        .replace("type: Wiki", "type: 키워드")
+        .replace("access: local-only", "access: local-only\nstatus: Archived"),
+        encoding="utf-8",
+    )
+    candidate = document("[[old|이전 색인]]")
+
+    assert validate_markdown_candidate(tmp_path, "maps/current.md", None, candidate) == [
+        "wikilink does not resolve: old"
+    ]
+
+    archived_text = archived.read_text(encoding="utf-8").replace(
+        "이전 색인.", "[[maps/old|이전 색인]]"
+    )
+    assert validate_markdown_candidate(tmp_path, "maps/old.md", None, archived_text) == []
+
+
 def test_candidate_rejects_missing_operational_path_and_public_private_locator(
     tmp_path: Path,
 ) -> None:

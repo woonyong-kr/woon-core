@@ -150,6 +150,9 @@ def _wikilink_exists(root: Path, current_path: str, link: str) -> bool:
         return False
     direct = root / f"{normalized}.md"
     relative = root / Path(current_path).parent / f"{normalized}.md"
+    current = (root / current_path).resolve()
+    if (direct.resolve() == current or relative.resolve() == current) and current.is_file():
+        return True
     if _active_file(root, direct) or _active_file(root, relative):
         return True
     basename = Path(normalized).name
@@ -177,4 +180,18 @@ def _active_file(root: Path, path: Path) -> bool:
         relative = path.resolve().relative_to(root.resolve())
     except ValueError:
         return False
-    return path.is_file() and not any(part in INACTIVE_PARTS for part in relative.parts)
+    if not path.is_file() or any(part in INACTIVE_PARTS for part in relative.parts):
+        return False
+    if path.suffix.lower() != ".md":
+        return True
+    match = FRONTMATTER.match(path.read_text(encoding="utf-8", errors="replace"))
+    if match is None:
+        return True
+    try:
+        metadata = yaml.safe_load(match.group("yaml")) or {}
+    except yaml.YAMLError:
+        return True
+    status = metadata.get("status") if isinstance(metadata, dict) else None
+    return not (
+        isinstance(status, str) and status.casefold() in {"archived", "deprecated", "retired"}
+    )
