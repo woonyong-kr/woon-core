@@ -116,3 +116,21 @@ maps/not-a-real-tree/
     )
 
     assert validate_markdown_candidate(tmp_path, "wiki/example.md", None, candidate) == []
+
+
+def test_candidate_preserves_inline_code_when_comparing_h1_with_title(
+    tmp_path: Path,
+) -> None:
+    candidate = (
+        document("")
+        .replace(
+            "title: 예제\n",
+            'title: "Alarm Clock 실험: `sleep_list`가 깨어나는 순간"\n',
+        )
+        .replace(
+            "# 예제\n",
+            "# Alarm Clock 실험: `sleep_list`가 깨어나는 순간\n",
+        )
+    )
+
+    assert validate_markdown_candidate(tmp_path, "wiki/example.md", None, candidate) == []

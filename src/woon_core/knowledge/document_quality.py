@@ -50,8 +50,9 @@ def validate_markdown_candidate(
             if target_frontmatter.get(field) != candidate_frontmatter.get(field):
                 errors.append(f"protected frontmatter field changed: {field}")
 
-    link_prose = _link_prose(candidate_body)
-    headings = H1.findall(link_prose)
+    structural_prose = FENCED_BLOCK.sub("", candidate_body)
+    link_prose = INLINE_CODE.sub("", structural_prose)
+    headings = H1.findall(structural_prose)
     if len(headings) != 1:
         errors.append(f"candidate must contain exactly one H1, found {len(headings)}")
     title = candidate_frontmatter.get("title")
