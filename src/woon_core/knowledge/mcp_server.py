@@ -102,6 +102,7 @@ def archive_conversation(
     title: str,
     domain: str,
     summary: str,
+    purpose: str,
     body: str,
     difficulty: str = "foundation",
     prerequisites: list[str] | None = None,
@@ -113,10 +114,11 @@ def archive_conversation(
     """Create or optimistically replace one deduplicated canonical document.
 
     canonical_id must be a lowercase ``domain/slug`` path and domain must match
-    its first segment. prerequisites, next_concepts, and related accept only
-    existing canonical IDs in the same form; use empty lists when no verified
-    canonical relationship exists. They do not accept display titles or search
-    keywords.
+    its first segment. purpose records why this knowledge is being retained and
+    which future question, decision, or output it should support. prerequisites,
+    next_concepts, and related accept only existing canonical IDs in the same
+    form; use empty lists when no verified canonical relationship exists. They
+    do not accept display titles or search keywords.
     """
 
     service = _service()
@@ -126,6 +128,7 @@ def archive_conversation(
             title=title,
             domain=domain,
             summary=summary,
+            purpose=purpose,
             difficulty=difficulty,
             prerequisites=tuple(prerequisites or ()),
             next_concepts=tuple(next_concepts or ()),

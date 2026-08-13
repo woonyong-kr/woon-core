@@ -304,6 +304,7 @@ class CompiledWiki:
             "privacy": "local-only",
             "lifecycle": "compiled",
             "title": metadata.title,
+            "purpose": metadata.purpose,
             "body": body.rstrip() + "\n",
             "source_session_ids": list(source_session_ids),
         }
@@ -546,6 +547,8 @@ def _validate_source(source: dict[str, Any]) -> None:
         raise WoonError("source privacy is invalid")
     if source.get("lifecycle") not in {"captured", "compiled", "archived"}:
         raise WoonError("source lifecycle is invalid")
+    if source.get("kind") != "legacy-wiki":
+        _required_string(source, "purpose")
     if not isinstance(source.get("body"), str):
         raise WoonError("source body must be a string")
 
@@ -614,6 +617,7 @@ def _canonical_frontmatter(metadata: DocumentMetadata) -> dict[str, Any]:
         "title": metadata.title,
         "domain": metadata.domain,
         "summary": metadata.summary,
+        "purpose": metadata.purpose,
         "status": "Canonical",
         "publish": False,
         "access": "local-only",

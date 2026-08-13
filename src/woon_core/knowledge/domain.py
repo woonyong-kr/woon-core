@@ -13,6 +13,7 @@ class DocumentMetadata:
     title: str
     domain: str
     summary: str
+    purpose: str = ""
     difficulty: str = "foundation"
     prerequisites: tuple[str, ...] = field(default_factory=tuple)
     next_concepts: tuple[str, ...] = field(default_factory=tuple)

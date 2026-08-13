@@ -235,6 +235,7 @@ def test_compiled_archive_restores_inputs_and_output_when_reindex_fails(tmp_path
                 title="트랜잭션 경계",
                 domain="backend",
                 summary="요청 처리의 원자성을 정의한다.",
+                purpose="트랜잭션 경계와 복구 순서를 설계할 때 재사용한다.",
                 source_ids=("session://2026-08-14/001",),
             ),
             "## 경계\n\n데이터 변경과 외부 호출의 순서를 분리한다.",
@@ -269,6 +270,7 @@ def test_compiled_archive_preserves_session_ownership_and_rejects_duplicates(
             title="트랜잭션 경계",
             domain="backend",
             summary="요청 처리의 원자성을 정의한다.",
+            purpose="트랜잭션 경계와 복구 순서를 설계할 때 재사용한다.",
             source_ids=("session://2026-08-14/001",),
         ),
         "## 경계\n\n데이터 변경과 외부 호출의 순서를 분리한다.",
@@ -276,6 +278,18 @@ def test_compiled_archive_preserves_session_ownership_and_rejects_duplicates(
 
     archived = (canonical_root / "backend/transaction-boundary.md").read_text(encoding="utf-8")
     assert "source_ids:\n- session://2026-08-14/001" in archived
+    assert "purpose: 트랜잭션 경계와 복구 순서를 설계할 때 재사용한다." in archived
+    sources_path = tmp_path / "catalog/llm-wiki/sources.yaml"
+    sources = yaml.safe_load(sources_path.read_text(encoding="utf-8"))
+    conversation = next(source for source in sources["sources"] if source["kind"] == "conversation")
+    assert conversation["purpose"] == "트랜잭션 경계와 복구 순서를 설계할 때 재사용한다."
+
+    del conversation["purpose"]
+    sources_path.write_text(
+        yaml.safe_dump(sources, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    with pytest.raises(WoonError, match="requires non-empty purpose"):
+        compiler.compile()
 
     with pytest.raises(WoonError, match="already owned"):
         service.archive(
@@ -284,6 +298,7 @@ def test_compiled_archive_preserves_session_ownership_and_rejects_duplicates(
                 title="트랜잭션 순서",
                 domain="backend",
                 summary="요청 처리 단계의 순서를 정의한다.",
+                purpose="트랜잭션 실행 순서를 설계할 때 재사용한다.",
                 source_ids=("session://2026-08-14/001",),
             ),
             "## 순서\n\n쓰기와 외부 호출의 실행 순서를 관리한다.",

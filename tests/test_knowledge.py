@@ -60,6 +60,7 @@ def metadata(canonical_id: str = "backend/ports-and-adapters") -> DocumentMetada
         title="포트와 어댑터",
         domain="backend",
         summary="도메인 로직과 외부 기술의 의존 방향을 분리하는 구조.",
+        purpose="외부 기술 교체와 설계 판단에 재사용할 구조 원칙을 보존한다.",
         prerequisites=("backend/dependency-inversion",),
     )
 
@@ -120,6 +121,7 @@ def test_archive_rejects_duplicate_normalized_title(tmp_path: Path) -> None:
         title="포트 와 어댑터",
         domain="architecture",
         summary="중복 제목.",
+        purpose="중복 제목 검증을 위한 후보 문서다.",
     )
 
     with pytest.raises(WoonError, match="same normalized title"):
@@ -163,6 +165,7 @@ def test_concurrent_duplicate_title_allows_exactly_one_document(tmp_path: Path) 
         title="포트 와 어댑터",
         domain="architecture",
         summary="같은 개념의 두 번째 후보.",
+        purpose="동시 중복 생성 검증을 위한 후보 문서다.",
     )
 
     def create(service: KnowledgeService, value: DocumentMetadata) -> str:
@@ -216,11 +219,22 @@ def test_archive_rejects_source_identity_owned_by_another_document(tmp_path: Pat
         title="다른 제목",
         domain="architecture",
         summary="같은 원천을 잘못 중복 소유한 문서.",
+        purpose="원천 소유권 중복 검증을 위한 후보 문서다.",
         source_ids=("repo://vault/wiki/source.md",),
     )
 
     with pytest.raises(WoonError, match="already owned"):
         service.archive(duplicate, "## 설명\n\n중복 원천.")
+
+
+def test_archive_rejects_missing_purpose(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+
+    with pytest.raises(WoonError, match="purpose must not be empty"):
+        service.archive(
+            replace(metadata(), purpose="   "),
+            "## 설명\n\n보존 이유 없이 저장하면 안 되는 문서.",
+        )
 
 
 def test_search_fails_closed_when_canonical_file_changes_outside_service(tmp_path: Path) -> None:

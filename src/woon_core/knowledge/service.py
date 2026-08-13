@@ -342,8 +342,9 @@ class KnowledgeService:
             raise WoonError("metadata domain must match the first canonical_id segment")
         title = " ".join(metadata.title.split())
         summary = " ".join(metadata.summary.split())
-        if not title or not summary:
-            raise WoonError("title and summary must not be empty")
+        purpose = " ".join(metadata.purpose.split())
+        if not title or not summary or not purpose:
+            raise WoonError("title, summary, and purpose must not be empty")
         if metadata.difficulty not in DIFFICULTIES:
             raise WoonError(f"unsupported difficulty: {metadata.difficulty!r}")
         relations = {
@@ -363,6 +364,7 @@ class KnowledgeService:
             title=title,
             domain=domain,
             summary=summary,
+            purpose=purpose,
             prerequisites=normalized_relations["prerequisites"],
             next_concepts=normalized_relations["next_concepts"],
             related=normalized_relations["related"],
