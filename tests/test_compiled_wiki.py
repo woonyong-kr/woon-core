@@ -171,6 +171,43 @@ def test_compiler_rebuilds_derived_relations_from_page_specs(tmp_path: Path) -> 
     assert compiler.audit().complete
 
 
+def test_compiler_derives_relations_from_legacy_related_to_wikilinks(tmp_path: Path) -> None:
+    write_page(tmp_path, "ai/attention.md", "Attention", "관련 개념을 연결한다.")
+    write_page(tmp_path, "ai/query-key-value.md", "Query, Key, Value", "입력의 역할을 나눈다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+
+    pages_path = tmp_path / "catalog/llm-wiki/pages.yaml"
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    page = next(item for item in pages["pages"] if item["page_id"] == "ai/attention")
+    page["frontmatter"]["related_to"] = [
+        "[[wiki/ai/query-key-value|Query, Key, Value]]",
+        "[[maps/transformer-attention-map#핵심 링크|Attention 지도]]",
+    ]
+    pages_path.write_text(
+        yaml.safe_dump(pages, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+
+    compiler.compile()
+
+    relations = yaml.safe_load(
+        (tmp_path / "catalog/llm-wiki/relations.yaml").read_text(encoding="utf-8")
+    )
+    assert relations["relations"] == [
+        {
+            "from_page_id": "ai/attention",
+            "type": "related",
+            "to_id": "ai/query-key-value",
+        },
+        {
+            "from_page_id": "ai/attention",
+            "type": "related",
+            "to_id": "maps/transformer-attention-map",
+        },
+    ]
+    assert compiler.audit().complete
+
+
 def test_compiled_archive_restores_inputs_and_output_when_reindex_fails(tmp_path: Path) -> None:
     write_page(
         tmp_path,

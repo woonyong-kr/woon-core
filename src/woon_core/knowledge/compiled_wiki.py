@@ -630,16 +630,30 @@ def _relations_for(page_id: str, frontmatter: dict[str, Any]) -> list[dict[str, 
         ("prerequisites", "requires"),
         ("next_concepts", "next"),
         ("related", "related"),
+        ("related_to", "related"),
     ):
         raw = frontmatter.get(field)
         if not isinstance(raw, list):
             continue
         for target in raw:
-            if isinstance(target, str) and target.strip():
+            target_id = _relation_target(target) if isinstance(target, str) else None
+            if target_id:
                 relations.append(
-                    {"from_page_id": page_id, "type": relation_type, "to_id": target.strip()}
+                    {"from_page_id": page_id, "type": relation_type, "to_id": target_id}
                 )
     return relations
+
+
+def _relation_target(value: str) -> str | None:
+    """Normalize a frontmatter relation while keeping the rendered link untouched."""
+
+    target = value.strip()
+    if target.startswith("[[") and target.endswith("]]"):
+        target = target[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
+    target = target.removesuffix(".md")
+    if target.startswith("wiki/"):
+        target = target.removeprefix("wiki/")
+    return target or None
 
 
 def _expected_relations(pages: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
