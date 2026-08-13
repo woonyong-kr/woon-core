@@ -13,6 +13,7 @@ from woon_core.knowledge.adapters import (
     MarkdownKnowledgeCorpus,
     SQLiteFtsSearchIndex,
 )
+from woon_core.knowledge.compiled_wiki import CompiledWiki
 from woon_core.knowledge.config import KnowledgeSettings
 from woon_core.knowledge.service import KnowledgeService
 from woon_core.registry import Registry
@@ -42,7 +43,10 @@ def build_knowledge_service(
         tuple(CorpusRoot(root.path, root.source_type) for root in settings.search_roots),
         settings.search_exclusions,
     )
-    return settings, KnowledgeService(repository, index, history, corpus)
+    compiled_wiki = CompiledWiki(settings.compiled_wiki) if settings.compiled_wiki else None
+    return settings, KnowledgeService(
+        repository, index, history, corpus, compiled_wiki=compiled_wiki
+    )
 
 
 def resolve_knowledge_vault() -> Path:

@@ -5,8 +5,15 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import replace
+from pathlib import Path
 
 from woon_core.errors import WoonError
+from woon_core.knowledge.compiled_wiki import (
+    CompilationAudit,
+    CompiledWiki,
+    CompileReport,
+    MigrationReport,
+)
 from woon_core.knowledge.domain import (
     CanonicalDocument,
     DocumentMetadata,
@@ -38,11 +45,14 @@ class KnowledgeService:
         index: KnowledgeSearchIndex,
         history: KnowledgeHistory,
         corpus: ReadOnlyKnowledgeCorpus | None = None,
+        *,
+        compiled_wiki: CompiledWiki | None = None,
     ) -> None:
         self._repository = repository
         self._index = index
         self._history = history
         self._corpus = corpus
+        self._compiled_wiki = compiled_wiki
         self._cached_state_token: tuple[object, ...] | None = None
         self._cached_generation: str | None = None
 
@@ -69,14 +79,57 @@ class KnowledgeService:
                 )
             self._ensure_unique_identity(validated)
             snapshot = self._repository.snapshot(validated.canonical_id)
-            result = self._repository.save(validated, normalized_body, expected_revision)
+            compiler_snapshot = (
+                self._compiled_wiki.snapshot_inputs() if self._compiled_wiki is not None else None
+            )
+            if self._compiled_wiki is None:
+                result = self._repository.save(validated, normalized_body, expected_revision)
+            else:
+                self._compiled_wiki.archive(validated, normalized_body, metadata.source_ids)
+                saved = self._repository.get(validated.canonical_id)
+                if saved is None:
+                    raise WoonError("compiled archive did not create its canonical output")
+                result = SaveResult(
+                    document=saved,
+                    created=current is None,
+                    changed=saved.revision != (current.revision if current is not None else ""),
+                )
             if result.changed:
-                self._reindex_or_restore(validated.canonical_id, snapshot)
+                self._reindex_or_restore(validated.canonical_id, snapshot, compiler_snapshot)
             return result
 
     def reindex(self) -> int:
         with self._repository.exclusive():
+            self._assert_compiled_current()
             return self._reindex_unlocked()
+
+    def compile(self, *, force: bool = False) -> CompileReport:
+        """Build changed LLM Wiki pages and keep the bounded search index aligned."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            report = self._compiled_wiki.compile(force=force)
+            if report.compiled:
+                self._reindex_unlocked()
+            return report
+
+    def migrate_compiled_wiki(self) -> MigrationReport:
+        """Convert current Wiki pages once into source-schema compiler inputs."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            report = self._compiled_wiki.migrate()
+            self._reindex_unlocked()
+            return report
+
+    def compilation_audit(self) -> CompilationAudit:
+        """Return source-schema receipt health separately from Markdown quality audit."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        return self._compiled_wiki.audit()
 
     def search(self, query: str, limit: int = 5) -> list[SearchResult]:
         normalized_query = " ".join(query.split())
@@ -101,6 +154,8 @@ class KnowledgeService:
 
     def audit(self) -> list[str]:
         errors = self._repository.validate()
+        if self._compiled_wiki is not None:
+            errors.extend(self._compiled_wiki.audit().errors)
         try:
             documents = list(self._repository.list_documents())
         except WoonError as error:
@@ -163,11 +218,23 @@ class KnowledgeService:
                 )
             self._ensure_unique_identity(historical.metadata)
             snapshot = self._repository.snapshot(canonical_id)
-            result = self._repository.save(
-                replace(historical.metadata), historical.body, expected_revision
+            compiler_snapshot = (
+                self._compiled_wiki.snapshot_inputs() if self._compiled_wiki is not None else None
             )
+            if self._compiled_wiki is None:
+                result = self._repository.save(
+                    replace(historical.metadata), historical.body, expected_revision
+                )
+            else:
+                self._compiled_wiki.archive(
+                    replace(historical.metadata), historical.body, (f"git:{git_revision}",)
+                )
+                saved = self._repository.get(canonical_id)
+                if saved is None:
+                    raise WoonError("compiled restore did not create its canonical output")
+                result = SaveResult(document=saved, created=False, changed=True)
             if result.changed:
-                self._reindex_or_restore(canonical_id, snapshot)
+                self._reindex_or_restore(canonical_id, snapshot, compiler_snapshot)
             return result
 
     def _ensure_unique_identity(self, metadata: DocumentMetadata) -> None:
@@ -207,12 +274,19 @@ class KnowledgeService:
         self._cached_generation = knowledge_generation(documents)
         return count
 
-    def _reindex_or_restore(self, canonical_id: str, snapshot: bytes | None) -> None:
+    def _reindex_or_restore(
+        self,
+        canonical_id: str,
+        snapshot: bytes | None,
+        compiler_snapshot: dict[Path, bytes | None] | None = None,
+    ) -> None:
         try:
             self._reindex_unlocked()
         except Exception as index_error:
             try:
                 self._repository.restore_snapshot(canonical_id, snapshot)
+                if compiler_snapshot is not None and self._compiled_wiki is not None:
+                    self._compiled_wiki.restore_inputs(compiler_snapshot)
                 self._reindex_unlocked()
             except Exception as recovery_error:
                 raise WoonError(
@@ -222,6 +296,7 @@ class KnowledgeService:
             raise
 
     def _assert_index_current(self) -> None:
+        self._assert_compiled_current()
         actual = self._index.generation()
         if actual is None:
             raise WoonError(
@@ -241,6 +316,10 @@ class KnowledgeService:
             self._cached_generation = expected
         if actual != expected:
             raise WoonError("knowledge index is stale; call woon_knowledge_reindex and retry")
+
+    def _assert_compiled_current(self) -> None:
+        if self._compiled_wiki is not None:
+            self._compiled_wiki.assert_current()
 
     def _state_token(self) -> tuple[object, ...]:
         corpus = self._corpus.state_token() if self._corpus is not None else ()

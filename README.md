@@ -11,6 +11,7 @@
 - 운영 파일의 개인 절대경로와 토큰 예산 검사
 - 한 개념당 Markdown 정본 한 편과 optimistic revision 검사
 - 외부 corpus의 content-addressed catalog, 파일별 병합, resume-safe ledger
+- source·claim·page spec에서 receipt가 있는 LLM Wiki를 결정론적으로 컴파일
 - 교체 가능한 document, search, history port와 local stdio MCP
 
 ## 설치
@@ -34,10 +35,11 @@ woon context check --all
 woon skills validate --profile core
 woon skills plan --profile core,python --target codex
 woon skills eval-routing --executor all --repeat 3
+woon knowledge compile-audit --vault /path/to/woon-knowledge
+woon knowledge compile --vault /path/to/woon-knowledge
 woon knowledge index --vault /path/to/woon-knowledge
 woon knowledge search '검색어' --vault /path/to/woon-knowledge
 woon knowledge source-plan --source /path/to/source --source-name source --vault /path/to/woon-knowledge
-woon knowledge source-reconcile --source /path/to/source --source-name source --state merge-required --limit 1 --vault /path/to/woon-knowledge
 woon knowledge source-audit --source /path/to/source --source-name source --vault /path/to/woon-knowledge
 ```
 
@@ -81,7 +83,7 @@ codex mcp add woon-knowledge \
 
 등록 뒤 새 Codex 작업에서 `woon_knowledge_search`를 사용할 수 있다. 설정 확인과 제거는 각각 `codex mcp get woon-knowledge`, `codex mcp remove woon-knowledge`다.
 
-제공 도구는 정본 검색·전체 읽기·대화 병합·index rebuild·audit·Git history·확인된 복구다. 같은 개념의 블로그, 기술문서, AI 전용 변형은 생성하지 않는다.
+제공 도구는 정본 검색·전체 읽기·대화 병합·LLM Wiki compile/receipt audit·index rebuild·audit·Git history·확인된 복구다. v2 vault에서 `wiki/`는 compiler 산출물이므로 source/claim/page spec을 바꾼 뒤 compile한다. 같은 개념의 블로그, 기술문서, AI 전용 변형은 생성하지 않는다.
 
 IDE 설정은 같은 바이너리에서 관리한다.
 

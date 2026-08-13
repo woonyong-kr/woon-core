@@ -163,6 +163,37 @@ def reindex_knowledge() -> dict[str, object]:
 
 
 @mcp.tool(
+    name="woon_knowledge_compile",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def compile_knowledge(force: bool = False) -> dict[str, object]:
+    """Compile source records, accepted claims, and page specs before retrieval uses them."""
+
+    return asdict(_service().compile(force=force))
+
+
+@mcp.tool(
+    name="woon_knowledge_compile_audit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def audit_compiled_knowledge() -> dict[str, object]:
+    """Verify every compiled Wiki page has valid provenance and a matching receipt."""
+
+    audit = _service().compilation_audit()
+    return {"status": "ok" if audit.complete else "invalid", **asdict(audit)}
+
+
+@mcp.tool(
     name="woon_knowledge_audit",
     annotations=ToolAnnotations(
         readOnlyHint=True,

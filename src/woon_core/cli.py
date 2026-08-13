@@ -58,6 +58,9 @@ Usage:
   woon knowledge get <canonical-id> [--vault <path>]
   woon knowledge audit [--vault <path>]
   woon knowledge history <canonical-id> [--limit <1..100>] [--vault <path>]
+  woon knowledge migrate-compiled [--vault <path>]
+  woon knowledge compile [--force] [--vault <path>]
+  woon knowledge compile-audit [--vault <path>]
   woon knowledge source-plan --source <path> --source-name <name> [--protect <glob>]
     [--vault <path>] [--output <relative-path>]
   woon knowledge source-reconcile --source <path> --source-name <name>
@@ -288,7 +291,7 @@ def _run_skills(root: str, arguments: list[str], output: TextIO) -> None:
 
 def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if not arguments:
-        raise WoonError("usage: woon knowledge <index|search|get|audit|history>")
+        raise WoonError("usage: woon knowledge <index|search|get|audit|history|compile>")
     command, *raw_options = arguments
     if command == "source-plan":
         _run_knowledge_source_plan(raw_options, output)
@@ -298,6 +301,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "source-audit":
         _run_knowledge_source_audit(raw_options, output)
+        return
+    if command in {"migrate-compiled", "compile", "compile-audit"}:
+        _run_compiled_knowledge(command, raw_options, output)
         return
     vault, options = _parse_knowledge_options(raw_options)
     settings, service = build_knowledge_service(vault)
@@ -359,6 +365,36 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         )
     else:
         raise WoonError(f"unknown knowledge command {command!r}")
+
+
+def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) -> None:
+    """Run explicit source-schema lifecycle actions outside normal retrieval."""
+
+    force = False
+    raw_options: list[str] = []
+    for option in arguments:
+        if option == "--force":
+            if command != "compile":
+                raise WoonError("--force is supported only by knowledge compile")
+            force = True
+        else:
+            raw_options.append(option)
+    vault, options = _parse_knowledge_options(raw_options)
+    if options:
+        raise WoonError(f"knowledge {command} takes no positional arguments")
+    _, service = build_knowledge_service(vault)
+    if command == "migrate-compiled":
+        migration = service.migrate_compiled_wiki()
+        print(json.dumps(asdict(migration), ensure_ascii=False, indent=2), file=output)
+        return
+    if command == "compile":
+        compilation = service.compile(force=force)
+        print(json.dumps(asdict(compilation), ensure_ascii=False, indent=2), file=output)
+        return
+    audit = service.compilation_audit()
+    print(json.dumps(asdict(audit), ensure_ascii=False, indent=2), file=output)
+    if not audit.complete:
+        raise WoonError(f"compiled Wiki audit found {len(audit.errors)} errors")
 
 
 def _run_knowledge_source_plan(arguments: list[str], output: TextIO) -> None:
@@ -456,6 +492,12 @@ def _run_knowledge_source_reconcile(arguments: list[str], output: TextIO) -> Non
     if state is not None and state not in {"merge-required", "semantic-match", "new"}:
         raise WoonError("source-reconcile --state must be merge-required, semantic-match, or new")
     target = Path(values.get("--vault", ".")).expanduser().resolve()
+    settings, _ = build_knowledge_service(target)
+    if settings.compiled_wiki is not None:
+        raise WoonError(
+            "source-reconcile writes Markdown directly and is disabled for a compiled Wiki; "
+            "capture source and claim/page-spec records, then run knowledge compile"
+        )
     name = values["--source-name"]
     summary = reconcile_catalog(
         Path(values["--source"]),

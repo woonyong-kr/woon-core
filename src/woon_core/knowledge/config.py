@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from woon_core.errors import WoonError
+from woon_core.knowledge.compiled_wiki import CompiledWikiSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class KnowledgeSettings:
     max_chunk_chars: int
     style_guide: Path
     diagram_guide: Path
+    compiled_wiki: CompiledWikiSettings | None
 
     @classmethod
     def load(
@@ -49,7 +51,7 @@ class KnowledgeSettings:
         if not isinstance(raw, dict):
             raise WoonError(f"knowledge configuration must be a mapping: {config_path}")
         version = raw.get("version")
-        if version != 1:
+        if version not in {1, 2}:
             raise WoonError(f"unsupported knowledge configuration version: {version!r}")
         canonical = _mapping(raw, "canonical")
         search = _mapping(raw, "search")
@@ -78,6 +80,11 @@ class KnowledgeSettings:
             raise WoonError(
                 "knowledge configuration search.max_chunk_chars must be between 1000 and 20000"
             )
+        compiled_wiki = (
+            _compiled_wiki_settings(resolved_vault, _mapping(raw, "compiled_wiki"))
+            if version == 2
+            else None
+        )
         return cls(
             vault=resolved_vault,
             canonical_root=canonical_root,
@@ -99,6 +106,7 @@ class KnowledgeSettings:
                 "style.diagram_guide",
                 repository_resolver,
             ),
+            compiled_wiki=compiled_wiki,
         )
 
 
@@ -147,6 +155,22 @@ def _inside(vault: Path, raw: object, field: str) -> Path:
     except ValueError as error:
         raise WoonError(f"knowledge configuration {field!r} escapes the vault") from error
     return resolved
+
+
+def _compiled_wiki_settings(vault: Path, raw: dict[str, Any]) -> CompiledWikiSettings:
+    """Resolve a compiler layout without allowing catalog paths outside the vault."""
+
+    output_root = _inside(vault, raw.get("output_root"), "compiled_wiki.output_root")
+    return CompiledWikiSettings(
+        vault=vault,
+        output_root=output_root,
+        sources_path=_inside(vault, raw.get("sources"), "compiled_wiki.sources"),
+        claims_path=_inside(vault, raw.get("claims"), "compiled_wiki.claims"),
+        pages_path=_inside(vault, raw.get("pages"), "compiled_wiki.pages"),
+        relations_path=_inside(vault, raw.get("relations"), "compiled_wiki.relations"),
+        receipts_path=_inside(vault, raw.get("receipts"), "compiled_wiki.receipts"),
+        review_queue_path=_inside(vault, raw.get("review_queue"), "compiled_wiki.review_queue"),
+    )
 
 
 def _guide(
