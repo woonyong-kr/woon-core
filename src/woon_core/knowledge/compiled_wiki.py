@@ -316,7 +316,9 @@ class CompiledWiki:
             "markdown": body.rstrip() + "\n",
         }
         frontmatter = _canonical_frontmatter(metadata)
-        frontmatter["source_ids"] = [source_id]
+        # Preserve external session ownership in the rendered canonical document.
+        # The compiler source id remains in the page spec and receipt provenance.
+        frontmatter["source_ids"] = list(source_session_ids) or [source_id]
         pages[page_id] = {
             "page_id": page_id,
             "output_path": f"canonical/{metadata.canonical_id}.md",

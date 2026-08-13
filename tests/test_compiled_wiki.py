@@ -205,3 +205,49 @@ def test_compiled_archive_restores_inputs_and_output_when_reindex_fails(tmp_path
 
     assert not (canonical_root / "backend/transaction-boundary.md").exists()
     assert compiler.audit().complete
+
+
+def test_compiled_archive_preserves_session_ownership_and_rejects_duplicates(
+    tmp_path: Path,
+) -> None:
+    write_page(
+        tmp_path,
+        "canonical/backend/ports-and-adapters.md",
+        "포트와 어댑터",
+        "외부 기술의 의존 방향을 분리한다.",
+    )
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    canonical_root = tmp_path / "wiki/canonical"
+    service = KnowledgeService(
+        MarkdownDocumentRepository(tmp_path, canonical_root),
+        SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
+        GitKnowledgeHistory(tmp_path),
+        compiled_wiki=compiler,
+    )
+
+    service.archive(
+        DocumentMetadata(
+            canonical_id="backend/transaction-boundary",
+            title="트랜잭션 경계",
+            domain="backend",
+            summary="요청 처리의 원자성을 정의한다.",
+            source_ids=("session://2026-08-14/001",),
+        ),
+        "## 경계\n\n데이터 변경과 외부 호출의 순서를 분리한다.",
+    )
+
+    archived = (canonical_root / "backend/transaction-boundary.md").read_text(encoding="utf-8")
+    assert "source_ids:\n- session://2026-08-14/001" in archived
+
+    with pytest.raises(WoonError, match="already owned"):
+        service.archive(
+            DocumentMetadata(
+                canonical_id="backend/transaction-order",
+                title="트랜잭션 순서",
+                domain="backend",
+                summary="요청 처리 단계의 순서를 정의한다.",
+                source_ids=("session://2026-08-14/001",),
+            ),
+            "## 순서\n\n쓰기와 외부 호출의 실행 순서를 관리한다.",
+        )
