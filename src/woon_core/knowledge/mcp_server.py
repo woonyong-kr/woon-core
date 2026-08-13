@@ -6,11 +6,15 @@ from dataclasses import asdict
 from functools import lru_cache
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import Settings as FastMCPSettings
 from mcp.types import ToolAnnotations
 
 from woon_core.knowledge.domain import DocumentMetadata
 from woon_core.knowledge.factory import build_knowledge_service
 from woon_core.knowledge.service import KnowledgeService
+
+# mcp 1.29.0 leaves the generic lifespan annotation unresolved until explicitly rebuilt.
+FastMCPSettings.model_rebuild()
 
 mcp = FastMCP(
     "Woon Canonical Knowledge",
