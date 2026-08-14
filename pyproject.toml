@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 woon = "woon_core.cli:main"
+woon-global-instructions = "woon_core.context.global_instructions:main"
 woon-knowledge-mcp = "woon_core.knowledge.mcp_server:main"
 woon-reference-audit = "woon_core.knowledge.reference_audit:main"
 
