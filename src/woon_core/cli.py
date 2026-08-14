@@ -17,6 +17,11 @@ from woon_core.environment import generate as generate_environment
 from woon_core.environment import plan as plan_environment
 from woon_core.environment import verify as verify_environment
 from woon_core.environment.machine import runtime_target
+from woon_core.environment.python_ide import PythonIdeStatus
+from woon_core.environment.python_ide import apply as apply_python_ide
+from woon_core.environment.python_ide import doctor as doctor_python_ide
+from woon_core.environment.python_ide import plan as plan_python_ide
+from woon_core.environment.python_ide import verify as verify_python_ide
 from woon_core.errors import WoonError
 from woon_core.knowledge.factory import build_knowledge_service
 from woon_core.knowledge.reconciliation import audit_reconciliation, reconcile_catalog
@@ -48,6 +53,7 @@ Usage:
   woon env apply [--all]
   woon env verify [--all]
   woon env check [--target <macos|windows|linux>]
+  woon env python-ide <doctor|plan|apply|verify> --project <path>
   woon skills plan --profile <names> [--target <codex|claude>]
   woon skills validate --profile <names>
   woon skills install --profile <names> --target <codex|claude>
@@ -160,6 +166,9 @@ def _run_environment(root: str, arguments: list[str], output: TextIO) -> None:
     if not arguments:
         raise WoonError("usage: woon env <doctor|plan|generate|check|apply|verify> [--all]")
     command, *raw_options = arguments
+    if command == "python-ide":
+        _run_python_ide(root, raw_options, output)
+        return
     target, options = _parse_target(raw_options)
     if options == ["--all"]:
         options = []
@@ -220,6 +229,48 @@ def _run_environment(root: str, arguments: list[str], output: TextIO) -> None:
         )
     else:
         raise WoonError(f"unknown env command {command!r}")
+
+
+def _run_python_ide(root: str, arguments: list[str], output: TextIO) -> None:
+    if not arguments:
+        raise WoonError("usage: woon env python-ide <doctor|plan|apply|verify> --project <path>")
+    command, *options = arguments
+    project = _parse_python_ide_options(options)
+    workspace, registry = _load(root)
+    if command == "doctor":
+        status = doctor_python_ide(workspace.root, registry, project)
+        _print_python_ide_status(status, output)
+        return
+    if command == "plan":
+        result = plan_python_ide(workspace.root, registry, project)
+        _print_python_ide_status(result.status, output)
+        print(f"operations: {len(result.operations)}", file=output)
+        for operation in result.operations:
+            print(f"  - {' '.join(operation)}", file=output)
+        return
+    if command == "apply":
+        status = apply_python_ide(workspace.root, registry, project)
+        _print_python_ide_status(status, output)
+        return
+    if command == "verify":
+        status = verify_python_ide(workspace.root, registry, project)
+        _print_python_ide_status(status, output)
+        return
+    raise WoonError(f"unknown python-ide command {command!r}")
+
+
+def _print_python_ide_status(status: PythonIdeStatus, output: TextIO) -> None:
+    project = status.project
+    environment = status.environment
+    interpreter = status.interpreter
+    uv_available = status.uv_available
+    pip_available = status.pip_available
+    print(
+        f"status: ok\nproject: {project}\nenvironment: {environment}\n"
+        f"interpreter: {interpreter}\nuv_available: {str(uv_available).lower()}\n"
+        f"pip_available: {str(pip_available).lower()}",
+        file=output,
+    )
 
 
 def _run_skills(root: str, arguments: list[str], output: TextIO) -> None:
@@ -602,6 +653,12 @@ def _parse_target(arguments: list[str]) -> tuple[str, list[str]]:
     if target not in {"macos", "windows", "linux"}:
         raise WoonError(f"unsupported target {target!r}")
     return target, remaining
+
+
+def _parse_python_ide_options(arguments: list[str]) -> Path:
+    if len(arguments) != 2 or arguments[0] != "--project" or not arguments[1].strip():
+        raise WoonError("python-ide requires --project <path>")
+    return Path(arguments[1])
 
 
 def _parse_skills_options(arguments: list[str]) -> tuple[list[str], str]:

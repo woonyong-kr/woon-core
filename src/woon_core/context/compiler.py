@@ -37,6 +37,7 @@ SKIPPED_DIRECTORIES = {
     "_archive",
     "_to_delete",
     ".legacy-backup",
+    "backups",
     ".venv",
     "__pycache__",
     "dist",
