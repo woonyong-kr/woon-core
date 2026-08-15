@@ -114,6 +114,8 @@ def archive_conversation(
     related: list[str] | None = None,
     source_session_ids: list[str] | None = None,
     expected_revision: str | None = None,
+    archive_origin: str = "manual-reviewed",
+    approved_review_id: str | None = None,
 ) -> dict[str, object]:
     """Create or optimistically replace one deduplicated canonical document.
 
@@ -141,6 +143,8 @@ def archive_conversation(
         ),
         body,
         expected_revision,
+        archive_origin=archive_origin,
+        approved_review_id=approved_review_id,
     )
     return {
         "created": result.created,

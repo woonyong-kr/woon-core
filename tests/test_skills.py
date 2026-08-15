@@ -276,6 +276,7 @@ def test_claude_selector_disables_customization_and_tools(
             "demo"
         ]
         assert "Available skills:\n- demo: Test skill." in str(options["input"])
+        assert options["timeout"] == 300
         output = json.dumps(
             {
                 "type": "result",

@@ -83,6 +83,7 @@ def plan_source_catalog(
         raise WoonError(f"source corpus does not exist: {source_root}")
     if not target_root.is_dir():
         raise WoonError(f"target knowledge repository does not exist: {target_root}")
+    assert_disjoint_source_and_target(source_root, target_root)
     normalized_name = _source_name(source_name)
     previous_by_locator = {record.locator: record.source_id for record in previous_records}
     previous_by_hash: dict[str, list[str]] = defaultdict(list)
@@ -145,6 +146,24 @@ def plan_source_catalog(
     )
     validate_source_catalog(plan)
     return plan
+
+
+def assert_disjoint_source_and_target(source: Path, target: Path) -> None:
+    """Reject a source corpus that contains the target or is contained by it."""
+
+    resolved_source = source.expanduser().resolve()
+    resolved_target = target.expanduser().resolve()
+    try:
+        resolved_source.relative_to(resolved_target)
+        overlaps = True
+    except ValueError:
+        try:
+            resolved_target.relative_to(resolved_source)
+            overlaps = True
+        except ValueError:
+            overlaps = False
+    if overlaps:
+        raise WoonError("source corpus must be disjoint from the target knowledge repository")
 
 
 def load_source_catalog(path: Path) -> SourceCatalogPlan:

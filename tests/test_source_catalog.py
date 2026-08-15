@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
+from woon_core.errors import WoonError
 from woon_core.knowledge.reconciliation import audit_reconciliation
 from woon_core.knowledge.source_catalog import (
     load_source_catalog,
@@ -80,6 +82,27 @@ def test_source_catalog_output_is_deterministic_and_readable(tmp_path: Path) -> 
     assert raw["summary"] == {"new": 1}
     assert raw["records"][0]["locator"] == "한글 문서.md"
     assert "%ED%95%9C%EA%B8%80" in raw["records"][0]["source_id"]
+
+
+@pytest.mark.parametrize("source_kind", ["same", "child", "parent", "symlink-child"])
+def test_source_catalog_rejects_source_target_overlap(
+    tmp_path: Path, source_kind: str
+) -> None:
+    target = tmp_path / "target"
+    child = target / "source"
+    child.mkdir(parents=True)
+    if source_kind == "same":
+        source = target
+    elif source_kind == "child":
+        source = child
+    elif source_kind == "parent":
+        source = tmp_path
+    else:
+        source = tmp_path / "source-link"
+        source.symlink_to(child, target_is_directory=True)
+
+    with pytest.raises(WoonError, match="must be disjoint"):
+        plan_source_catalog(source, target, "external")
 
 
 def test_reconciliation_audit_reports_pending_and_detects_complete_ledger(

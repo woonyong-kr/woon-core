@@ -167,6 +167,7 @@ def _compiled_wiki_settings(vault: Path, raw: dict[str, Any]) -> CompiledWikiSet
         sources_path=_inside(vault, raw.get("sources"), "compiled_wiki.sources"),
         claims_path=_inside(vault, raw.get("claims"), "compiled_wiki.claims"),
         pages_path=_inside(vault, raw.get("pages"), "compiled_wiki.pages"),
+        curation_path=_inside(vault, raw.get("curation"), "compiled_wiki.curation"),
         relations_path=_inside(vault, raw.get("relations"), "compiled_wiki.relations"),
         receipts_path=_inside(vault, raw.get("receipts"), "compiled_wiki.receipts"),
         review_queue_path=_inside(vault, raw.get("review_queue"), "compiled_wiki.review_queue"),

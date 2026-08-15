@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -42,6 +43,7 @@ SKIPPED_DIRECTORIES = {
     "__pycache__",
     "dist",
 }
+DIRECTORY_NAME_SKIPPED_DIRECTORIES = SKIPPED_DIRECTORIES | {".obsidian"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,11 +246,49 @@ def audit_paths(root: Path, generated_paths: list[str], raw_exceptions: object) 
             continue
         if not path.is_file() or relative in excluded or not _is_operational(relative):
             continue
-        data = path.read_bytes()
+        data = _path_audit_bytes(path, path.read_bytes())
         if any(pattern.search(data) for pattern in ABSOLUTE_USER_PATH_PATTERNS):
             violations.append(relative.as_posix())
     if violations:
         raise WoonError("absolute user paths found in operational files: " + ", ".join(violations))
+
+
+def _path_audit_bytes(path: Path, data: bytes) -> bytes:
+    """Exclude Python ``re.compile`` patterns, never ordinary source literals.
+
+    The path audit protects checked-in configuration and executable values.  A
+    detector such as ``re.compile(r"/Users/")`` is not a machine-local value;
+    treating it as one makes the audit reject its own safety checks.
+    """
+
+    if path.suffix != ".py":
+        return data
+    try:
+        parsed = ast.parse(data.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return data
+
+    regex_lines: set[int] = set()
+    for node in ast.walk(parsed):
+        if not isinstance(node, ast.Call) or not _is_re_compile_call(node):
+            continue
+        regex_lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    if not regex_lines:
+        return data
+    return b"".join(
+        b"\n" if line_number in regex_lines else line
+        for line_number, line in enumerate(data.splitlines(keepends=True), start=1)
+    )
+
+
+def _is_re_compile_call(node: ast.Call) -> bool:
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    return (
+        isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "re"
+        and node.func.attr == "compile"
+    )
 
 
 def audit_directory_names(root: Path) -> None:
@@ -257,7 +297,7 @@ def audit_directory_names(root: Path) -> None:
     violations: list[str] = []
     for path in sorted(item for item in root.rglob("*") if item.is_dir()):
         relative = path.relative_to(root)
-        if any(part in SKIPPED_DIRECTORIES for part in relative.parts):
+        if any(part in DIRECTORY_NAME_SKIPPED_DIRECTORIES for part in relative.parts):
             continue
         name = path.name
         if name.startswith((".", "_")):

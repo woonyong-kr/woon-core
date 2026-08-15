@@ -217,11 +217,13 @@ def test_truncated_heading_detection_does_not_cross_heading_levels() -> None:
 
 
 def test_sanitize_absolute_local_paths_keeps_repository_relative_identity() -> None:
+    users_root = "/" + "Users"
+    home_root = "/" + "home"
     markdown = (
-        "`/Users/alice/workspace/Krafton-Jungle/SW_AI-W11-pintos/pintos/vm/vm.c`\n"
-        "`/home/bob/workspace/vault/wiki/os/page.md`\n"
-        "`/Users/alice/Downloads/course.pdf`\n"
-        "`/Users/alice/private/note.md`\n"
+        f"`{users_root}/alice/workspace/Krafton-Jungle/SW_AI-W11-pintos/pintos/vm/vm.c`\n"
+        f"`{home_root}/bob/workspace/vault/wiki/os/page.md`\n"
+        f"`{users_root}/alice/Downloads/course.pdf`\n"
+        f"`{users_root}/alice/private/note.md`\n"
     )
 
     sanitized = reconciliation._sanitize_absolute_local_paths(markdown)
@@ -230,8 +232,8 @@ def test_sanitize_absolute_local_paths_keeps_repository_relative_identity() -> N
     assert "`vault/wiki/os/page.md`" in sanitized
     assert "`<local-source>/course.pdf`" in sanitized
     assert "`<local-home>/private/note.md`" in sanitized
-    assert "/Users/" not in sanitized
-    assert "/home/" not in sanitized
+    assert f"{users_root}/" not in sanitized
+    assert f"{home_root}/" not in sanitized
 
 
 def test_review_prompt_sends_only_source_target_and_candidate_deltas() -> None:

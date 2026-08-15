@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import time
 from dataclasses import asdict, dataclass
@@ -19,7 +20,10 @@ class CaseResult:
     identifier: str
     query: str
     passed: bool
+    recall_at_k: float
+    precision_at_k: float
     reciprocal_rank: float
+    ndcg_at_k: float
     result_paths: tuple[str, ...]
     excerpt_chars: int
     payload_chars: int
@@ -36,6 +40,8 @@ def evaluate(vault: Path, cases_path: Path) -> dict[str, object]:
     if not isinstance(raw_cases, list) or not raw_cases:
         raise WoonError("evaluation requires at least one case")
     thresholds = _mapping(config.get("thresholds"), "thresholds")
+    _validate_case_paths(vault, raw_cases)
+    answer_and_citation = _answer_and_citation_contract(config)
 
     _, service = build_knowledge_service(vault)
     indexed = service.reindex()
@@ -43,20 +49,27 @@ def evaluate(vault: Path, cases_path: Path) -> dict[str, object]:
     results: list[CaseResult] = []
     all_latencies: list[float] = []
     positive_cases = 0
-    recall_hits = 0
+    recalls: list[float] = []
+    precisions: list[float] = []
     reciprocal_ranks: list[float] = []
+    ndcgs: list[float] = []
     selected_context_chars = 0
 
     for raw_case in raw_cases:
         case = _mapping(raw_case, "case")
         identifier = _string(case.get("id"), "case.id")
         query = _string(case.get("query"), f"{identifier}.query")
-        expected = set(_strings(case.get("expected_any", []), f"{identifier}.expected_any"))
+        relevant = set(
+            _strings(
+                case.get("relevant", case.get("expected_any", [])),
+                f"{identifier}.relevant",
+            )
+        )
         forbidden = set(_strings(case.get("forbidden", []), f"{identifier}.forbidden"))
         expect_empty = bool(case.get("expect_empty", False))
-        if expect_empty == bool(expected):
+        if expect_empty == bool(relevant):
             raise WoonError(
-                f"evaluation case {identifier!r} must define expected_any or expect_empty"
+                f"evaluation case {identifier!r} must define relevant or expect_empty"
             )
         runs: list[tuple[str, ...]] = []
         latencies: list[float] = []
@@ -75,21 +88,34 @@ def evaluate(vault: Path, cases_path: Path) -> dict[str, object]:
         agreement = len(set(runs)) == 1
         forbidden_hit = bool(forbidden.intersection(paths))
         reciprocal_rank = 0.0
+        recall_at_k = 0.0
+        precision_at_k = 0.0
+        ndcg_at_k = 0.0
         excerpt_chars = 0
-        if expected:
+        if relevant:
             positive_cases += 1
+            matching_ranks = [rank for rank, path in enumerate(paths, start=1) if path in relevant]
+            relevant_hits = len(matching_ranks)
+            recall_at_k = relevant_hits / len(relevant)
+            precision_at_k = relevant_hits / len(paths) if paths else 0.0
+            ndcg_at_k = _ndcg(paths, relevant, top_k)
             for rank, path in enumerate(paths, start=1):
-                if path in expected:
+                if path in relevant:
                     reciprocal_rank = 1 / rank
-                    recall_hits += 1
                     chosen = first_results[rank - 1]
                     excerpt = service.read_excerpt(chosen.document_id, chosen.chunk_id)
                     excerpt_chars = len(excerpt.text)
                     selected_context_chars += excerpt_chars
                     break
+            recalls.append(recall_at_k)
+            precisions.append(precision_at_k)
             reciprocal_ranks.append(reciprocal_rank)
+            ndcgs.append(ndcg_at_k)
             passed = reciprocal_rank > 0 and not forbidden_hit and agreement
         else:
+            recall_at_k = 1.0 if not paths else 0.0
+            precision_at_k = 1.0 if not paths else 0.0
+            ndcg_at_k = 1.0 if not paths else 0.0
             passed = not paths and not forbidden_hit and agreement
         payload_chars = len(
             json.dumps([asdict(result) for result in first_results], ensure_ascii=False)
@@ -100,7 +126,10 @@ def evaluate(vault: Path, cases_path: Path) -> dict[str, object]:
                 identifier=identifier,
                 query=query,
                 passed=passed,
+                recall_at_k=recall_at_k,
+                precision_at_k=precision_at_k,
                 reciprocal_rank=reciprocal_rank,
+                ndcg_at_k=ndcg_at_k,
                 result_paths=paths,
                 excerpt_chars=excerpt_chars,
                 payload_chars=payload_chars,
@@ -108,8 +137,10 @@ def evaluate(vault: Path, cases_path: Path) -> dict[str, object]:
             )
         )
 
-    recall_at_k = recall_hits / positive_cases if positive_cases else 1.0
+    recall_at_k = statistics.fmean(recalls) if positive_cases else 1.0
+    precision_at_k = statistics.fmean(precisions) if positive_cases else 1.0
     mean_reciprocal_rank = statistics.fmean(reciprocal_ranks) if reciprocal_ranks else 1.0
+    ndcg_at_k = statistics.fmean(ndcgs) if ndcgs else 1.0
     latency_p50 = _percentile(all_latencies, 0.50)
     latency_p95 = _percentile(all_latencies, 0.95)
     naive_context_chars = index_statistics.total_chars * max(positive_cases, 1)
@@ -119,24 +150,31 @@ def evaluate(vault: Path, cases_path: Path) -> dict[str, object]:
     passed = (
         all(result.passed for result in results)
         and recall_at_k >= _ratio(thresholds.get("recall_at_k"), "recall_at_k")
+        and _meets_optional_ratio(
+            precision_at_k, thresholds.get("precision_at_k"), "precision_at_k"
+        )
         and mean_reciprocal_rank
         >= _ratio(thresholds.get("mean_reciprocal_rank"), "mean_reciprocal_rank")
+        and _meets_optional_ratio(ndcg_at_k, thresholds.get("ndcg_at_k"), "ndcg_at_k")
         and latency_p95 <= _positive_number(thresholds.get("latency_p95_ms"), "latency_p95_ms")
         and context_reduction >= _ratio(thresholds.get("context_reduction"), "context_reduction")
     )
     return {
-        "version": 1,
+        "version": 2,
         "passed": passed,
         "indexed": indexed,
         "index": asdict(index_statistics),
         "metrics": {
             "recall_at_k": recall_at_k,
+            "precision_at_k": precision_at_k,
             "mean_reciprocal_rank": mean_reciprocal_rank,
+            "ndcg_at_k": ndcg_at_k,
             "latency_ms": {"p50": latency_p50, "p95": latency_p95},
             "selected_context_chars": selected_context_chars,
             "naive_context_chars": naive_context_chars,
             "context_reduction": context_reduction,
         },
+        "answer_and_citation": answer_and_citation,
         "cases": [asdict(result) for result in results],
     }
 
@@ -200,6 +238,64 @@ def _ratio(value: object, field: str) -> float:
     if number > 1:
         raise WoonError(f"{field} must be between 0 and 1")
     return number
+
+
+def _meets_optional_ratio(actual: float, value: object, field: str) -> bool:
+    return value is None or actual >= _ratio(value, field)
+
+
+def _ndcg(paths: tuple[str, ...], relevant: set[str], limit: int) -> float:
+    dcg = sum(
+        1 / math.log2(rank + 1)
+        for rank, path in enumerate(paths[:limit], start=1)
+        if path in relevant
+    )
+    ideal_count = min(len(relevant), limit)
+    ideal_dcg = sum(1 / math.log2(rank + 1) for rank in range(1, ideal_count + 1))
+    return dcg / ideal_dcg if ideal_dcg else 0.0
+
+
+def _validate_case_paths(vault: Path, raw_cases: list[object]) -> None:
+    root = vault.expanduser().resolve()
+    for raw_case in raw_cases:
+        case = _mapping(raw_case, "case")
+        identifier = _string(case.get("id"), "case.id")
+        paths = (
+            _strings(case.get("relevant", case.get("expected_any", [])), f"{identifier}.relevant")
+            + _strings(case.get("forbidden", []), f"{identifier}.forbidden")
+        )
+        for relative_path in paths:
+            candidate = (root / relative_path).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError as error:
+                raise WoonError(
+                    f"evaluation case {identifier!r} path escapes the vault: {relative_path}"
+                ) from error
+            if not candidate.is_file():
+                raise WoonError(
+                    f"evaluation case {identifier!r} path does not exist: {relative_path}"
+                )
+
+
+def _answer_and_citation_contract(config: dict[str, Any]) -> dict[str, str]:
+    raw = config.get("answer_and_citation")
+    if raw is None:
+        return {
+            "status": "not-configured",
+            "reason": "retrieval evaluation does not generate answers or citations",
+        }
+    contract = _mapping(raw, "answer_and_citation")
+    mode = _string(contract.get("mode"), "answer_and_citation.mode")
+    if mode not in {"manual-review", "not-applicable"}:
+        raise WoonError(
+            "answer_and_citation.mode must be manual-review or not-applicable"
+        )
+    return {
+        "status": "not-evaluated",
+        "mode": mode,
+        "reason": _string(contract.get("reason"), "answer_and_citation.reason"),
+    }
 
 
 def _percentile(values: list[float], ratio: float) -> float:

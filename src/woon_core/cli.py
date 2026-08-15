@@ -23,8 +23,35 @@ from woon_core.environment.python_ide import doctor as doctor_python_ide
 from woon_core.environment.python_ide import plan as plan_python_ide
 from woon_core.environment.python_ide import verify as verify_python_ide
 from woon_core.errors import WoonError
-from woon_core.knowledge.factory import build_knowledge_service
+from woon_core.knowledge.answer_citation_evaluation import evaluate_answer_citations
+from woon_core.knowledge.codex_quality_review import run_codex_quality_reviews
+from woon_core.knowledge.codex_quality_revision import (
+    apply_codex_quality_revisions,
+    create_codex_quality_revision_proposals,
+)
+from woon_core.knowledge.content_quality_evaluation import evaluate_content_quality
+from woon_core.knowledge.content_quality_review_plan import (
+    assemble_content_quality_reviews,
+    create_content_quality_review_plan,
+    rebase_content_quality_review_plan,
+)
+from woon_core.knowledge.evaluation import evaluate as evaluate_knowledge
+from woon_core.knowledge.factory import build_knowledge_service, resolve_knowledge_vault
+from woon_core.knowledge.ollama_quality_review import run_ollama_quality_reviews
+from woon_core.knowledge.orchestration import (
+    load_orchestrator_settings,
+    verify_codex_automation_registry,
+)
 from woon_core.knowledge.reconciliation import audit_reconciliation, reconcile_catalog
+from woon_core.knowledge.research_intake import (
+    create_research_intake_plan,
+    export_notebooklm_artifact,
+    write_research_intake_plan,
+)
+from woon_core.knowledge.schedule_apply import (
+    apply_confirmed_schedule_candidate,
+    receipt_record,
+)
 from woon_core.knowledge.source_catalog import (
     load_source_catalog,
     plan_source_catalog,
@@ -65,14 +92,78 @@ Usage:
   woon knowledge audit [--vault <path>]
   woon knowledge history <canonical-id> [--limit <1..100>] [--vault <path>]
   woon knowledge migrate-compiled [--vault <path>]
+  woon knowledge initialize-curation [--vault <path>]
+  woon knowledge refresh-provisional-curation [--vault <path>]
+  woon knowledge reconcile-superseded-revisions [--vault <path>]
   woon knowledge compile [--force] [--vault <path>]
   woon knowledge compile-audit [--vault <path>]
+  woon knowledge evaluate --cases <path> [--output <path>] [--vault <path>]
+  woon knowledge evaluate-answers --cases <path> --answers <path>
+    [--output <path>] [--vault <path>]
+  woon knowledge evaluate-quality --reviews <path> --standard <path> --prompt <path>
+    [--output <path>] [--vault <path>]
+  woon knowledge quality-review-plan --standard <path> --prompt <path> --output <directory>
+    [--batch-size <1..64>] [--max-batch-chars <4000..200000>]
+    [--standard-uri <repo-uri>] [--prompt-uri <repo-uri>]
+    [--vault <path>]
+  woon knowledge rebase-quality-review-plan --prior-plan <path> --prior-results <directory>
+    --standard <path> --prompt <path> --output <directory> --results <directory>
+    [--batch-size <1..64>] [--max-batch-chars <4000..200000>]
+    [--standard-uri <repo-uri>] [--prompt-uri <repo-uri>]
+    [--vault <path>]
+  woon knowledge assemble-quality-reviews --plan <path> --results <directory>
+    --standard <path> --evaluator-name <name> --evaluator-version <version>
+    --output <path> [--vault <path>]
+  woon knowledge review-quality-ollama --plan <path> --results <directory>
+    [--model <name>] [--batch <batch-id>...] [--timeout-seconds <30..3600>]
+    [--max-attempts <1..5>] [--context-tokens <4096..32768>]
+    [--adaptive-context <true|false>]
+    [--continue-on-error <true|false>]
+  woon knowledge review-quality-codex --plan <path> --results <directory>
+    [--model <name>] [--codex-binary <path>] [--batch <batch-id>...]
+    [--timeout-seconds <30..3600>] [--max-attempts <1..3>]
+    [--continue-on-error <true|false>]
+  woon knowledge revise-quality-codex --plan <path> --reviews <directory> --output <directory>
+    [--model <name>] [--codex-binary <path>] [--page <page-id>...]
+    [--timeout-seconds <30..3600>]
+    [--max-attempts <1..3>] [--continue-on-error <true|false>] [--vault <path>]
+  woon knowledge apply-quality-revisions --plan <path> --reviews <directory>
+    --proposals <directory> [--proposals <retry-directory>...]
+    [--duplicate-policy error|first-valid] [--vault <path>]
+  woon knowledge research-intake-plan --purpose <text> [--zotero <CSL-JSON>]
+    [--notebooklm-manifest <JSON>] [--output <path>]
+  woon knowledge notebooklm-export --artifact-id <id> --kind <kind>
+    --source-ref <doi-or-arxiv> [--source-ref <doi-or-arxiv>...]
+    --tool-revision <40-hex-commit> --output <markdown> --manifest <JSON>
+    [--nlm <binary>]
   woon knowledge source-plan --source <path> --source-name <name> [--protect <glob>]
     [--vault <path>] [--output <relative-path>]
   woon knowledge source-reconcile --source <path> --source-name <name>
     [--vault <path>] [--limit <count>] [--model <model>] [--state <state>]
   woon knowledge source-audit --source <path> --source-name <name> [--vault <path>]
+  woon knowledge validate-orchestrator [--vault <path>]
+    [--automation-root <path>]
+  woon knowledge schedule-apply --candidate <local-JSON> --confirm <candidate-id>
+    [--vault <path>]
   woon version
+"""
+
+RESEARCH_INTAKE_USAGE = """usage: woon knowledge research-intake-plan --purpose <text>
+  [--zotero <CSL-JSON>]
+  [--notebooklm-manifest <JSON>] [--output <path>]
+
+Builds an offline review plan. Zotero exports contribute bibliographic metadata only;
+NotebookLM Markdown remains review-required until evidence-backed claims are compiled.
+"""
+
+NOTEBOOKLM_EXPORT_USAGE = """usage: woon knowledge notebooklm-export
+  --artifact-id <id> --kind <kind>
+  --source-ref <doi-or-arxiv> [--source-ref <doi-or-arxiv>...]
+  --tool-revision <40-hex-commit> --output <markdown> --manifest <JSON>
+  [--nlm <binary>]
+
+Downloads one already-generated NotebookLM artifact as Markdown through a pinned nlm
+client and writes a review-required manifest. It does not upload sources or modify Woon Wiki.
 """
 
 
@@ -342,7 +433,7 @@ def _run_skills(root: str, arguments: list[str], output: TextIO) -> None:
 
 def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if not arguments:
-        raise WoonError("usage: woon knowledge <index|search|get|audit|history|compile>")
+        raise WoonError("usage: woon knowledge <index|search|get|audit|history|compile|evaluate>")
     command, *raw_options = arguments
     if command == "source-plan":
         _run_knowledge_source_plan(raw_options, output)
@@ -353,8 +444,57 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "source-audit":
         _run_knowledge_source_audit(raw_options, output)
         return
-    if command in {"migrate-compiled", "compile", "compile-audit"}:
+    if command in {
+        "migrate-compiled",
+        "initialize-curation",
+        "refresh-provisional-curation",
+        "reconcile-superseded-revisions",
+        "compile",
+        "compile-audit",
+    }:
         _run_compiled_knowledge(command, raw_options, output)
+        return
+    if command == "evaluate":
+        _run_knowledge_evaluation(raw_options, output)
+        return
+    if command == "evaluate-answers":
+        _run_answer_citation_evaluation(raw_options, output)
+        return
+    if command == "evaluate-quality":
+        _run_content_quality_evaluation(raw_options, output)
+        return
+    if command == "quality-review-plan":
+        _run_content_quality_review_plan(raw_options, output)
+        return
+    if command == "rebase-quality-review-plan":
+        _run_content_quality_review_rebase(raw_options, output)
+        return
+    if command == "assemble-quality-reviews":
+        _run_content_quality_review_assembly(raw_options, output)
+        return
+    if command == "review-quality-ollama":
+        _run_ollama_quality_review(raw_options, output)
+        return
+    if command == "review-quality-codex":
+        _run_codex_quality_review(raw_options, output)
+        return
+    if command == "revise-quality-codex":
+        _run_codex_quality_revision(raw_options, output)
+        return
+    if command == "apply-quality-revisions":
+        _run_codex_quality_revision_apply(raw_options, output)
+        return
+    if command == "research-intake-plan":
+        _run_research_intake_plan(raw_options, output)
+        return
+    if command == "notebooklm-export":
+        _run_notebooklm_export(raw_options, output)
+        return
+    if command == "validate-orchestrator":
+        _run_second_brain_orchestrator_validation(raw_options, output)
+        return
+    if command == "schedule-apply":
+        _run_schedule_apply(raw_options, output)
         return
     vault, options = _parse_knowledge_options(raw_options)
     settings, service = build_knowledge_service(vault)
@@ -418,6 +558,78 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         raise WoonError(f"unknown knowledge command {command!r}")
 
 
+def _run_second_brain_orchestrator_validation(arguments: list[str], output: TextIO) -> None:
+    """Validate policy shape without creating locks, receipts, or tasks."""
+
+    automation_root: Path | None = None
+    raw_options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option != "--automation-root":
+            raw_options.append(option)
+            index += 1
+            continue
+        if automation_root is not None or index + 1 >= len(arguments):
+            raise WoonError("--automation-root requires exactly one path")
+        automation_root = Path(arguments[index + 1]).expanduser()
+        index += 2
+    vault, options = _parse_knowledge_options(raw_options)
+    if options:
+        raise WoonError("knowledge validate-orchestrator takes no positional arguments")
+    settings = load_orchestrator_settings(vault or resolve_knowledge_vault())
+    verified = (
+        verify_codex_automation_registry(settings, automation_root)
+        if automation_root is not None
+        else ()
+    )
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "policy_sha256": settings.policy_sha256,
+                "timezone": settings.timezone,
+                "automations": [
+                    {
+                        "id": item.automation_id,
+                        "mode": item.mode,
+                        "status": item.status,
+                        "task_thread_id": item.task_thread_id,
+                    }
+                    for item in settings.automations
+                ],
+                "codex_registry_verified": list(verified),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_schedule_apply(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    raw_options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--candidate", "--confirm"}:
+            raw_options.append(option)
+            index += 1
+            continue
+        if option in values or index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault, options = _parse_knowledge_options(raw_options)
+    if options or set(values) != {"--candidate", "--confirm"}:
+        raise WoonError("knowledge schedule-apply requires --candidate and --confirm")
+    receipt = apply_confirmed_schedule_candidate(
+        vault or resolve_knowledge_vault(), Path(values["--candidate"]), values["--confirm"]
+    )
+    print(json.dumps(receipt_record(receipt), ensure_ascii=False, indent=2), file=output)
+
+
 def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) -> None:
     """Run explicit source-schema lifecycle actions outside normal retrieval."""
 
@@ -438,6 +650,18 @@ def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) 
         migration = service.migrate_compiled_wiki()
         print(json.dumps(asdict(migration), ensure_ascii=False, indent=2), file=output)
         return
+    if command == "initialize-curation":
+        count = service.initialize_compiled_wiki_curation()
+        print(json.dumps({"curations": count}, ensure_ascii=False, indent=2), file=output)
+        return
+    if command == "refresh-provisional-curation":
+        count = service.refresh_provisional_compiled_wiki_curation()
+        print(json.dumps({"refreshed": count}, ensure_ascii=False, indent=2), file=output)
+        return
+    if command == "reconcile-superseded-revisions":
+        report = service.reconcile_superseded_compiled_wiki_revisions()
+        print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+        return
     if command == "compile":
         compilation = service.compile(force=force)
         print(json.dumps(asdict(compilation), ensure_ascii=False, indent=2), file=output)
@@ -446,6 +670,555 @@ def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) 
     print(json.dumps(asdict(audit), ensure_ascii=False, indent=2), file=output)
     if not audit.complete:
         raise WoonError(f"compiled Wiki audit found {len(audit.errors)} errors")
+
+
+def _run_research_intake_plan(arguments: list[str], output: TextIO) -> None:
+    if arguments in (["--help"], ["-h"]):
+        output.write(RESEARCH_INTAKE_USAGE)
+        return
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--purpose", "--zotero", "--notebooklm-manifest", "--output"}:
+            raise WoonError(f"unexpected knowledge research-intake-plan argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--purpose" not in values:
+        raise WoonError("knowledge research-intake-plan requires --purpose")
+    plan = create_research_intake_plan(
+        purpose=values["--purpose"],
+        zotero_export=(
+            Path(values["--zotero"]).expanduser().resolve() if "--zotero" in values else None
+        ),
+        notebooklm_manifest=(
+            Path(values["--notebooklm-manifest"]).expanduser().resolve()
+            if "--notebooklm-manifest" in values
+            else None
+        ),
+    )
+    if "--output" in values:
+        write_research_intake_plan(plan, Path(values["--output"]))
+    print(json.dumps(plan, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_notebooklm_export(arguments: list[str], output: TextIO) -> None:
+    if arguments in (["--help"], ["-h"]):
+        output.write(NOTEBOOKLM_EXPORT_USAGE)
+        return
+    values: dict[str, str] = {}
+    source_refs: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {
+            "--artifact-id",
+            "--kind",
+            "--source-ref",
+            "--tool-revision",
+            "--output",
+            "--manifest",
+            "--nlm",
+        }:
+            raise WoonError(f"unexpected knowledge notebooklm-export argument: {option}")
+        if index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires exactly one value")
+        value = arguments[index + 1]
+        if option == "--source-ref":
+            source_refs.append(value)
+        elif option in values:
+            raise WoonError(f"{option} may only be provided once")
+        else:
+            values[option] = value
+        index += 2
+    required = {"--artifact-id", "--kind", "--tool-revision", "--output", "--manifest"}
+    missing = sorted(required.difference(values))
+    if missing or not source_refs:
+        details = missing + ([] if source_refs else ["--source-ref"])
+        raise WoonError("knowledge notebooklm-export requires " + ", ".join(details))
+    result = export_notebooklm_artifact(
+        artifact_id=values["--artifact-id"],
+        kind=values["--kind"],
+        source_refs=tuple(source_refs),
+        tool_revision=values["--tool-revision"],
+        output_markdown=Path(values["--output"]),
+        manifest_output=Path(values["--manifest"]),
+        nlm_binary=values.get("--nlm", "nlm"),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_knowledge_evaluation(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--vault", "--cases", "--output"}:
+            raise WoonError(f"unexpected knowledge evaluate argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--cases" not in values:
+        raise WoonError("knowledge evaluate requires --cases")
+    vault = Path(values.get("--vault", ".")).expanduser().resolve()
+    result = evaluate_knowledge(vault, Path(values["--cases"]).expanduser().resolve())
+    rendered = json.dumps(result, ensure_ascii=False, indent=2)
+    if "--output" in values:
+        destination = Path(values["--output"]).expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered, file=output)
+    if not result["passed"]:
+        raise WoonError("knowledge retrieval evaluation did not meet thresholds")
+
+
+def _run_answer_citation_evaluation(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--vault", "--cases", "--answers", "--output"}:
+            raise WoonError(f"unexpected knowledge evaluate-answers argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    missing = sorted({"--cases", "--answers"}.difference(values))
+    if missing:
+        raise WoonError("knowledge evaluate-answers requires " + ", ".join(missing))
+    result = evaluate_answer_citations(
+        Path(values.get("--vault", ".")).expanduser().resolve(),
+        Path(values["--cases"]).expanduser().resolve(),
+        Path(values["--answers"]).expanduser().resolve(),
+    )
+    rendered = json.dumps(result, ensure_ascii=False, indent=2)
+    if "--output" in values:
+        destination = Path(values["--output"]).expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered, file=output)
+    if not result["passed"]:
+        raise WoonError("knowledge answer/citation evaluation did not meet all checks")
+
+
+def _run_content_quality_evaluation(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--vault", "--reviews", "--standard", "--prompt", "--output"}:
+            raise WoonError(f"unexpected knowledge evaluate-quality argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    missing = sorted({"--reviews", "--standard", "--prompt"}.difference(values))
+    if missing:
+        raise WoonError("knowledge evaluate-quality requires " + ", ".join(missing))
+    result = evaluate_content_quality(
+        Path(values.get("--vault", ".")).expanduser().resolve(),
+        Path(values["--reviews"]).expanduser().resolve(),
+        Path(values["--standard"]).expanduser().resolve(),
+        Path(values["--prompt"]).expanduser().resolve(),
+    )
+    rendered = json.dumps(result, ensure_ascii=False, indent=2)
+    if "--output" in values:
+        destination = Path(values["--output"]).expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered, file=output)
+    if not result["passed"]:
+        raise WoonError("knowledge content quality evaluation did not meet all checks")
+
+
+def _run_content_quality_review_plan(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {
+            "--vault",
+            "--standard",
+            "--standard-uri",
+            "--prompt",
+            "--prompt-uri",
+            "--output",
+            "--batch-size",
+            "--max-batch-chars",
+        }:
+            raise WoonError(f"unexpected knowledge quality-review-plan argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    missing = sorted({"--standard", "--prompt", "--output"}.difference(values))
+    if missing:
+        raise WoonError("knowledge quality-review-plan requires " + ", ".join(missing))
+    batch_size = _quality_review_batch_size(values.get("--batch-size", "1"))
+    max_batch_chars = _quality_review_max_batch_chars(values.get("--max-batch-chars", "24000"))
+    result = create_content_quality_review_plan(
+        Path(values.get("--vault", ".")).expanduser().resolve(),
+        Path(values["--standard"]).expanduser().resolve(),
+        values.get("--standard-uri", "repo://skills/standards/learning-writing-harness.md"),
+        Path(values["--prompt"]).expanduser().resolve(),
+        values.get("--prompt-uri", "repo://skills/standards/learning-quality-review-prompt.md"),
+        Path(values["--output"]).expanduser().resolve(),
+        batch_size,
+        max_batch_chars,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_content_quality_review_rebase(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {
+            "--vault",
+            "--prior-plan",
+            "--prior-results",
+            "--standard",
+            "--standard-uri",
+            "--prompt",
+            "--prompt-uri",
+            "--output",
+            "--results",
+            "--batch-size",
+            "--max-batch-chars",
+        }:
+            raise WoonError(f"unexpected knowledge rebase-quality-review-plan argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    required = {
+        "--prior-plan",
+        "--prior-results",
+        "--standard",
+        "--prompt",
+        "--output",
+        "--results",
+    }
+    missing = sorted(required.difference(values))
+    if missing:
+        raise WoonError("knowledge rebase-quality-review-plan requires " + ", ".join(missing))
+    result = rebase_content_quality_review_plan(
+        Path(values.get("--vault", ".")).expanduser().resolve(),
+        Path(values["--prior-plan"]).expanduser().resolve(),
+        Path(values["--prior-results"]).expanduser().resolve(),
+        Path(values["--standard"]).expanduser().resolve(),
+        values.get("--standard-uri", "repo://skills/standards/learning-writing-harness.md"),
+        Path(values["--prompt"]).expanduser().resolve(),
+        values.get("--prompt-uri", "repo://skills/standards/learning-quality-review-prompt.md"),
+        Path(values["--output"]).expanduser().resolve(),
+        Path(values["--results"]).expanduser().resolve(),
+        _quality_review_batch_size(values.get("--batch-size", "2")),
+        _quality_review_max_batch_chars(values.get("--max-batch-chars", "24000")),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_content_quality_review_assembly(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {
+            "--vault",
+            "--plan",
+            "--results",
+            "--standard",
+            "--evaluator-name",
+            "--evaluator-version",
+            "--output",
+        }:
+            raise WoonError(f"unexpected knowledge assemble-quality-reviews argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    required = {
+        "--plan",
+        "--results",
+        "--standard",
+        "--evaluator-name",
+        "--evaluator-version",
+        "--output",
+    }
+    missing = sorted(required.difference(values))
+    if missing:
+        raise WoonError("knowledge assemble-quality-reviews requires " + ", ".join(missing))
+    result = assemble_content_quality_reviews(
+        Path(values.get("--vault", ".")).expanduser().resolve(),
+        Path(values["--plan"]).expanduser().resolve(),
+        Path(values["--results"]).expanduser().resolve(),
+        Path(values["--standard"]).expanduser().resolve(),
+        values["--evaluator-name"],
+        values["--evaluator-version"],
+        Path(values["--output"]).expanduser().resolve(),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_ollama_quality_review(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    batch_ids: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {
+            "--plan",
+            "--results",
+            "--model",
+            "--batch",
+            "--timeout-seconds",
+            "--max-attempts",
+            "--context-tokens",
+            "--adaptive-context",
+            "--continue-on-error",
+        }:
+            raise WoonError(f"unexpected knowledge review-quality-ollama argument: {option}")
+        if index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires exactly one value")
+        value = arguments[index + 1]
+        if option == "--batch":
+            batch_ids.append(value)
+        elif option in values:
+            raise WoonError(f"{option} may only be provided once")
+        else:
+            values[option] = value
+        index += 2
+    missing = sorted({"--plan", "--results"}.difference(values))
+    if missing:
+        raise WoonError("knowledge review-quality-ollama requires " + ", ".join(missing))
+    timeout = _ollama_quality_timeout(values.get("--timeout-seconds", "600"))
+    max_attempts = _ollama_quality_max_attempts(values.get("--max-attempts", "3"))
+    context_tokens = _ollama_quality_context_tokens(values.get("--context-tokens", "32768"))
+    adaptive_context = _boolean_option(
+        values.get("--adaptive-context", "false"), "Ollama quality review adaptive_context"
+    )
+    continue_on_error = _boolean_option(
+        values.get("--continue-on-error", "false"), "Ollama quality review continue_on_error"
+    )
+    result = run_ollama_quality_reviews(
+        Path(values["--plan"]).expanduser().resolve(),
+        Path(values["--results"]).expanduser().resolve(),
+        model=values.get("--model", "qwen3:4b-instruct"),
+        timeout_seconds=timeout,
+        max_attempts=max_attempts,
+        context_tokens=context_tokens,
+        adaptive_context=adaptive_context,
+        continue_on_error=continue_on_error,
+        batch_ids=tuple(batch_ids),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_codex_quality_review(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    batch_ids: list[str] = []
+    allowed = {
+        "--plan",
+        "--results",
+        "--model",
+        "--codex-binary",
+        "--batch",
+        "--timeout-seconds",
+        "--max-attempts",
+        "--continue-on-error",
+    }
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in allowed:
+            raise WoonError(f"unexpected knowledge review-quality-codex argument: {option}")
+        if index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires exactly one value")
+        value = arguments[index + 1]
+        if option == "--batch":
+            batch_ids.append(value)
+        elif option in values:
+            raise WoonError(f"{option} may only be provided once")
+        else:
+            values[option] = value
+        index += 2
+    missing = sorted({"--plan", "--results"}.difference(values))
+    if missing:
+        raise WoonError("knowledge review-quality-codex requires " + ", ".join(missing))
+    result = run_codex_quality_reviews(
+        Path(values["--plan"]).expanduser().resolve(),
+        Path(values["--results"]).expanduser().resolve(),
+        model=values.get("--model"),
+        codex_binary=values.get("--codex-binary", "codex"),
+        timeout_seconds=_ollama_quality_timeout(values.get("--timeout-seconds", "900")),
+        max_attempts=_codex_quality_max_attempts(values.get("--max-attempts", "1")),
+        continue_on_error=_boolean_option(
+            values.get("--continue-on-error", "false"), "Codex quality review continue_on_error"
+        ),
+        batch_ids=tuple(batch_ids),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_codex_quality_revision(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    page_ids: list[str] = []
+    allowed = {
+        "--vault",
+        "--plan",
+        "--reviews",
+        "--output",
+        "--model",
+        "--codex-binary",
+        "--page",
+        "--timeout-seconds",
+        "--max-attempts",
+        "--continue-on-error",
+    }
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in allowed:
+            raise WoonError(f"unexpected knowledge revise-quality-codex argument: {option}")
+        if index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires exactly one value")
+        if option == "--page":
+            page_ids.append(arguments[index + 1])
+        elif option in values:
+            raise WoonError(f"{option} may only be provided once")
+        else:
+            values[option] = arguments[index + 1]
+        index += 2
+    required = {"--plan", "--reviews", "--output"}
+    missing = sorted(required.difference(values))
+    if missing:
+        raise WoonError("knowledge revise-quality-codex requires " + ", ".join(missing))
+    result = create_codex_quality_revision_proposals(
+        Path(values.get("--vault", ".")).expanduser().resolve(),
+        Path(values["--plan"]).expanduser().resolve(),
+        Path(values["--reviews"]).expanduser().resolve(),
+        Path(values["--output"]).expanduser().resolve(),
+        model=values.get("--model"),
+        codex_binary=values.get("--codex-binary", "codex"),
+        timeout_seconds=_ollama_quality_timeout(values.get("--timeout-seconds", "900")),
+        max_attempts=_codex_quality_max_attempts(values.get("--max-attempts", "1")),
+        continue_on_error=_boolean_option(
+            values.get("--continue-on-error", "false"), "Codex quality revision continue_on_error"
+        ),
+        page_ids=tuple(page_ids),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_codex_quality_revision_apply(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    proposal_dirs: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {
+            "--vault",
+            "--plan",
+            "--reviews",
+            "--proposals",
+            "--duplicate-policy",
+        }:
+            raise WoonError(f"unexpected knowledge apply-quality-revisions argument: {option}")
+        if index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires exactly one value")
+        if option == "--proposals":
+            proposal_dirs.append(arguments[index + 1])
+        elif option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        else:
+            values[option] = arguments[index + 1]
+        index += 2
+    required = {"--plan", "--reviews"}
+    missing = sorted(required.difference(values))
+    if missing or not proposal_dirs:
+        if not proposal_dirs:
+            missing.append("--proposals")
+        raise WoonError("knowledge apply-quality-revisions requires " + ", ".join(missing))
+    result = apply_codex_quality_revisions(
+        Path(values.get("--vault", ".")).expanduser().resolve(),
+        Path(values["--plan"]).expanduser().resolve(),
+        Path(values["--reviews"]).expanduser().resolve(),
+        tuple(Path(path).expanduser().resolve() for path in proposal_dirs),
+        duplicate_policy=values.get("--duplicate-policy", "error"),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _ollama_quality_timeout(value: str) -> int:
+    try:
+        timeout = int(value)
+    except ValueError as error:
+        raise WoonError("Ollama quality review timeout must be an integer") from error
+    if not 30 <= timeout <= 3600:
+        raise WoonError("Ollama quality review timeout must be between 30 and 3600 seconds")
+    return timeout
+
+
+def _ollama_quality_max_attempts(value: str) -> int:
+    try:
+        max_attempts = int(value)
+    except ValueError as error:
+        raise WoonError("Ollama quality review max_attempts must be an integer") from error
+    if not 1 <= max_attempts <= 5:
+        raise WoonError("Ollama quality review max_attempts must be between 1 and 5")
+    return max_attempts
+
+
+def _codex_quality_max_attempts(value: str) -> int:
+    try:
+        max_attempts = int(value)
+    except ValueError as error:
+        raise WoonError("Codex quality review max_attempts must be an integer") from error
+    if not 1 <= max_attempts <= 3:
+        raise WoonError("Codex quality review max_attempts must be between 1 and 3")
+    return max_attempts
+
+
+def _ollama_quality_context_tokens(value: str) -> int:
+    try:
+        context_tokens = int(value)
+    except ValueError as error:
+        raise WoonError("Ollama quality review context_tokens must be an integer") from error
+    if not 4096 <= context_tokens <= 32768:
+        raise WoonError("Ollama quality review context_tokens must be between 4096 and 32768")
+    return context_tokens
+
+
+def _boolean_option(value: str, label: str) -> bool:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise WoonError(f"{label} must be true or false")
+
+
+def _quality_review_batch_size(value: str) -> int:
+    try:
+        batch_size = int(value)
+    except ValueError as error:
+        raise WoonError("quality review batch size must be an integer") from error
+    if not 1 <= batch_size <= 64:
+        raise WoonError("quality review batch size must be between 1 and 64")
+    return batch_size
+
+
+def _quality_review_max_batch_chars(value: str) -> int:
+    try:
+        maximum = int(value)
+    except ValueError as error:
+        raise WoonError("quality review max_batch_chars must be an integer") from error
+    if not 4_000 <= maximum <= 200_000:
+        raise WoonError("quality review max_batch_chars must be between 4000 and 200000")
+    return maximum
 
 
 def _run_knowledge_source_plan(arguments: list[str], output: TextIO) -> None:
@@ -469,6 +1242,7 @@ def _run_knowledge_source_plan(arguments: list[str], output: TextIO) -> None:
     if "--source" not in values or "--source-name" not in values:
         raise WoonError("source-plan requires --source and --source-name")
     target = Path(values.get("--vault", ".")).expanduser().resolve()
+    _reject_self_source_catalog(Path(values["--source"]), target)
     relative_output = Path(
         values.get("--output", f"catalog/sources/{values['--source-name']}.yaml")
     )
@@ -543,6 +1317,7 @@ def _run_knowledge_source_reconcile(arguments: list[str], output: TextIO) -> Non
     if state is not None and state not in {"merge-required", "semantic-match", "new"}:
         raise WoonError("source-reconcile --state must be merge-required, semantic-match, or new")
     target = Path(values.get("--vault", ".")).expanduser().resolve()
+    _reject_self_source_catalog(Path(values["--source"]), target)
     settings, _ = build_knowledge_service(target)
     if settings.compiled_wiki is not None:
         raise WoonError(
@@ -578,6 +1353,7 @@ def _run_knowledge_source_audit(arguments: list[str], output: TextIO) -> None:
     if "--source" not in values or "--source-name" not in values:
         raise WoonError("source-audit requires --source and --source-name")
     target = Path(values.get("--vault", ".")).expanduser().resolve()
+    _reject_self_source_catalog(Path(values["--source"]), target)
     name = values["--source-name"]
     audit = audit_reconciliation(
         Path(values["--source"]),
@@ -590,6 +1366,27 @@ def _run_knowledge_source_audit(arguments: list[str], output: TextIO) -> None:
         raise WoonError(
             f"source reconciliation is incomplete: pending={audit.pending}, "
             f"failed={audit.failed}, errors={len(audit.errors)}"
+        )
+
+
+def _reject_self_source_catalog(source: Path, target: Path) -> None:
+    """Keep the current vault out of the external-corpus import workflow."""
+
+    resolved_source = source.expanduser().resolve()
+    resolved_target = target.expanduser().resolve()
+    try:
+        resolved_source.relative_to(resolved_target)
+        overlaps = True
+    except ValueError:
+        try:
+            resolved_target.relative_to(resolved_source)
+            overlaps = True
+        except ValueError:
+            overlaps = False
+    if overlaps:
+        raise WoonError(
+            "current vault self-source catalog is retired; use knowledge compile-audit "
+            "and audit-vault-health instead"
         )
 
 
