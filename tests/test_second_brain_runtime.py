@@ -206,6 +206,42 @@ def test_candidate_run_writes_only_the_lane_owned_review_path(tmp_path: Path) ->
     assert result.replayed is False
 
 
+def test_invalid_human_review_card_cannot_advance_receipt_or_checkpoint(tmp_path: Path) -> None:
+    _write_runnable_policy(tmp_path)
+    settings = load_orchestrator_settings(tmp_path)
+    review = tmp_path / "brain/review/mail/governance-preflight-abcdef123456.md"
+    review.parent.mkdir(parents=True)
+    review.write_text(
+        """---
+type: Proposal
+title: Governance preflight abcdef123456
+publish: false
+access: local-only
+status: Review
+---
+
+# Governance preflight abcdef123456
+""",
+        encoding="utf-8",
+    )
+    request = RunRequest(
+        source_range="fixture-range-human-review",
+        input_sha256=hashlib.sha256(b"safe fixture input").hexdigest(),
+        expected_owned_revision=snapshot_owned_paths(tmp_path, ("brain/review/mail",)),
+        cursor_after="cursor-after-human-review",
+    )
+
+    with pytest.raises(WoonError, match="human Candidate metadata"):
+        AutomationRunStore(settings).run(
+            "mail-schedule-candidates",
+            request,
+            lambda: RunOutcome(candidate_ids=(), output_sha256="e" * 64),
+        )
+
+    assert not settings.checkpoint_path.exists()
+    assert not (settings.receipt_directory / "mail-schedule-candidates").exists()
+
+
 def test_rejects_proposal_lane_from_using_candidate_writer(tmp_path: Path) -> None:
     _write_runnable_policy(tmp_path)
     policy_path = tmp_path / "config/second-brain-orchestrator.yaml"

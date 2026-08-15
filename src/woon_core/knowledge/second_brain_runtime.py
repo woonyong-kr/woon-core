@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _IDENTIFIER_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,127}")
+_REVIEW_INTERNAL_TERM_RE = re.compile(
+    r"(?:candidate|governance|preflight|heartbeat|thread|hash|[0-9a-f]{12,})",
+    flags=re.IGNORECASE,
+)
 _CHECKPOINT_VERSION = 1
 _RECEIPT_VERSION = 1
 
@@ -106,6 +110,7 @@ class AutomationRunStore:
                     f"{type(error).__name__}"
                 ) from error
             self._validate_outcome(outcome)
+            validate_review_cards(self._settings.vault, contract.owned_paths)
             receipt = _receipt(contract, request, outcome, receipt_id, self._settings.policy_sha256)
             atomic_write(receipt_path, encode_json(receipt), mode=0o600)
             self._write_checkpoint(checkpoint, contract, request, receipt_id)
@@ -320,6 +325,82 @@ def snapshot_owned_paths(vault: Path, owned_paths: tuple[str, ...]) -> str:
                 raise WoonError("second-brain owned file must not be a symlink")
             _digest_file(digest, path, path.relative_to(resolved_vault).as_posix())
     return digest.hexdigest()
+
+
+def validate_review_cards(vault: Path, owned_paths: tuple[str, ...]) -> None:
+    """Fail closed before a receipt when an automation-owned Review card is not human UI.
+
+    Only paths under ``brain/review`` are inspected. Runtime-only lanes retain
+    opaque IDs by design and must remain outside Obsidian's visible review UI.
+    """
+
+    resolved_vault = vault.expanduser().resolve()
+    for owned_path in owned_paths:
+        if not owned_path.startswith("brain/review/"):
+            continue
+        root = (resolved_vault / owned_path).resolve()
+        try:
+            root.relative_to(resolved_vault)
+        except ValueError as error:
+            raise WoonError("second-brain review path escapes vault") from error
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*.md")):
+            if path.name == "README.md":
+                continue
+            _validate_review_card(path)
+
+
+def _validate_review_card(path: Path) -> None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise WoonError("second-brain review card is unreadable") from error
+    frontmatter, body = _review_frontmatter(text)
+    title = frontmatter.get("title")
+    summary = frontmatter.get("summary")
+    status = frontmatter.get("status")
+    if (
+        frontmatter.get("type") != "Candidate"
+        or status not in {"Review", "Scheduled"}
+        or not isinstance(title, str)
+        or not title.strip()
+        or not isinstance(summary, str)
+        or not summary.strip()
+    ):
+        raise WoonError("second-brain review card must have human Candidate metadata")
+    heading = _first_h1(body)
+    if heading != title:
+        raise WoonError("second-brain review card title and H1 must match")
+    visible = "\n".join((path.stem, title, summary, heading))
+    if not re.search(r"[가-힣]", visible):
+        raise WoonError("second-brain review card must use a Korean human title")
+    if _REVIEW_INTERNAL_TERM_RE.search(visible):
+        raise WoonError("second-brain review card exposes an internal identifier")
+
+
+def _review_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    if not text.startswith("---\n"):
+        raise WoonError("second-brain review card is missing frontmatter")
+    end = text.find("\n---", 4)
+    if end == -1:
+        raise WoonError("second-brain review card frontmatter is malformed")
+    values: dict[str, str] = {}
+    for line in text[4:end].splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if ":" not in line:
+            raise WoonError("second-brain review card frontmatter is malformed")
+        key, value = line.split(":", 1)
+        values[key.strip()] = value.strip().strip('"')
+    return values, text[end + 4 :]
+
+
+def _first_h1(text: str) -> str | None:
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return None
 
 
 def _digest_file(digest: Any, path: Path, relative_path: str) -> None:
