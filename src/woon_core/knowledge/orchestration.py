@@ -23,10 +23,10 @@ _CADENCES = {
     "four-hourly",
     "daily",
     "daily-and-policy-gate",
-    "manual-confirmation-only",
+    "allowlisted-mail-triggered",
 }
 _EXECUTION_MODES = {"candidate-only", "review-only", "proposal-only", "policy-authorized"}
-_EXECUTION_STATUSES = {"planned", "enabled", "disabled"}
+_EXECUTION_STATUSES = {"planned", "enabled", "disabled", "local-only"}
 _NOTIFICATION_POLICIES = {"failed_runs_only", "always", "none"}
 
 
@@ -221,8 +221,8 @@ def _automation(raw: object, index: int) -> AutomationContract:
     status = _required_string(execution.get("status"), f"automations[{index}].execution.status")
     if status not in _EXECUTION_STATUSES:
         raise WoonError(f"unsupported automation execution status: {status}")
-    if mode == "policy-authorized" and status != "disabled":
-        raise WoonError("policy-authorized schedule apply must not have an independent scheduler")
+    if mode == "policy-authorized" and status != "local-only":
+        raise WoonError("policy-authorized schedule apply must stay local-only")
     task_thread_id = execution.get("task_thread_id")
     if task_thread_id is not None:
         task_thread_id = _required_string(
@@ -475,10 +475,21 @@ def _validate_schedule_apply_contract(contracts: tuple[AutomationContract, ...])
     lane = matches[0]
     if (
         lane.mode != "policy-authorized"
-        or lane.status != "disabled"
-        or lane.cadence != "manual-confirmation-only"
+        or lane.status != "local-only"
+        or lane.cadence != "allowlisted-mail-triggered"
     ):
-        raise WoonError("policy-schedule-apply must stay local and disabled")
+        raise WoonError("policy-schedule-apply must stay local-only and unscheduled")
+    if any(
+        value is not None
+        for value in (
+            lane.task_thread_id,
+            lane.codex_automation_id,
+            lane.rrule,
+            lane.notification_policy,
+            lane.prompt_sha256,
+        )
+    ):
+        raise WoonError("local-only schedule apply must not register a Codex automation")
 
 
 def _string_list(value: object, field: str) -> tuple[str, ...]:

@@ -31,7 +31,7 @@ def apply_policy_authorized_schedule_candidate(
         (item for item in settings.automations if item.automation_id == "policy-schedule-apply"),
         None,
     )
-    if contract is None or contract.mode != "policy-authorized" or contract.status != "disabled":
+    if contract is None or contract.mode != "policy-authorized" or contract.status != "local-only":
         raise WoonError("schedule apply policy must remain locally policy-authorized")
     candidate = _load_candidate(settings.vault, candidate_path)
     if not candidate.source_id.startswith("gmail-thread:"):
@@ -52,11 +52,15 @@ def receipt_record(receipt: ScheduleReceipt) -> dict[str, object]:
 def _load_candidate(vault: Path, candidate_path: Path) -> ScheduleCandidate:
     resolved_vault = vault.expanduser().resolve()
     resolved_path = candidate_path.expanduser().resolve()
-    allowed_root = (resolved_vault / "brain/review/schedule-apply").resolve()
+    # Apply payloads contain opaque bridge identifiers. They are runtime input,
+    # not an Obsidian review document, so they must never live under brain/.
+    allowed_root = (resolved_vault / ".local/woon-knowledge/schedule-apply").resolve()
     try:
         resolved_path.relative_to(allowed_root)
     except ValueError as error:
-        raise WoonError("schedule candidate must be under brain/review/schedule-apply") from error
+        raise WoonError(
+            "schedule candidate must be under .local/woon-knowledge/schedule-apply"
+        ) from error
     try:
         raw = json.loads(resolved_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:

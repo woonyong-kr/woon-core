@@ -199,7 +199,9 @@ def test_candidate_run_writes_only_the_lane_owned_review_path(tmp_path: Path) ->
         "mail-schedule-candidates", request, (candidate,)
     )
 
-    assert (tmp_path / "brain/review/mail" / f"{candidate.candidate_id}.md").is_file()
+    assert (
+        tmp_path / "brain/review/mail" / "크래프톤-면접-일정-확인이-필요하다.md"
+    ).is_file()
     assert not (tmp_path / "brain/review/codex" / f"{candidate.candidate_id}.md").exists()
     assert result.replayed is False
 

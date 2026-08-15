@@ -125,7 +125,7 @@ automations:
       owned_paths: [brain/review/mail]
   - id: policy-schedule-apply
     owner: policy-schedule-apply-task
-    cadence: manual-confirmation-only
+    cadence: allowlisted-mail-triggered
     inputs: [policy-authorized-schedule-candidate]
     output: [confirmed-write]
     checkpoint_key: policy-schedule-apply
@@ -133,7 +133,7 @@ automations:
     prohibited: [ambiguous-mail-write]
     execution:
       mode: policy-authorized
-      status: disabled
+      status: local-only
       task_thread_id: null
       codex_automation_id: null
       rrule: null
@@ -261,11 +261,26 @@ def test_rejects_privacy_contract_and_enabled_schedule_apply(tmp_path: Path) -> 
 
     write_policy(tmp_path)
     unsafe_apply = path.read_text(encoding="utf-8").replace(
-        "mode: policy-authorized\n      status: disabled",
+        "mode: policy-authorized\n      status: local-only",
         "mode: policy-authorized\n      status: enabled",
     )
     path.write_text(unsafe_apply, encoding="utf-8")
-    with pytest.raises(WoonError, match="policy-authorized schedule apply must not have"):
+    with pytest.raises(WoonError, match="policy-authorized schedule apply must stay local-only"):
+        load_orchestrator_settings(tmp_path)
+
+
+def test_rejects_registered_local_only_schedule_apply(tmp_path: Path) -> None:
+    write_policy(tmp_path)
+    path = tmp_path / "config/second-brain-orchestrator.yaml"
+    before, schedule_lane = path.read_text(encoding="utf-8").split(
+        "  - id: policy-schedule-apply", 1
+    )
+    schedule_lane = schedule_lane.replace(
+        "task_thread_id: null", 'task_thread_id: "thread-001"', 1
+    )
+    path.write_text(before + "  - id: policy-schedule-apply" + schedule_lane, encoding="utf-8")
+
+    with pytest.raises(WoonError, match="local-only schedule apply must not register"):
         load_orchestrator_settings(tmp_path)
 
 

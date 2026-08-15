@@ -52,11 +52,14 @@ def test_creates_only_review_candidate_for_allowlisted_datetime_mail(tmp_path: P
     outcome = persist_review_candidates(tmp_path, "brain/review/mail", (candidate,))
 
     assert outcome.candidate_ids == (candidate.candidate_id,)
-    path = tmp_path / "brain/review/mail" / f"{candidate.candidate_id}.md"
+    path = tmp_path / "brain/review/mail" / "크래프톤-면접-일정-확인이-필요하다.md"
     stored = path.read_text(encoding="utf-8")
+    assert 'title: "크래프톤 면접 일정 확인이 필요하다."' in stored
+    assert candidate.candidate_id not in stored
+    assert candidate.source_locator not in stored
     assert "status: Review" in stored
-    assert "things_candidate: true" in stored
-    assert "calendar_candidate: true" in stored
+    assert "things_candidate:" not in stored
+    assert "calendar_candidate:" not in stored
     assert "Things 3와 Apple Calendar에 자동 반영할 수 있다." in stored
     assert "원문 메일 본문은 절대 저장하면 안 된다" not in stored
 
@@ -73,7 +76,7 @@ def test_date_only_mail_can_be_a_things_candidate_but_never_calendar_candidate()
 def test_refuses_to_overwrite_a_changed_review_candidate(tmp_path: Path) -> None:
     candidate = candidate_from_allowlisted_mail(_mail())
     assert candidate is not None
-    path = tmp_path / "brain/review/mail" / f"{candidate.candidate_id}.md"
+    path = tmp_path / "brain/review/mail" / "크래프톤-면접-일정-확인이-필요하다.md"
     path.parent.mkdir(parents=True)
     path.write_text("user-edited\n", encoding="utf-8")
 
@@ -106,6 +109,22 @@ def test_codex_candidate_uses_only_opted_in_user_and_assistant_messages() -> Non
     assert "TOOL_SECRET" not in serialized
     assert "REASONING_SECRET" not in serialized
     assert candidate.source_locator == "codex-thread:thread-001#1-2"
+
+
+def test_codex_candidate_hides_unknown_epoch_from_human_review_file(tmp_path: Path) -> None:
+    candidate = candidate_from_codex_messages(
+        (CodexResponseItem("message", "user", "요청", "thread-001", 1),),
+        opt_in=True,
+        summary="작업 경계를 검토했다.",
+    )
+    assert candidate is not None
+
+    persist_review_candidates(tmp_path, "brain/review/codex", (candidate,))
+
+    content = (tmp_path / "brain/review/codex/작업-경계를-검토했다.md").read_text(
+        encoding="utf-8"
+    )
+    assert "1970-" not in content
 
 
 def test_codex_candidate_requires_opt_in_and_real_message_items() -> None:

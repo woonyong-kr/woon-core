@@ -12,7 +12,6 @@ struct Request: Decodable {
     let startAt: String?
     let endAt: String?
     let existingID: String?
-    let idempotencyKey: String?
 }
 
 enum BridgeError: Error, LocalizedError {
@@ -104,7 +103,7 @@ func run() throws {
         event.title = title
         event.startDate = try parseDate(request.startAt)
         event.endDate = try parseDate(request.endAt)
-        event.notes = "Woon Second Brain candidate: \(request.idempotencyKey ?? "unknown")"
+        event.notes = "Woon Second Brain이 생성한 일정입니다."
         try store.save(event, span: .thisEvent, commit: true)
         guard let eventID = event.eventIdentifier, !eventID.isEmpty else {
             throw BridgeError.invalidRequest("EventKit did not return an event identifier")

@@ -48,7 +48,6 @@ def test_calendar_port_confines_event_to_woon_calendar_with_category_suffix() ->
             "startAt": "2026-08-21T16:30:00+00:00",
             "endAt": "2026-08-21T17:00:00+00:00",
             "existingID": None,
-            "idempotencyKey": "schedule-001",
         }
     ]
 
@@ -93,7 +92,7 @@ def test_things_url_port_uses_area_tags_and_callback_identifier() -> None:
             "when": "2026-08-21T16:30:00+00:00",
             "tags": ["컴퓨터", "일정"],
             "list": "커리어·일",
-            "notes": "Woon Second Brain candidate: schedule-001",
+            "notes": "Woon Second Brain이 생성한 일정입니다.",
             "existingID": None,
         }
     ]

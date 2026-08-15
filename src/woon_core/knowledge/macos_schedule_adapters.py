@@ -71,7 +71,6 @@ class MacOSCalendarPort:
                 "startAt": _iso(candidate.start_at),
                 "endAt": _iso(candidate.end_at),
                 "existingID": existing_id,
-                "idempotencyKey": candidate.idempotency_key,
             }
         ).get("calendar_event_id")
         if not event_id:
@@ -110,7 +109,7 @@ class MacOSThingsURLSchemePort:
                 "when": _things_when(candidate.start_at),
                 "tags": list(candidate.things_tags),
                 "list": _area_title(candidate.area_id),
-                "notes": f"Woon Second Brain candidate: {candidate.idempotency_key}",
+                "notes": "Woon Second Brain이 생성한 일정입니다.",
                 "existingID": existing_id,
             }
         )

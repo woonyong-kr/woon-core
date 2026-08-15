@@ -22,6 +22,7 @@ from woon_core.knowledge.second_brain_runtime import RunOutcome
 
 _LOCATOR_RE = re.compile(r"[a-z][a-z0-9-]{1,63}:[A-Za-z0-9._:#-]{1,192}")
 _SUMMARY_LIMIT = 280
+_DISPLAY_FILE_STEM_RE = re.compile(r"[^0-9A-Za-z가-힣_-]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +153,7 @@ def persist_review_candidates(
             raise WoonError("second-brain review candidate IDs must be unique")
         seen.add(candidate.candidate_id)
         data = _render_candidate(candidate).encode("utf-8")
-        path = root / f"{candidate.candidate_id}.md"
+        path = root / _candidate_filename(candidate)
         if path.exists():
             if path.read_bytes() != data:
                 raise WoonError("candidate conflicts with an existing review file")
@@ -201,16 +202,20 @@ def _review_root(vault: Path, owned_root: str) -> Path:
 
 
 def _render_candidate(candidate: ReviewCandidate) -> str:
-    record = candidate.as_record()
-    title = f"검토 후보 — {candidate.candidate_id}"
+    title = candidate.summary.strip()
     frontmatter = {
         "type": "Candidate",
         "title": title,
         "publish": False,
         "access": "local-only",
         "status": "Review",
-        **record,
+        "summary": candidate.summary.strip(),
+        "scheduled_for": _iso(candidate.scheduled_for),
     }
+    # Codex projections deliberately have no persisted message timestamp.
+    # Do not render the epoch placeholder as a misleading 1970 date.
+    if candidate.occurred_at != datetime.fromtimestamp(0, tz=UTC):
+        frontmatter["occurred_at"] = candidate.occurred_at.isoformat()
     lines = ["---"]
     for key, value in frontmatter.items():
         encoded = _yaml_scalar(value)
@@ -235,6 +240,15 @@ def _render_candidate(candidate: ReviewCandidate) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _candidate_filename(candidate: ReviewCandidate) -> str:
+    """Use a readable Obsidian filename; opaque IDs stay in runtime receipts."""
+
+    stem = _DISPLAY_FILE_STEM_RE.sub("-", candidate.summary.strip()).strip("-_")
+    if not stem:
+        stem = "검토-후보"
+    return f"{stem[:80]}.md"
 
 
 def _locator(value: str, field: str) -> None:
