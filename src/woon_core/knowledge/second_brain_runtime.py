@@ -59,6 +59,35 @@ class RunResult:
     replayed: bool
 
 
+def record_governance_preflight(
+    settings: OrchestratorSettings, *, input_sha256: str, output_sha256: str
+) -> RunResult:
+    """Record one verified policy gate without waiting for its next heartbeat.
+
+    The caller supplies only digests of the checked instruction inventory and
+    check output.  Raw instructions and tool output never enter the receipt.
+    """
+
+    contract = next(
+        (item for item in settings.automations if item.automation_id == "governance-audit"),
+        None,
+    )
+    if contract is None:
+        raise WoonError("second-brain governance-audit lane is required")
+    policy_token = settings.policy_sha256[:16]
+    request = RunRequest(
+        source_range=f"governance-policy-{policy_token}",
+        input_sha256=input_sha256,
+        expected_owned_revision=snapshot_owned_paths(settings.vault, contract.owned_paths),
+        cursor_after=f"governance-policy-{policy_token}",
+    )
+    return AutomationRunStore(settings).run(
+        "governance-audit",
+        request,
+        lambda: RunOutcome(candidate_ids=(), output_sha256=output_sha256),
+    )
+
+
 class AutomationRunStore:
     """Serialize one lane and persist receipt-before-checkpoint state atomically."""
 

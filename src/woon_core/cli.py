@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -52,6 +54,7 @@ from woon_core.knowledge.schedule_apply import (
     apply_policy_authorized_schedule_candidate,
     receipt_record,
 )
+from woon_core.knowledge.second_brain_runtime import record_governance_preflight
 from woon_core.knowledge.source_catalog import (
     load_source_catalog,
     plan_source_catalog,
@@ -142,6 +145,8 @@ Usage:
     [--vault <path>] [--limit <count>] [--model <model>] [--state <state>]
   woon knowledge source-audit --source <path> --source-name <name> [--vault <path>]
   woon knowledge validate-orchestrator [--vault <path>]
+    [--automation-root <path>]
+  woon knowledge governance-preflight [--vault <path>]
     [--automation-root <path>]
   woon knowledge schedule-apply --candidate <local-JSON>
     [--vault <path>]
@@ -493,6 +498,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "validate-orchestrator":
         _run_second_brain_orchestrator_validation(raw_options, output)
         return
+    if command == "governance-preflight":
+        _run_governance_preflight(raw_options, output)
+        return
     if command == "schedule-apply":
         _run_schedule_apply(raw_options, output)
         return
@@ -605,6 +613,114 @@ def _run_second_brain_orchestrator_validation(arguments: list[str], output: Text
         ),
         file=output,
     )
+
+
+def _run_governance_preflight(arguments: list[str], output: TextIO) -> None:
+    """Run the current policy gate immediately, without waiting for a heartbeat.
+
+    The command verifies the live Codex heartbeat registry and the vault health
+    audit before it can write the governance receipt/checkpoint.  Its receipt
+    carries digests only; it never stores the checked instruction text.
+    """
+
+    automation_root = Path.home() / ".codex" / "automations"
+    automation_root_seen = False
+    raw_options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option != "--automation-root":
+            raw_options.append(option)
+            index += 1
+            continue
+        if automation_root_seen or index + 1 >= len(arguments):
+            raise WoonError("--automation-root requires exactly one path")
+        automation_root = Path(arguments[index + 1]).expanduser()
+        automation_root_seen = True
+        index += 2
+    vault, options = _parse_knowledge_options(raw_options)
+    if options:
+        raise WoonError("knowledge governance-preflight takes no positional arguments")
+    settings = load_orchestrator_settings(vault or resolve_knowledge_vault())
+    verified = verify_codex_automation_registry(settings, automation_root)
+    input_sha256, output_sha256 = _governance_preflight_evidence(
+        settings.vault, settings.policy_document, automation_root, verified
+    )
+    result = record_governance_preflight(
+        settings, input_sha256=input_sha256, output_sha256=output_sha256
+    )
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "checks": ["instruction-inventory", "automation-registry", "vault-health"],
+                "receipt_recorded": not result.replayed,
+                "replayed": result.replayed,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _governance_preflight_evidence(
+    vault: Path,
+    policy_document: Path,
+    automation_root: Path,
+    verified: tuple[str, ...],
+) -> tuple[str, str]:
+    """Return evidence digests after bounded, non-mutating governance checks."""
+
+    audit_script = vault / "scripts" / "audit-vault-health.py"
+    if not audit_script.is_file():
+        raise WoonError("second-brain governance health audit script is missing")
+    try:
+        audit = subprocess.run(
+            [sys.executable, str(audit_script)],
+            cwd=vault,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError as error:
+        raise WoonError("second-brain governance health audit could not start") from error
+    if audit.returncode != 0:
+        raise WoonError("second-brain governance health audit failed")
+
+    workspace = vault.parent
+    inventory: list[Path] = [
+        vault / "config" / "second-brain-orchestrator.yaml",
+        policy_document,
+    ]
+    for repository_name in ("woon-core", "woon-knowledge", "woon-skills"):
+        repository = workspace / repository_name
+        if not repository.is_dir():
+            continue
+        inventory.extend(sorted(repository.rglob("AGENTS.md")))
+        inventory.extend(sorted(repository.rglob("CLAUDE.md")))
+    inventory.extend(sorted(automation_root.glob("*/automation.toml")))
+    digest = hashlib.sha256()
+    retired_markers = ("ai-reference", "_quarantine", "woon-brain", "codex-write-vault")
+    for path in sorted({item.resolve() for item in inventory}):
+        if not path.is_file():
+            raise WoonError("second-brain governance inventory file is missing")
+        try:
+            content = path.read_bytes()
+        except OSError as error:
+            raise WoonError("second-brain governance inventory file is unreadable") from error
+        if path.name in {"AGENTS.md", "CLAUDE.md"}:
+            text = content.decode("utf-8", errors="strict").lower()
+            if any(marker in text for marker in retired_markers):
+                raise WoonError("second-brain governance found a retired instruction reference")
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\n")
+    output = hashlib.sha256()
+    output.update(audit.stdout.encode("utf-8"))
+    output.update("\n".join(verified).encode("utf-8"))
+    return digest.hexdigest(), output.hexdigest()
 
 
 def _run_schedule_apply(arguments: list[str], output: TextIO) -> None:

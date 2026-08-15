@@ -18,6 +18,7 @@ from woon_core.knowledge.second_brain_runtime import (
     AutomationRunStore,
     RunOutcome,
     RunRequest,
+    record_governance_preflight,
     snapshot_owned_paths,
 )
 
@@ -114,6 +115,49 @@ def test_commits_receipt_before_checkpoint_and_replays_same_operation(tmp_path: 
         "source_range": "fixture-range-001",
         "version": 1,
     }
+
+
+def test_governance_preflight_unblocks_a_policy_changed_lane(tmp_path: Path) -> None:
+    _write_runnable_policy(tmp_path)
+    settings = load_orchestrator_settings(tmp_path)
+    store = AutomationRunStore(settings)
+
+    stale_checkpoint = {
+        "version": 1,
+        "lanes": {
+            "mail-schedule-candidates": {
+                "automation_id": "mail-schedule-candidates",
+                "cursor": "old-cursor",
+                "owned_revision": "a" * 64,
+                "policy_sha256": "c" * 64,
+                "receipt_id": "d" * 64,
+            }
+        },
+    }
+    settings.checkpoint_path.parent.mkdir(parents=True)
+    settings.checkpoint_path.write_text(json.dumps(stale_checkpoint), encoding="utf-8")
+    request = _request(settings, tmp_path, cursor="cursor-after-preflight")
+
+    with pytest.raises(WoonError, match="requires governance preflight"):
+        store.run(
+            "mail-schedule-candidates",
+            request,
+            lambda: RunOutcome(candidate_ids=(), output_sha256="a" * 64),
+        )
+
+    result = record_governance_preflight(
+        settings,
+        input_sha256=hashlib.sha256(b"verified instruction inventory").hexdigest(),
+        output_sha256=hashlib.sha256(b"verified health and registry checks").hexdigest(),
+    )
+
+    assert result.replayed is False
+    resumed = store.run(
+        "mail-schedule-candidates",
+        request,
+        lambda: RunOutcome(candidate_ids=(), output_sha256="a" * 64),
+    )
+    assert resumed.replayed is False
 
 
 def test_failure_keeps_checkpoint_immutable_and_cleans_the_run_lock(tmp_path: Path) -> None:
