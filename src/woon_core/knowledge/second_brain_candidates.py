@@ -37,6 +37,18 @@ class MailScheduleInput:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatExportScheduleInput:
+    """Ephemeral schedule signal from a user-provided, opt-in chat export."""
+
+    source_locator: str
+    classification: Literal["opt-in", "advertising", "ambiguous", "other"]
+    actionable: bool
+    summary: str
+    occurred_at: datetime
+    scheduled_for: datetime | date | None
+
+
+@dataclass(frozen=True, slots=True)
 class CodexResponseItem:
     """Ephemeral subset of one Codex response item; content is never persisted."""
 
@@ -52,7 +64,7 @@ class ReviewCandidate:
     """Safe, local-only review record; not an instruction or an external write."""
 
     candidate_id: str
-    kind: Literal["mail-schedule", "codex-history"]
+    kind: Literal["mail-schedule", "chat-export-schedule", "codex-history"]
     source_locator: str
     summary: str
     occurred_at: datetime
@@ -90,6 +102,33 @@ def candidate_from_allowlisted_mail(message: MailScheduleInput) -> ReviewCandida
     return ReviewCandidate(
         candidate_id=candidate_id,
         kind="mail-schedule",
+        source_locator=message.source_locator,
+        summary=message.summary.strip(),
+        occurred_at=message.occurred_at,
+        time_precision=precision,
+        scheduled_for=message.scheduled_for,
+        things_candidate=True,
+        calendar_candidate=calendar_candidate,
+    )
+
+
+def candidate_from_opted_in_chat_export(
+    message: ChatExportScheduleInput,
+) -> ReviewCandidate | None:
+    """Project one explicit schedule signal without retaining chat-export text."""
+
+    if message.classification != "opt-in" or not message.actionable:
+        return None
+    _locator(message.source_locator, "chat export source_locator")
+    _summary(message.summary)
+    _aware_datetime(message.occurred_at, "chat export occurred_at")
+    precision, calendar_candidate = _schedule_precision(message.scheduled_for)
+    candidate_id = _candidate_id(
+        "chat", message.source_locator, message.occurred_at.isoformat(), message.summary
+    )
+    return ReviewCandidate(
+        candidate_id=candidate_id,
+        kind="chat-export-schedule",
         source_locator=message.source_locator,
         summary=message.summary.strip(),
         occurred_at=message.occurred_at,
