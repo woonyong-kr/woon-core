@@ -23,7 +23,7 @@ def _candidate(**changes: object) -> ScheduleCandidate:
         "timezone": "Asia/Seoul",
         "start_at": datetime(2026, 8, 21, 16, 30, tzinfo=UTC),
         "end_at": datetime(2026, 8, 21, 17, 0, tzinfo=UTC),
-        "approved_at": datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+        "authorized_at": datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
         "lifecycle": "create",
         "idempotency_key": "schedule-001",
     }
@@ -31,7 +31,7 @@ def _candidate(**changes: object) -> ScheduleCandidate:
     return ScheduleCandidate(**values)
 
 
-def test_date_only_creates_only_things_after_approval() -> None:
+def test_date_only_creates_only_things_after_policy_authorization() -> None:
     things = FakeThingsPort()
     calendar = FakeCalendarPort()
     bridge = ScheduleBridge(things, calendar)
@@ -57,12 +57,26 @@ def test_datetime_creates_one_calendar_event_and_replay_does_not_duplicate() -> 
     assert calendar.write_count == 1
 
 
-def test_rejects_unapproved_candidate_without_any_write() -> None:
+def test_tag_change_updates_the_existing_schedule_without_duplicate_external_ids() -> None:
+    things = FakeThingsPort()
+    calendar = FakeCalendarPort()
+    bridge = ScheduleBridge(things, calendar)
+
+    created = bridge.apply(_candidate(things_tags=("외부",)))
+    retagged = bridge.apply(_candidate(things_tags=("외부", "일정")))
+
+    assert retagged.things_id == created.things_id
+    assert retagged.calendar_event_id == created.calendar_event_id
+    assert things.write_count == 2
+    assert calendar.write_count == 2
+
+
+def test_rejects_unauthorized_candidate_without_any_write() -> None:
     things = FakeThingsPort()
     calendar = FakeCalendarPort()
 
-    with pytest.raises(WoonError, match="explicit approval"):
-        ScheduleBridge(things, calendar).apply(_candidate(approved_at=None))
+    with pytest.raises(WoonError, match="policy authorization"):
+        ScheduleBridge(things, calendar).apply(_candidate(authorized_at=None))
 
     assert things.write_count == calendar.write_count == 0
 

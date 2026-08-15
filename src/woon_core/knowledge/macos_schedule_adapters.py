@@ -23,14 +23,14 @@ from woon_core.errors import WoonError
 from woon_core.knowledge.schedule_bridge import ScheduleCandidate
 
 _CALENDAR_NAME: Final = "Woon Tasks"
-_TITLE_PREFIX: Final = {
-    "career": "[커리어]",
-    "learning": "[학습]",
-    "creative": "[창작]",
-    "life": "[생활]",
-    "relationship": "[관계]",
-    "health": "[건강]",
-    "admin": "[행정]",
+_TITLE_SUFFIX: Final = {
+    "career": "커리어",
+    "learning": "학습",
+    "creative": "창작",
+    "life": "생활",
+    "relationship": "관계",
+    "health": "건강",
+    "admin": "행정",
 }
 _SWIFT_SCRIPT: Final = Path(__file__).resolve().parents[3] / "scripts/woon-calendar-bridge.swift"
 _THINGS_SWIFT_SCRIPT: Final = (
@@ -127,10 +127,10 @@ class MacOSThingsURLSchemePort:
 
 def _calendar_title(candidate: ScheduleCandidate) -> str:
     try:
-        prefix = _TITLE_PREFIX[candidate.area_id]
+        suffix = _TITLE_SUFFIX[candidate.area_id]
     except KeyError as error:
         raise WoonError("calendar bridge requires a configured category") from error
-    return f"{prefix} {candidate.intent.strip()}"
+    return f"{candidate.intent.strip()} · {suffix}"
 
 
 def _area_title(area_id: str) -> str:

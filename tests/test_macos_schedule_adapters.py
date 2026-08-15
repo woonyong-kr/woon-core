@@ -21,7 +21,7 @@ def _candidate(**changes: object) -> ScheduleCandidate:
         "timezone": "Asia/Seoul",
         "start_at": datetime(2026, 8, 21, 16, 30, tzinfo=UTC),
         "end_at": datetime(2026, 8, 21, 17, 0, tzinfo=UTC),
-        "approved_at": datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+        "authorized_at": datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
         "lifecycle": "create",
         "idempotency_key": "schedule-001",
         "area_id": "career",
@@ -30,7 +30,7 @@ def _candidate(**changes: object) -> ScheduleCandidate:
     return ScheduleCandidate(**values)
 
 
-def test_calendar_port_confines_event_to_woon_calendar_with_category_prefix() -> None:
+def test_calendar_port_confines_event_to_woon_calendar_with_category_suffix() -> None:
     payloads: list[dict[str, str | None]] = []
 
     def runner(payload: dict[str, str | None]) -> dict[str, str]:
@@ -44,7 +44,7 @@ def test_calendar_port_confines_event_to_woon_calendar_with_category_prefix() ->
         {
             "action": "create-or-update",
             "calendarName": "Woon Tasks",
-            "title": "[커리어] 직무 면접",
+            "title": "직무 면접 · 커리어",
             "startAt": "2026-08-21T16:30:00+00:00",
             "endAt": "2026-08-21T17:00:00+00:00",
             "existingID": None,
@@ -83,7 +83,7 @@ def test_things_url_port_uses_area_tags_and_callback_identifier() -> None:
 
     port = MacOSThingsURLSchemePort(runner)
     assert (
-        port.create_or_update(_candidate(things_tags=("Computer", "Agenda")), None) == "things-001"
+        port.create_or_update(_candidate(things_tags=("컴퓨터", "일정")), None) == "things-001"
     )
 
     assert payloads == [
@@ -91,7 +91,7 @@ def test_things_url_port_uses_area_tags_and_callback_identifier() -> None:
             "action": "add",
             "title": "직무 면접",
             "when": "2026-08-21T16:30:00+00:00",
-            "tags": ["Computer", "Agenda"],
+            "tags": ["컴퓨터", "일정"],
             "list": "커리어·일",
             "notes": "Woon Second Brain candidate: schedule-001",
             "existingID": None,

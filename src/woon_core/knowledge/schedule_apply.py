@@ -1,4 +1,4 @@
-"""Explicitly confirmed local entry point for the macOS schedule bridge."""
+"""Policy-authorized local entry point for the macOS schedule bridge."""
 
 from __future__ import annotations
 
@@ -21,23 +21,23 @@ from woon_core.knowledge.schedule_bridge import (
 )
 
 
-def apply_confirmed_schedule_candidate(
-    vault: Path, candidate_path: Path, confirmation_id: str
+def apply_policy_authorized_schedule_candidate(
+    vault: Path, candidate_path: Path
 ) -> ScheduleReceipt:
-    """Apply one local candidate only when its exact ID is repeated by the user."""
+    """Apply one strict, allowlisted-mail schedule candidate exactly once."""
 
     settings = load_orchestrator_settings(vault)
     contract = next(
-        (item for item in settings.automations if item.automation_id == "confirmed-schedule-apply"),
+        (item for item in settings.automations if item.automation_id == "policy-schedule-apply"),
         None,
     )
-    if contract is None or contract.mode != "approval-required" or contract.status != "disabled":
-        raise WoonError("confirmed schedule apply policy must remain manually disabled")
+    if contract is None or contract.mode != "policy-authorized" or contract.status != "disabled":
+        raise WoonError("schedule apply policy must remain locally policy-authorized")
     candidate = _load_candidate(settings.vault, candidate_path)
-    if confirmation_id != candidate.candidate_id:
-        raise WoonError("schedule confirmation ID does not match the candidate")
-    if candidate.approved_at is None:
-        raise WoonError("schedule candidate has no explicit approval timestamp")
+    if not candidate.source_id.startswith("gmail-thread:"):
+        raise WoonError("automatic schedule apply accepts allowlisted Gmail candidates only")
+    if candidate.authorized_at is None:
+        raise WoonError("schedule candidate has no policy authorization timestamp")
     state_path = settings.receipt_directory.parent / "schedule-bridge-state.json"
     bridge = ScheduleBridge(MacOSThingsURLSchemePort(), MacOSCalendarPort(), state_path=state_path)
     return bridge.apply(candidate)
@@ -74,12 +74,13 @@ def _load_candidate(vault: Path, candidate_path: Path) -> ScheduleCandidate:
         timezone=_required(raw, "timezone"),
         start_at=_optional_datetime(raw.get("start_at")),
         end_at=_optional_datetime(raw.get("end_at")),
-        approved_at=_optional_datetime(raw.get("approved_at")),
+        authorized_at=_optional_datetime(raw.get("authorized_at")),
         lifecycle=cast(Literal["create", "update", "cancel"], lifecycle),
         idempotency_key=_required(raw, "idempotency_key"),
         existing_calendar_event_id=_optional_string(raw.get("existing_calendar_event_id")),
         area_id=_required(raw, "area_id"),
         things_tags=_tags(raw.get("things_tags", [])),
+        bridge_revision=_positive_int(raw.get("bridge_revision"), "bridge_revision"),
     )
 
 
@@ -110,6 +111,12 @@ def _optional_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise WoonError("schedule candidate datetime must include a timezone")
     return parsed
+
+
+def _positive_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise WoonError(f"schedule candidate {field} must be a positive integer")
+    return value
 
 
 def _tags(value: object) -> tuple[str, ...]:

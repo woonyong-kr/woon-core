@@ -1,9 +1,9 @@
 """Privacy-minimizing projections for second-brain review candidates.
 
 The input objects are ephemeral connector values.  Only explicitly permitted
-metadata and a bounded human-readable summary cross into a review file.  Raw
-mail bodies, chat transcripts, system prompts, tool output, and reasoning are
-never returned or persisted by this module.
+metadata and a bounded human-readable summary cross into a review file. Raw
+mail bodies, system prompts, tool output, and reasoning are never returned or
+persisted by this module.
 """
 
 from __future__ import annotations
@@ -37,18 +37,6 @@ class MailScheduleInput:
 
 
 @dataclass(frozen=True, slots=True)
-class ChatExportScheduleInput:
-    """Ephemeral schedule signal from a user-provided, opt-in chat export."""
-
-    source_locator: str
-    classification: Literal["opt-in", "advertising", "ambiguous", "other"]
-    actionable: bool
-    summary: str
-    occurred_at: datetime
-    scheduled_for: datetime | date | None
-
-
-@dataclass(frozen=True, slots=True)
 class CodexResponseItem:
     """Ephemeral subset of one Codex response item; content is never persisted."""
 
@@ -64,7 +52,7 @@ class ReviewCandidate:
     """Safe, local-only review record; not an instruction or an external write."""
 
     candidate_id: str
-    kind: Literal["mail-schedule", "chat-export-schedule", "codex-history"]
+    kind: Literal["mail-schedule", "codex-history"]
     source_locator: str
     summary: str
     occurred_at: datetime
@@ -102,33 +90,6 @@ def candidate_from_allowlisted_mail(message: MailScheduleInput) -> ReviewCandida
     return ReviewCandidate(
         candidate_id=candidate_id,
         kind="mail-schedule",
-        source_locator=message.source_locator,
-        summary=message.summary.strip(),
-        occurred_at=message.occurred_at,
-        time_precision=precision,
-        scheduled_for=message.scheduled_for,
-        things_candidate=True,
-        calendar_candidate=calendar_candidate,
-    )
-
-
-def candidate_from_opted_in_chat_export(
-    message: ChatExportScheduleInput,
-) -> ReviewCandidate | None:
-    """Project one explicit schedule signal without retaining chat-export text."""
-
-    if message.classification != "opt-in" or not message.actionable:
-        return None
-    _locator(message.source_locator, "chat export source_locator")
-    _summary(message.summary)
-    _aware_datetime(message.occurred_at, "chat export occurred_at")
-    precision, calendar_candidate = _schedule_precision(message.scheduled_for)
-    candidate_id = _candidate_id(
-        "chat", message.source_locator, message.occurred_at.isoformat(), message.summary
-    )
-    return ReviewCandidate(
-        candidate_id=candidate_id,
-        kind="chat-export-schedule",
         source_locator=message.source_locator,
         summary=message.summary.strip(),
         occurred_at=message.occurred_at,
@@ -266,8 +227,9 @@ def _render_candidate(candidate: ReviewCandidate) -> str:
             "",
             "## 반영 경계",
             "",
-            "- Things 3 또는 Apple Calendar에는 아직 반영하지 않는다.",
-            "- 명시적 사용자 승인과 별도 bridge 검증 뒤에만 실제 반영 후보가 된다.",
+            "- 허용 목록 메일의 신규·명확한 시간 약속만 정책에 따라 "
+            "Things 3와 Apple Calendar에 자동 반영할 수 있다.",
+            "- 날짜만 있거나 모호·변경·취소 요청이면 실제 반영하지 않고 검토 대상으로 남긴다.",
             "- 원문 메일·대화·system/tool/reasoning은 이 파일에 복사하지 않는다.",
             "",
         ]

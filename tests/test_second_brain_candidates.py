@@ -8,12 +8,10 @@ import pytest
 
 from woon_core.errors import WoonError
 from woon_core.knowledge.second_brain_candidates import (
-    ChatExportScheduleInput,
     CodexResponseItem,
     MailScheduleInput,
     candidate_from_allowlisted_mail,
     candidate_from_codex_messages,
-    candidate_from_opted_in_chat_export,
     persist_review_candidates,
 )
 
@@ -59,7 +57,7 @@ def test_creates_only_review_candidate_for_allowlisted_datetime_mail(tmp_path: P
     assert "status: Review" in stored
     assert "things_candidate: true" in stored
     assert "calendar_candidate: true" in stored
-    assert "Things 3 또는 Apple Calendar에는 아직 반영하지 않는다." in stored
+    assert "Things 3와 Apple Calendar에 자동 반영할 수 있다." in stored
     assert "원문 메일 본문은 절대 저장하면 안 된다" not in stored
 
 
@@ -70,47 +68,6 @@ def test_date_only_mail_can_be_a_things_candidate_but_never_calendar_candidate()
     assert candidate.things_candidate is True
     assert candidate.calendar_candidate is False
     assert candidate.time_precision == "date-only"
-
-
-def test_projects_only_actionable_opted_in_chat_export() -> None:
-    candidate = candidate_from_opted_in_chat_export(
-        ChatExportScheduleInput(
-            source_locator="chat-export:room-opaque-001#msg-0042",
-            classification="opt-in",
-            actionable=True,
-            summary="프로젝트 회의: 2026-08-20 10:00 참석 확인",
-            occurred_at=datetime(2026, 8, 15, 9, 0, tzinfo=UTC),
-            scheduled_for=datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
-        )
-    )
-
-    assert candidate is not None
-    assert candidate.kind == "chat-export-schedule"
-    assert candidate.things_candidate is True
-    assert candidate.calendar_candidate is True
-
-
-def test_drops_ambiguous_or_advertising_chat_export_without_a_candidate() -> None:
-    common = {
-        "source_locator": "chat-export:room-opaque-001#msg-0042",
-        "actionable": True,
-        "summary": "이번 주 이벤트 안내",
-        "occurred_at": datetime(2026, 8, 15, 9, 0, tzinfo=UTC),
-        "scheduled_for": None,
-    }
-
-    assert (
-        candidate_from_opted_in_chat_export(
-            ChatExportScheduleInput(classification="advertising", **common)
-        )
-        is None
-    )
-    assert (
-        candidate_from_opted_in_chat_export(
-            ChatExportScheduleInput(classification="ambiguous", **common)
-        )
-        is None
-    )
 
 
 def test_refuses_to_overwrite_a_changed_review_candidate(tmp_path: Path) -> None:

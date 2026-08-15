@@ -49,7 +49,7 @@ from woon_core.knowledge.research_intake import (
     write_research_intake_plan,
 )
 from woon_core.knowledge.schedule_apply import (
-    apply_confirmed_schedule_candidate,
+    apply_policy_authorized_schedule_candidate,
     receipt_record,
 )
 from woon_core.knowledge.source_catalog import (
@@ -143,7 +143,7 @@ Usage:
   woon knowledge source-audit --source <path> --source-name <name> [--vault <path>]
   woon knowledge validate-orchestrator [--vault <path>]
     [--automation-root <path>]
-  woon knowledge schedule-apply --candidate <local-JSON> --confirm <candidate-id>
+  woon knowledge schedule-apply --candidate <local-JSON>
     [--vault <path>]
   woon version
 """
@@ -613,7 +613,7 @@ def _run_schedule_apply(arguments: list[str], output: TextIO) -> None:
     index = 0
     while index < len(arguments):
         option = arguments[index]
-        if option not in {"--candidate", "--confirm"}:
+        if option != "--candidate":
             raw_options.append(option)
             index += 1
             continue
@@ -622,10 +622,10 @@ def _run_schedule_apply(arguments: list[str], output: TextIO) -> None:
         values[option] = arguments[index + 1]
         index += 2
     vault, options = _parse_knowledge_options(raw_options)
-    if options or set(values) != {"--candidate", "--confirm"}:
-        raise WoonError("knowledge schedule-apply requires --candidate and --confirm")
-    receipt = apply_confirmed_schedule_candidate(
-        vault or resolve_knowledge_vault(), Path(values["--candidate"]), values["--confirm"]
+    if options or set(values) != {"--candidate"}:
+        raise WoonError("knowledge schedule-apply requires --candidate")
+    receipt = apply_policy_authorized_schedule_candidate(
+        vault or resolve_knowledge_vault(), Path(values["--candidate"])
     )
     print(json.dumps(receipt_record(receipt), ensure_ascii=False, indent=2), file=output)
 

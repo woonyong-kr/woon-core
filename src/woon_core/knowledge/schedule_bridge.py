@@ -1,4 +1,4 @@
-"""Approval-gated, idempotent schedule bridge contract.
+"""Policy-authorized, idempotent schedule bridge contract.
 
 This module owns the approval, idempotency, and receipt contract. macOS
 adapters live separately; this module never reaches a private Things database
@@ -19,13 +19,13 @@ from woon_core.io import atomic_write, encode_json, exclusive_file_lock
 
 _AREA_IDS = frozenset({"career", "learning", "creative", "life", "relationship", "health", "admin"})
 _THINGS_TAGS = frozenset(
-    {"Computer", "Phone", "Outside", "Home", "Deep Work", "Quick", "Waiting", "Agenda", "Delegated"}
+    {"컴퓨터", "전화", "외부", "집", "집중", "빠른 처리", "대기", "일정", "위임"}
 )
 
 
 @dataclass(frozen=True, slots=True)
 class ScheduleCandidate:
-    """A user-approved candidate to create, update, or cancel a schedule."""
+    """A policy-authorized candidate to create, update, or cancel a schedule."""
 
     candidate_id: str
     source_id: str
@@ -34,12 +34,13 @@ class ScheduleCandidate:
     timezone: str
     start_at: datetime | None
     end_at: datetime | None
-    approved_at: datetime | None
+    authorized_at: datetime | None
     lifecycle: Literal["create", "update", "cancel"]
     idempotency_key: str
     existing_calendar_event_id: str | None = None
     area_id: str = "career"
     things_tags: tuple[str, ...] = ()
+    bridge_revision: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +73,7 @@ class CalendarPort(Protocol):
 
 
 class ScheduleBridge:
-    """Apply an explicitly approved candidate without duplicate external writes."""
+    """Apply one authorized candidate without duplicate external writes."""
 
     def __init__(
         self,
@@ -310,8 +311,8 @@ def _load_state(
 
 
 def _validate(candidate: ScheduleCandidate) -> None:
-    if not candidate.approved_at:
-        raise WoonError("schedule apply requires explicit approval")
+    if not candidate.authorized_at:
+        raise WoonError("schedule apply requires policy authorization")
     if not candidate.candidate_id or not candidate.source_id or not candidate.activity_id:
         raise WoonError("schedule candidate requires stable source and activity IDs")
     if (
@@ -333,6 +334,8 @@ def _validate(candidate: ScheduleCandidate) -> None:
             raise WoonError("end_at must be after start_at")
     if candidate.lifecycle not in {"create", "update", "cancel"}:
         raise WoonError("unsupported schedule lifecycle")
+    if candidate.bridge_revision < 1:
+        raise WoonError("schedule candidate bridge_revision must be positive")
     if candidate.area_id not in _AREA_IDS:
         raise WoonError("schedule candidate must use a configured Things area")
     if len(set(candidate.things_tags)) != len(candidate.things_tags):
@@ -350,6 +353,9 @@ def _operation_key(candidate: ScheduleCandidate) -> str:
             candidate.start_at.isoformat() if candidate.start_at else "date-only",
             candidate.end_at.isoformat() if candidate.end_at else "date-only",
             candidate.existing_calendar_event_id or "",
+            candidate.area_id,
+            "\0".join(sorted(candidate.things_tags)),
+            str(candidate.bridge_revision),
         )
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

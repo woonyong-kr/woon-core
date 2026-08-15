@@ -50,16 +50,16 @@ global_guards:
     persist_fields: []
   privacy:
     novel_default: excluded
-    chat_default: opt_in_export_only
+    chat_default: excluded
     public_output_requires_verified_claim: true
   mutations:
     raw_source_delete: forbidden
     direct_things_database_access: forbidden
-    calendar_write_requires_user_confirmation: true
+    calendar_write_requires_policy_authorization: true
     public_publish_requires_separate_authorization: true
   schedule_bridge:
-    candidate_write_only_until_confirmed: true
-    confirmed_apply_automation: disabled
+    auto_apply_allowlisted_datetime_mail_only: true
+    schedule_apply_path: local-mail-automation
     calendar_name: Woon Tasks
     manual_apply_command: native-local-command
     native_adapters: [things-url-scheme-v2, eventkit-full-access]
@@ -85,11 +85,11 @@ things_3:
       title: 행정·재정
   tag_groups:
     - id: context
-      tags: [Computer, Phone, Outside, Home]
+      tags: [컴퓨터, 전화, 외부, 집]
     - id: mode
-      tags: [Deep Work, Quick]
+      tags: [집중, 빠른 처리]
     - id: state
-      tags: [Waiting, Agenda, Delegated]
+      tags: [대기, 일정, 위임]
   project:
     required: [concrete-outcome, closure-condition]
     prohibited: [knowledge-note, raw-original, person-profile, novel-manuscript]
@@ -97,14 +97,14 @@ things_3:
     required: [verb-first-title, independently-verifiable-action]
   calendar_context:
     calendar_name: Woon Tasks
-    title_prefixes:
-      career: "[커리어]"
-      learning: "[학습]"
-      creative: "[창작]"
-      life: "[생활]"
-      relationship: "[관계]"
-      health: "[건강]"
-      admin: "[행정]"
+    title_suffixes:
+      career: 커리어
+      learning: 학습
+      creative: 창작
+      life: 생활
+      relationship: 관계
+      health: 건강
+      admin: 행정
 automations:
   - id: mail-schedule-candidates
     owner: mail-schedule-task
@@ -123,16 +123,16 @@ automations:
       notification_policy: {notification_policy}
       prompt_sha256: {prompt_sha256}
       owned_paths: [brain/review/mail]
-  - id: confirmed-schedule-apply
-    owner: confirmed-schedule-apply-task
+  - id: policy-schedule-apply
+    owner: policy-schedule-apply-task
     cadence: manual-confirmation-only
-    inputs: [approved-schedule-candidate]
+    inputs: [policy-authorized-schedule-candidate]
     output: [confirmed-write]
-    checkpoint_key: confirmed-schedule-apply
-    required_signals: [explicit-user-confirmation]
-    prohibited: [unapproved-write]
+    checkpoint_key: policy-schedule-apply
+    required_signals: [allowlisted-mail]
+    prohibited: [ambiguous-mail-write]
     execution:
-      mode: approval-required
+      mode: policy-authorized
       status: disabled
       task_thread_id: null
       codex_automation_id: null
@@ -261,11 +261,11 @@ def test_rejects_privacy_contract_and_enabled_schedule_apply(tmp_path: Path) -> 
 
     write_policy(tmp_path)
     unsafe_apply = path.read_text(encoding="utf-8").replace(
-        "mode: approval-required\n      status: disabled",
-        "mode: approval-required\n      status: enabled",
+        "mode: policy-authorized\n      status: disabled",
+        "mode: policy-authorized\n      status: enabled",
     )
     path.write_text(unsafe_apply, encoding="utf-8")
-    with pytest.raises(WoonError, match="approval-required automation must stay disabled"):
+    with pytest.raises(WoonError, match="policy-authorized schedule apply must not have"):
         load_orchestrator_settings(tmp_path)
 
 

@@ -97,14 +97,14 @@ def test_knowledge_validate_orchestrator_can_verify_registered_heartbeats(
     assert '"codex_registry_verified": [' in output.getvalue()
 
 
-def test_knowledge_schedule_apply_requires_candidate_and_exact_confirmation(
+def test_knowledge_schedule_apply_requires_one_policy_authorized_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate = tmp_path / "brain/review/schedule-apply/candidate-001.json"
     captured: dict[str, object] = {}
 
-    def apply(vault: Path, path: Path, confirmation: str) -> ScheduleReceipt:
-        captured.update(vault=vault, path=path, confirmation=confirmation)
+    def apply(vault: Path, path: Path) -> ScheduleReceipt:
+        captured.update(vault=vault, path=path)
         return ScheduleReceipt(
             candidate_id="candidate-001",
             lifecycle="create",
@@ -113,7 +113,7 @@ def test_knowledge_schedule_apply_requires_candidate_and_exact_confirmation(
             calendar_event_id="event-001",
         )
 
-    monkeypatch.setattr(cli, "apply_confirmed_schedule_candidate", apply)
+    monkeypatch.setattr(cli, "apply_policy_authorized_schedule_candidate", apply)
     output = StringIO()
     run(
         [
@@ -123,13 +123,11 @@ def test_knowledge_schedule_apply_requires_candidate_and_exact_confirmation(
             str(tmp_path),
             "--candidate",
             str(candidate),
-            "--confirm",
-            "candidate-001",
         ],
         output,
     )
 
-    assert captured == {"vault": tmp_path, "path": candidate, "confirmation": "candidate-001"}
+    assert captured == {"vault": tmp_path, "path": candidate}
     assert '"things_id": "things-001"' in output.getvalue()
 
 

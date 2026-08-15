@@ -144,7 +144,7 @@ class AutomationRunStore:
         contract = self._contracts.get(automation_id)
         if contract is None:
             raise WoonError(f"unknown second-brain automation: {automation_id}")
-        if contract.mode == "approval-required" or contract.status != "enabled":
+        if contract.mode == "policy-authorized" or contract.status != "enabled":
             raise WoonError(f"second-brain automation is not enabled: {automation_id}")
         return contract
 

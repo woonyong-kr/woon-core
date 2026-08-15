@@ -25,7 +25,7 @@ _CADENCES = {
     "daily-and-policy-gate",
     "manual-confirmation-only",
 }
-_EXECUTION_MODES = {"candidate-only", "review-only", "proposal-only", "approval-required"}
+_EXECUTION_MODES = {"candidate-only", "review-only", "proposal-only", "policy-authorized"}
 _EXECUTION_STATUSES = {"planned", "enabled", "disabled"}
 _NOTIFICATION_POLICIES = {"failed_runs_only", "always", "none"}
 
@@ -221,8 +221,8 @@ def _automation(raw: object, index: int) -> AutomationContract:
     status = _required_string(execution.get("status"), f"automations[{index}].execution.status")
     if status not in _EXECUTION_STATUSES:
         raise WoonError(f"unsupported automation execution status: {status}")
-    if mode == "approval-required" and status != "disabled":
-        raise WoonError("approval-required automation must stay disabled until bridge validation")
+    if mode == "policy-authorized" and status != "disabled":
+        raise WoonError("policy-authorized schedule apply must not have an independent scheduler")
     task_thread_id = execution.get("task_thread_id")
     if task_thread_id is not None:
         task_thread_id = _required_string(
@@ -332,8 +332,8 @@ def _validate_global_guards(value: object) -> None:
     privacy = _mapping(guards.get("privacy"), "global_guards.privacy")
     if privacy.get("novel_default") != "excluded":
         raise WoonError("Novel guard must stay excluded")
-    if privacy.get("chat_default") != "opt_in_export_only":
-        raise WoonError("chat guard must require opt-in export")
+    if privacy.get("chat_default") != "excluded":
+        raise WoonError("chat guard must stay excluded")
     if privacy.get("public_output_requires_verified_claim") is not True:
         raise WoonError("public output must require a verified claim")
     mutations = _mapping(guards.get("mutations"), "global_guards.mutations")
@@ -343,15 +343,15 @@ def _validate_global_guards(value: object) -> None:
     ):
         if mutations.get(field) != "forbidden":
             raise WoonError(f"mutation guard {field} must be forbidden")
-    if mutations.get("calendar_write_requires_user_confirmation") is not True:
-        raise WoonError("calendar writes must require user confirmation")
+    if mutations.get("calendar_write_requires_policy_authorization") is not True:
+        raise WoonError("calendar writes must require policy authorization")
     if mutations.get("public_publish_requires_separate_authorization") is not True:
         raise WoonError("public publishing must require separate authorization")
     bridge = _mapping(guards.get("schedule_bridge"), "global_guards.schedule_bridge")
-    if bridge.get("candidate_write_only_until_confirmed") is not True:
-        raise WoonError("schedule bridge must remain candidate-only until confirmed")
-    if bridge.get("confirmed_apply_automation") != "disabled":
-        raise WoonError("confirmed schedule apply must remain disabled")
+    if bridge.get("auto_apply_allowlisted_datetime_mail_only") is not True:
+        raise WoonError("schedule bridge must limit automatic apply to allowlisted date-time mail")
+    if bridge.get("schedule_apply_path") != "local-mail-automation":
+        raise WoonError("schedule bridge must use the local mail automation path")
     if bridge.get("calendar_name") != "Woon Tasks":
         raise WoonError("schedule bridge must use the Woon Tasks calendar")
     if bridge.get("manual_apply_command") != "native-local-command":
@@ -417,9 +417,9 @@ def _validate_things_3_contract(value: object) -> None:
         raise WoonError("Things 3 areas must match the canonical responsibility taxonomy")
 
     expected_tags = {
-        "context": ("Computer", "Phone", "Outside", "Home"),
-        "mode": ("Deep Work", "Quick"),
-        "state": ("Waiting", "Agenda", "Delegated"),
+        "context": ("컴퓨터", "전화", "외부", "집"),
+        "mode": ("집중", "빠른 처리"),
+        "state": ("대기", "일정", "위임"),
     }
     groups = _list(contract.get("tag_groups"), "things_3.tag_groups")
     actual_tags: dict[str, tuple[str, ...]] = {}
@@ -455,30 +455,30 @@ def _validate_things_3_contract(value: object) -> None:
     context = _mapping(contract.get("calendar_context"), "things_3.calendar_context")
     if context.get("calendar_name") != "Woon Tasks":
         raise WoonError("Things 3 calendar context must use Woon Tasks")
-    expected_prefixes = {
-        "career": "[커리어]",
-        "learning": "[학습]",
-        "creative": "[창작]",
-        "life": "[생활]",
-        "relationship": "[관계]",
-        "health": "[건강]",
-        "admin": "[행정]",
+    expected_suffixes = {
+        "career": "커리어",
+        "learning": "학습",
+        "creative": "창작",
+        "life": "생활",
+        "relationship": "관계",
+        "health": "건강",
+        "admin": "행정",
     }
-    if context.get("title_prefixes") != expected_prefixes:
-        raise WoonError("calendar context prefixes must match Things 3 areas")
+    if context.get("title_suffixes") != expected_suffixes:
+        raise WoonError("calendar context suffixes must match Things 3 areas")
 
 
 def _validate_schedule_apply_contract(contracts: tuple[AutomationContract, ...]) -> None:
-    matches = [item for item in contracts if item.automation_id == "confirmed-schedule-apply"]
+    matches = [item for item in contracts if item.automation_id == "policy-schedule-apply"]
     if len(matches) != 1:
-        raise WoonError("second-brain orchestrator requires one confirmed-schedule-apply lane")
+        raise WoonError("second-brain orchestrator requires one policy-schedule-apply lane")
     lane = matches[0]
     if (
-        lane.mode != "approval-required"
+        lane.mode != "policy-authorized"
         or lane.status != "disabled"
         or lane.cadence != "manual-confirmation-only"
     ):
-        raise WoonError("confirmed-schedule-apply must remain disabled until bridge validation")
+        raise WoonError("policy-schedule-apply must stay local and disabled")
 
 
 def _string_list(value: object, field: str) -> tuple[str, ...]:
