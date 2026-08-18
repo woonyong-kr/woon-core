@@ -10,8 +10,10 @@ from woon_core.errors import WoonError
 from woon_core.knowledge.second_brain_candidates import (
     CodexResponseItem,
     MailScheduleInput,
+    PersonMemoryInput,
     candidate_from_allowlisted_mail,
     candidate_from_codex_messages,
+    candidate_from_codex_person_memory,
     persist_review_candidates,
 )
 
@@ -58,17 +60,15 @@ def test_creates_only_review_candidate_for_allowlisted_datetime_mail(tmp_path: P
     assert candidate.candidate_id not in stored
     assert candidate.source_locator not in stored
     assert "status: Review" in stored
-    assert "things_candidate:" not in stored
     assert "calendar_candidate:" not in stored
-    assert "Things 3와 Apple Calendar에 자동 반영할 수 있다." in stored
+    assert "Apple Calendar에 바로 반영하지 않는다." in stored
     assert "원문 메일 본문은 절대 저장하면 안 된다" not in stored
 
 
-def test_date_only_mail_can_be_a_things_candidate_but_never_calendar_candidate() -> None:
+def test_date_only_mail_stays_a_review_candidate_and_never_a_calendar_candidate() -> None:
     candidate = candidate_from_allowlisted_mail(_mail(scheduled_for=date(2026, 8, 20)))
 
     assert candidate is not None
-    assert candidate.things_candidate is True
     assert candidate.calendar_candidate is False
     assert candidate.time_precision == "date-only"
 
@@ -136,6 +136,68 @@ def test_codex_candidate_requires_opt_in_and_real_message_items() -> None:
             (CodexResponseItem("tool", "tool", "출력", "thread-001", 1),),
             opt_in=True,
             summary="요약",
+        )
+        is None
+    )
+
+
+def test_person_memory_candidate_keeps_only_explicit_facts_pending_review(tmp_path: Path) -> None:
+    candidate = candidate_from_codex_person_memory(
+        (
+            CodexResponseItem("message", "user", "김희준과 금요일 면담", "thread-001", 1),
+            CodexResponseItem("message", "assistant", "다음 행동 정리", "thread-001", 2),
+        ),
+        opt_in=True,
+        person=PersonMemoryInput(
+            display_name="김희준",
+            explicit_facts=("금요일 면담 일정이 언급되었다.",),
+            next_action="면담 시간을 확인한다.",
+        ),
+    )
+
+    assert candidate is not None
+    assert candidate.kind == "person-memory"
+    persist_review_candidates(tmp_path, "brain/review/codex", (candidate,))
+
+    content = next((tmp_path / "brain/review/codex").glob("*.md")).read_text(encoding="utf-8")
+    assert "review_kind: \"인물 정리\"" in content
+    assert "김희준" in content
+    assert "금요일 면담 일정이 언급되었다." in content
+    assert "면담 시간을 확인한다." in content
+    assert "인물 카드·관계·연락처·신상은 만들거나 추정하지 않는다." in content
+    assert "people:" not in content
+    assert "person_roles:" not in content
+    assert "김희준과 금요일 면담" not in content
+    assert candidate.candidate_id not in content
+    assert candidate.source_locator not in content
+
+
+def test_person_memory_candidate_rejects_bare_name_and_contact_like_content() -> None:
+    items = (CodexResponseItem("message", "user", "요청", "thread-001", 1),)
+
+    with pytest.raises(WoonError, match="one to three explicit facts"):
+        candidate_from_codex_person_memory(
+            items,
+            opt_in=True,
+            person=PersonMemoryInput(display_name="김희준", explicit_facts=()),
+        )
+    with pytest.raises(WoonError, match="contact-free"):
+        candidate_from_codex_person_memory(
+            items,
+            opt_in=True,
+            person=PersonMemoryInput(
+                display_name="김희준",
+                explicit_facts=("연락처는 someone@example.com이다.",),
+            ),
+        )
+    assert (
+        candidate_from_codex_person_memory(
+            items,
+            opt_in=False,
+            person=PersonMemoryInput(
+                display_name="김희준",
+                explicit_facts=("면담 일정이 언급되었다.",),
+            ),
         )
         is None
     )

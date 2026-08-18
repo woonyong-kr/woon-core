@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from typing import TextIO
 
 from woon_core import __version__
+from woon_core.calendar.cli import run_calendar
 from woon_core.context import Compiler
 from woon_core.environment import apply as apply_environment
 from woon_core.environment import check as check_environment
@@ -26,6 +29,17 @@ from woon_core.environment.python_ide import plan as plan_python_ide
 from woon_core.environment.python_ide import verify as verify_python_ide
 from woon_core.errors import WoonError
 from woon_core.knowledge.answer_citation_evaluation import evaluate_answer_citations
+from woon_core.knowledge.codex_daily_digest import (
+    entries_from_records as daily_digest_entries_from_records,
+)
+from woon_core.knowledge.codex_daily_digest import (
+    record_codex_daily_digest,
+    record_daily_digest_from_codex_ledger,
+)
+from woon_core.knowledge.codex_knowledge import (
+    entries_from_records as codex_knowledge_entries_from_records,
+)
+from woon_core.knowledge.codex_knowledge import record_codex_knowledge_entries
 from woon_core.knowledge.codex_quality_review import run_codex_quality_reviews
 from woon_core.knowledge.codex_quality_revision import (
     apply_codex_quality_revisions,
@@ -39,6 +53,11 @@ from woon_core.knowledge.content_quality_review_plan import (
 )
 from woon_core.knowledge.evaluation import evaluate as evaluate_knowledge
 from woon_core.knowledge.factory import build_knowledge_service, resolve_knowledge_vault
+from woon_core.knowledge.mail_schedule_automation import (
+    record_mail_schedule_candidates,
+    submissions_from_records,
+)
+from woon_core.knowledge.obsidian_plugins import ObsidianPluginService
 from woon_core.knowledge.ollama_quality_review import run_ollama_quality_reviews
 from woon_core.knowledge.orchestration import (
     load_orchestrator_settings,
@@ -60,12 +79,14 @@ from woon_core.knowledge.source_catalog import (
     plan_source_catalog,
     write_source_catalog,
 )
+from woon_core.people.cli import run_people
 from woon_core.registry import Registry
 from woon_core.skills import ClaudeRoutingSelector, CodexRoutingSelector, evaluate_routing
 from woon_core.skills import doctor as doctor_skills
 from woon_core.skills import install as install_skills
 from woon_core.skills import plan as plan_skills
 from woon_core.skills import validate as validate_skills
+from woon_core.tasks.cli import run_tasks
 from woon_core.workspace import Workspace, discover, initialize
 
 USAGE = """woon - deterministic control plane for the Woon development system
@@ -89,10 +110,35 @@ Usage:
   woon skills install --profile <names> --target <codex|claude>
   woon skills eval-routing [--executor <all|codex|claude>] [--repeat <count>]
   woon skills doctor
+  woon tasks find <query> [--date <YYYY-MM-DD>] [--vault <path>]
+  woon tasks upsert-recurring --id <task-id> --title <text> --purpose <text>
+    --area <area> [--start-date <YYYY-MM-DD>] [--vault <path>]
+  woon tasks materialize [--date <YYYY-MM-DD>] [--vault <path>]
+  woon tasks complete --id <task-id> [--date <YYYY-MM-DD>] [--vault <path>]
+  woon people find <query> [--vault <path>]
+  woon people documents <person-id> [--vault <path>]
+  woon people upsert --id <person-id> --title <text> --kind <kind>
+    --relationship <text> --purpose <text> --basis <explicit-request|repeated-evidence>
+    [--vault <path>]
+  woon people link --document <relative-markdown-path> --person <person-id>
+    --roles <comma-separated-roles> --evidence <text> [--vault <path>]
+  woon people identify --person <person-id> --identifiers <comma-separated-identifiers>
+    --evidence <text> [--context <comma-separated-terms>] [--vault <path>]
+  woon people private-history-sync --novel-root <local-path> [--vault <path>]
+  woon calendar refresh [--vault <path>]
+  woon calendar migrate-legacy [--vault <path>]
+  woon calendar upsert --id <stable-id> --title <text> --start <ISO8601>
+    --end <ISO8601> --category <career|learning|creative|life|relationship|health|admin>
+    [--location <text>] [--notes <text>] [--vault <path>]
   woon knowledge index [--vault <path>]
   woon knowledge search <query> [--limit <1..20>] [--vault <path>]
   woon knowledge get <canonical-id> [--vault <path>]
   woon knowledge audit [--vault <path>]
+  woon knowledge vault-tool <name> [tool-options...] [--vault <path>]
+  woon knowledge obsidian-plugin <status|install|remove-detected-mindmaps|
+    configure-prisma-calendar|configure-full-calendar-remastered|
+    configure-notion-bases-calendar|configure-simple-calendar|retire>
+    [--plugin <approved-plugin-id>...] [--vault <path>]
   woon knowledge history <canonical-id> [--limit <1..100>] [--vault <path>]
   woon knowledge migrate-compiled [--vault <path>]
   woon knowledge initialize-curation [--vault <path>]
@@ -148,6 +194,14 @@ Usage:
     [--automation-root <path>]
   woon knowledge governance-preflight [--vault <path>]
     [--automation-root <path>]
+  woon knowledge record-mail-schedule-candidates --run-token <mail-kst-YYYYMMDD-HHMM>
+    [--candidates-json <json-array>] [--vault <path>]
+  woon knowledge record-codex-daily-digest --day <YYYY-MM-DD> --entries-json <json-array>
+    [--repair-missing-digest] [--vault <path>]
+  woon knowledge record-codex-knowledge-entries --source-range <safe-token>
+    --entries-json <json-array> [--vault <path>]
+  woon knowledge materialize-codex-daily-digest --day <YYYY-MM-DD>
+    [--replace-empty-digest] [--vault <path>]
   woon knowledge schedule-apply --candidate <local-JSON>
     [--vault <path>]
   woon version
@@ -229,6 +283,12 @@ def run(raw_arguments: list[str], output: TextIO) -> None:
         _run_environment(root, remaining, output)
     elif command == "skills":
         _run_skills(root, remaining, output)
+    elif command == "tasks":
+        run_tasks(remaining, output)
+    elif command == "people":
+        run_people(remaining, output)
+    elif command == "calendar":
+        run_calendar(remaining, output)
     elif command == "knowledge":
         _run_knowledge(remaining, output)
     else:
@@ -402,7 +462,13 @@ def _run_skills(root: str, arguments: list[str], output: TextIO) -> None:
             )
             for case in evaluation.cases:
                 if not case.passed:
-                    print(f"  - failed: {case.identifier}", file=output)
+                    selections = " | ".join(
+                        ", ".join(run) if run else "(none)" for run in case.selections
+                    )
+                    print(
+                        f"  - failed: {case.identifier} (selected: {selections})",
+                        file=output,
+                    )
             failed = failed or not evaluation.passed
         if failed:
             raise WoonError("semantic routing evaluation did not meet thresholds")
@@ -440,6 +506,12 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if not arguments:
         raise WoonError("usage: woon knowledge <index|search|get|audit|history|compile|evaluate>")
     command, *raw_options = arguments
+    if command == "vault-tool":
+        _run_vault_tool(raw_options, output)
+        return
+    if command == "obsidian-plugin":
+        _run_obsidian_plugin(raw_options, output)
+        return
     if command == "source-plan":
         _run_knowledge_source_plan(raw_options, output)
         return
@@ -500,6 +572,18 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "governance-preflight":
         _run_governance_preflight(raw_options, output)
+        return
+    if command == "record-mail-schedule-candidates":
+        _run_mail_schedule_candidate_recording(raw_options, output)
+        return
+    if command == "record-codex-daily-digest":
+        _run_codex_daily_digest_recording(raw_options, output)
+        return
+    if command == "record-codex-knowledge-entries":
+        _run_codex_knowledge_entry_recording(raw_options, output)
+        return
+    if command == "materialize-codex-daily-digest":
+        _run_codex_daily_digest_materialization(raw_options, output)
         return
     if command == "schedule-apply":
         _run_schedule_apply(raw_options, output)
@@ -669,10 +753,20 @@ def _governance_preflight_evidence(
     policy_document: Path,
     automation_root: Path,
     verified: tuple[str, ...],
+    *,
+    repair_missing_digest_for: date | None = None,
 ) -> tuple[str, str]:
-    """Return evidence digests after bounded, non-mutating governance checks."""
+    """Return evidence digests after bounded, non-mutating governance checks.
 
-    audit_script = vault / "scripts" / "audit-vault-health.py"
+    A missing daily digest is a visible projection defect, not a reason to
+    permit unrelated automation.  The one narrow exception repairs that exact
+    projection: it may establish the current governance receipt only when the
+    health audit reports *only* missing digest fragments and the requested day
+    is one of them.  The caller immediately records that fragment through its
+    own receipt-first lane.
+    """
+
+    audit_script = Path(__file__).parent / "knowledge" / "vault_tools" / "audit-vault-health.py"
     if not audit_script.is_file():
         raise WoonError("second-brain governance health audit script is missing")
     try:
@@ -685,7 +779,10 @@ def _governance_preflight_evidence(
         )
     except OSError as error:
         raise WoonError("second-brain governance health audit could not start") from error
-    if audit.returncode != 0:
+    if audit.returncode != 0 and (
+        repair_missing_digest_for is None
+        or not _is_only_missing_daily_digest_repair(audit.stdout, repair_missing_digest_for)
+    ):
         raise WoonError("second-brain governance health audit failed")
 
     workspace = vault.parent
@@ -720,7 +817,322 @@ def _governance_preflight_evidence(
     output = hashlib.sha256()
     output.update(audit.stdout.encode("utf-8"))
     output.update("\n".join(verified).encode("utf-8"))
+    if repair_missing_digest_for is not None:
+        output.update(f"daily-digest-repair:{repair_missing_digest_for.isoformat()}".encode())
     return digest.hexdigest(), output.hexdigest()
+
+
+def _is_only_missing_daily_digest_repair(audit_stdout: str, day: date) -> bool:
+    """Accept only a repairable missing fragment for the requested KST day."""
+
+    try:
+        payload = json.loads(audit_stdout)
+    except json.JSONDecodeError:
+        return False
+    issues = payload.get("issues")
+    if not isinstance(issues, dict):
+        return False
+    nonempty = {name: values for name, values in issues.items() if values}
+    missing = nonempty.get("daily_digest_projection_violations")
+    if set(nonempty) != {"daily_digest_projection_violations"} or not isinstance(missing, list):
+        return False
+    target = f"inbox/daily-digests/{day.isoformat()}.md"
+    return any(isinstance(issue, str) and target in issue for issue in missing)
+
+
+_VAULT_TOOL_SCRIPTS = {
+    "apply-breadcrumbs": "apply-breadcrumbs.py",
+    "apply-people-properties": "apply-people-properties.py",
+    "assess-document-cohesion": "assess-document-cohesion.py",
+    "audit-canonical-map-tree": "audit-canonical-map-tree.py",
+    "audit-folder-depth": "audit-folder-depth.py",
+    "audit-root-keyword-graph": "audit-root-keyword-graph.py",
+    "audit-source-assets": "audit-source-assets.py",
+    "audit-vault-health": "audit-vault-health.py",
+    "convert-svg-diagrams-to-mermaid": "convert-svg-diagrams-to-mermaid.py",
+    "normalize-section-headings": "normalize-section-headings.py",
+    "personalize-section-headings": "personalize-section-headings.py",
+    "remove-ascii-box-diagrams": "remove-ascii-box-diagrams.py",
+    "update-readme-recent-docs": "update-readme-recent-docs.py",
+}
+_VAULT_TOOL_SHELL_SCRIPTS = {
+    "fetch-transformer-explainer": "fetch-transformer-explainer.sh",
+    "evaluate-llm-wiki": "evaluate-llm-wiki.mjs",
+}
+
+
+def _run_vault_tool(arguments: list[str], output: TextIO) -> None:
+    """Run one core-owned maintenance tool against an explicit Vault."""
+
+    if not arguments:
+        choices = ", ".join(sorted(_VAULT_TOOL_SCRIPTS | _VAULT_TOOL_SHELL_SCRIPTS))
+        raise WoonError(f"knowledge vault-tool requires one of: {choices}")
+    tool, *raw_options = arguments
+    script_name = _VAULT_TOOL_SCRIPTS.get(tool)
+    shell_script = _VAULT_TOOL_SHELL_SCRIPTS.get(tool)
+    if script_name is None and shell_script is None:
+        raise WoonError(f"unknown knowledge vault tool {tool!r}")
+    vault, options = _parse_knowledge_options(raw_options)
+    target = vault or resolve_knowledge_vault()
+    if script_name is not None:
+        script = Path(__file__).parent / "knowledge" / "vault_tools" / script_name
+        command = [sys.executable, str(script), *options]
+    else:
+        if shell_script is None:
+            raise WoonError(f"core-owned vault tool is missing: {tool}")
+        script = Path(__file__).parents[2] / "scripts" / "knowledge-vault" / shell_script
+        executable = "node" if script.suffix == ".mjs" else "bash"
+        command = [executable, str(script), *options]
+    if not script.is_file():
+        raise WoonError(f"core-owned vault tool is missing: {tool}")
+    try:
+        result = subprocess.run(
+            command,
+            cwd=target,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "VAULT_DIR": str(target)},
+            text=True,
+        )
+    except OSError as error:
+        raise WoonError(f"knowledge vault tool could not start: {tool}") from error
+    output.write(result.stdout)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"knowledge vault tool failed: {tool}"
+        raise WoonError(detail)
+
+
+def _run_obsidian_plugin(arguments: list[str], output: TextIO) -> None:
+    """Manage approved Obsidian releases with filesystem receipts, not UI automation."""
+
+    if not arguments:
+        raise WoonError(
+            "knowledge obsidian-plugin requires status, install, remove-detected-mindmaps, "
+            "configure-prisma-calendar, configure-full-calendar-remastered, "
+            "configure-notion-bases-calendar, configure-simple-calendar, or retire"
+        )
+    action, *raw_options = arguments
+    plugin_ids: list[str] = []
+    options: list[str] = []
+    index = 0
+    while index < len(raw_options):
+        option = raw_options[index]
+        if option != "--plugin":
+            options.append(option)
+            index += 1
+            continue
+        if index + 1 >= len(raw_options):
+            raise WoonError("--plugin requires one plugin ID")
+        plugin_ids.append(raw_options[index + 1])
+        index += 2
+    vault, remaining = _parse_knowledge_options(options)
+    if remaining:
+        raise WoonError("unexpected obsidian-plugin argument: " + " ".join(remaining))
+    service = ObsidianPluginService(vault or resolve_knowledge_vault())
+    if action == "status":
+        if plugin_ids:
+            raise WoonError("obsidian-plugin status does not accept --plugin")
+        result = service.status()
+    elif action == "install":
+        result = service.install(plugin_ids)
+    elif action == "remove-detected-mindmaps":
+        if plugin_ids:
+            raise WoonError("remove-detected-mindmaps discovers targets from installed manifests")
+        result = service.remove_detected_mindmaps()
+    elif action == "configure-prisma-calendar":
+        if plugin_ids:
+            raise WoonError("configure-prisma-calendar does not accept --plugin")
+        result = service.configure_prisma_calendar()
+    elif action == "configure-full-calendar-remastered":
+        if plugin_ids:
+            raise WoonError("configure-full-calendar-remastered does not accept --plugin")
+        result = service.configure_full_calendar_remastered()
+    elif action == "configure-notion-bases-calendar":
+        if plugin_ids:
+            raise WoonError("configure-notion-bases-calendar does not accept --plugin")
+        result = service.configure_notion_bases_calendar()
+    elif action == "configure-simple-calendar":
+        if plugin_ids:
+            raise WoonError("configure-simple-calendar does not accept --plugin")
+        result = service.configure_simple_calendar()
+    elif action == "retire":
+        result = service.retire(plugin_ids)
+    else:
+        raise WoonError(f"unknown obsidian-plugin action {action!r}")
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _run_mail_schedule_candidate_recording(arguments: list[str], output: TextIO) -> None:
+    """Record one minimized mail polling window through the same MCP-owned service."""
+
+    values: dict[str, str] = {}
+    raw_options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--run-token", "--candidates-json"}:
+            raw_options.append(option)
+            index += 1
+            continue
+        if option in values or index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault, options = _parse_knowledge_options(raw_options)
+    if (
+        options
+        or "--run-token" not in values
+        or set(values).difference({"--run-token", "--candidates-json"})
+    ):
+        raise WoonError(
+            "knowledge record-mail-schedule-candidates requires --run-token "
+            "and optional --candidates-json"
+        )
+    raw_candidates = values.get("--candidates-json", "[]")
+    try:
+        parsed = json.loads(raw_candidates)
+    except json.JSONDecodeError as error:
+        raise WoonError("mail candidates must be a JSON array") from error
+    if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+        raise WoonError("mail candidates must be a JSON array of objects")
+    result = record_mail_schedule_candidates(
+        vault or resolve_knowledge_vault(),
+        run_token=values["--run-token"],
+        submissions=submissions_from_records(parsed),
+    )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_codex_daily_digest_recording(arguments: list[str], output: TextIO) -> None:
+    """Record one transcript-free daily Codex digest through the owned service."""
+
+    values: dict[str, str] = {}
+    repair_missing_digest = False
+    raw_options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option == "--repair-missing-digest":
+            if repair_missing_digest:
+                raise WoonError("--repair-missing-digest may be used once")
+            repair_missing_digest = True
+            index += 1
+            continue
+        if option not in {"--day", "--entries-json"}:
+            raw_options.append(option)
+            index += 1
+            continue
+        if option in values or index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault, options = _parse_knowledge_options(raw_options)
+    if options or set(values) != {"--day", "--entries-json"}:
+        raise WoonError("knowledge record-codex-daily-digest requires --day and --entries-json")
+    try:
+        target_day = date.fromisoformat(values["--day"])
+    except ValueError as error:
+        raise WoonError("Codex daily digest day must be YYYY-MM-DD") from error
+    try:
+        parsed = json.loads(values["--entries-json"])
+    except json.JSONDecodeError as error:
+        raise WoonError("Codex daily digest entries must be a JSON array") from error
+    if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+        raise WoonError("Codex daily digest entries must be a JSON array of objects")
+    resolved_vault = vault or resolve_knowledge_vault()
+    if repair_missing_digest:
+        settings = load_orchestrator_settings(resolved_vault)
+        automation_root = Path.home() / ".codex" / "automations"
+        verified = verify_codex_automation_registry(settings, automation_root)
+        input_sha256, output_sha256 = _governance_preflight_evidence(
+            settings.vault,
+            settings.policy_document,
+            automation_root,
+            verified,
+            repair_missing_digest_for=target_day,
+        )
+        record_governance_preflight(
+            settings, input_sha256=input_sha256, output_sha256=output_sha256
+        )
+    result = record_codex_daily_digest(
+        resolved_vault,
+        day=target_day,
+        entries=daily_digest_entries_from_records(parsed),
+    )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_codex_knowledge_entry_recording(arguments: list[str], output: TextIO) -> None:
+    """Record one sanitized Codex conclusion batch through the owned service."""
+
+    values: dict[str, str] = {}
+    raw_options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--source-range", "--entries-json"}:
+            raw_options.append(option)
+            index += 1
+            continue
+        if option in values or index + 1 >= len(arguments):
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault, options = _parse_knowledge_options(raw_options)
+    if options or set(values) != {"--source-range", "--entries-json"}:
+        raise WoonError(
+            "knowledge record-codex-knowledge-entries requires --source-range and --entries-json"
+        )
+    try:
+        parsed = json.loads(values["--entries-json"])
+    except json.JSONDecodeError as error:
+        raise WoonError("Codex knowledge entries must be a JSON array") from error
+    if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+        raise WoonError("Codex knowledge entries must be a JSON array of objects")
+    result = record_codex_knowledge_entries(
+        vault or resolve_knowledge_vault(),
+        source_range=values["--source-range"],
+        entries=codex_knowledge_entries_from_records(parsed),
+    )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_codex_daily_digest_materialization(arguments: list[str], output: TextIO) -> None:
+    """Materialize the daily digest from the local minimized entry ledger."""
+
+    values: dict[str, str] = {}
+    replace_empty_digest = False
+    raw_options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option == "--replace-empty-digest":
+            if replace_empty_digest:
+                raise WoonError("--replace-empty-digest may be used once")
+            replace_empty_digest = True
+            index += 1
+            continue
+        if option != "--day":
+            raw_options.append(option)
+            index += 1
+            continue
+        if option in values or index + 1 >= len(arguments):
+            raise WoonError("--day requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault, options = _parse_knowledge_options(raw_options)
+    if options or set(values) != {"--day"}:
+        raise WoonError("knowledge materialize-codex-daily-digest requires --day")
+    try:
+        target_day = date.fromisoformat(values["--day"])
+    except ValueError as error:
+        raise WoonError("Codex daily digest day must be YYYY-MM-DD") from error
+    result = record_daily_digest_from_codex_ledger(
+        vault or resolve_knowledge_vault(),
+        day=target_day,
+        replace_empty_digest=replace_empty_digest,
+    )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
 
 
 def _run_schedule_apply(arguments: list[str], output: TextIO) -> None:

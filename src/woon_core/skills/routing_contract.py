@@ -20,6 +20,15 @@ def routing_prompt(catalog: tuple[CatalogSkill, ...], prompts: dict[str, str]) -
     return f"""You are evaluating natural-language routing for a skill catalog.
 For each case, select only the skill names whose descriptions directly match the request.
 Select the smallest sufficient set. Do not invent names. Do not perform the request.
+If a request is unsafe, ambiguous, missing a prerequisite, private, or explicitly says
+not to make a change, still select the skill that owns that domain so it can refuse,
+ask for the missing information, or apply its boundary. Do not return an empty skill
+list merely because the correct response is a refusal or clarification. Return an
+empty list only when no available skill owns any part of the request.
+Words such as public, published, blog, or draft may be context rather than the requested
+operation. Select a publish, deploy, or promotion skill only when the request explicitly
+asks to publish, deploy, announce, distribute, or promote; use the authoring or review
+skill when the request is only to write, edit, explain, or review content.
 Return every case exactly once in the required JSON shape.
 
 Available skills:

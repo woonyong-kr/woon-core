@@ -20,6 +20,7 @@ from woon_core.knowledge.second_brain_runtime import (
     RunRequest,
     record_governance_preflight,
     snapshot_owned_paths,
+    validate_review_cards,
 )
 
 
@@ -61,6 +62,12 @@ def _write_runnable_policy(vault: Path) -> None:
       prompt_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb""",
         ),
         encoding="utf-8",
+    )
+    settings = load_orchestrator_settings(vault)
+    record_governance_preflight(
+        settings,
+        input_sha256="a" * 64,
+        output_sha256="b" * 64,
     )
 
 
@@ -134,7 +141,7 @@ def test_governance_preflight_unblocks_a_policy_changed_lane(tmp_path: Path) -> 
             }
         },
     }
-    settings.checkpoint_path.parent.mkdir(parents=True)
+    settings.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     settings.checkpoint_path.write_text(json.dumps(stale_checkpoint), encoding="utf-8")
     request = _request(settings, tmp_path, cursor="cursor-after-preflight")
 
@@ -160,6 +167,40 @@ def test_governance_preflight_unblocks_a_policy_changed_lane(tmp_path: Path) -> 
     assert resumed.replayed is False
 
 
+def test_first_enabled_lane_requires_current_governance_preflight(tmp_path: Path) -> None:
+    _write_runnable_policy(tmp_path)
+    settings = load_orchestrator_settings(tmp_path)
+    settings.checkpoint_path.unlink()
+    request = _request(settings, tmp_path, cursor="cursor-first-run")
+
+    with pytest.raises(WoonError, match="requires governance preflight"):
+        AutomationRunStore(settings).run(
+            "mail-schedule-candidates",
+            request,
+            lambda: RunOutcome(candidate_ids=(), output_sha256="a" * 64),
+        )
+
+
+def test_governance_preflight_prunes_only_retired_checkpoint_lanes(tmp_path: Path) -> None:
+    _write_runnable_policy(tmp_path)
+    settings = load_orchestrator_settings(tmp_path)
+    checkpoint = json.loads(settings.checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["lanes"]["retired-lane"] = {
+        "automation_id": "retired-lane",
+        "cursor": "old",
+        "owned_revision": "a" * 64,
+        "policy_sha256": "a" * 64,
+        "receipt_id": "retired",
+    }
+    settings.checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    record_governance_preflight(settings, input_sha256="c" * 64, output_sha256="d" * 64)
+
+    after = json.loads(settings.checkpoint_path.read_text(encoding="utf-8"))
+    assert "retired-lane" not in after["lanes"]
+    assert "governance-audit" in after["lanes"]
+
+
 def test_failure_keeps_checkpoint_immutable_and_cleans_the_run_lock(tmp_path: Path) -> None:
     _write_runnable_policy(tmp_path)
     settings = load_orchestrator_settings(tmp_path)
@@ -173,7 +214,8 @@ def test_failure_keeps_checkpoint_immutable_and_cleans_the_run_lock(tmp_path: Pa
             lambda: (_ for _ in ()).throw(RuntimeError("connection reset")),
         )
 
-    assert not settings.checkpoint_path.exists()
+    checkpoint = json.loads(settings.checkpoint_path.read_text(encoding="utf-8"))
+    assert "mail-schedule-candidates" not in checkpoint["lanes"]
     assert not (settings.receipt_directory / "mail-schedule-candidates").exists()
 
     result = store.run(
@@ -203,13 +245,14 @@ def test_rejects_changed_owned_path_before_candidate_producer_runs(tmp_path: Pat
         store.run("mail-schedule-candidates", request, produce)
 
     assert calls == 0
-    assert not settings.checkpoint_path.exists()
+    checkpoint = json.loads(settings.checkpoint_path.read_text(encoding="utf-8"))
+    assert "mail-schedule-candidates" not in checkpoint["lanes"]
 
 
 def test_rejects_malformed_checkpoint_without_overwriting_it(tmp_path: Path) -> None:
     _write_runnable_policy(tmp_path)
     settings = load_orchestrator_settings(tmp_path)
-    settings.checkpoint_path.parent.mkdir(parents=True)
+    settings.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     settings.checkpoint_path.write_text("[]\n", encoding="utf-8")
     original = settings.checkpoint_path.read_bytes()
 
@@ -282,8 +325,52 @@ status: Review
             lambda: RunOutcome(candidate_ids=(), output_sha256="e" * 64),
         )
 
-    assert not settings.checkpoint_path.exists()
+    checkpoint = json.loads(settings.checkpoint_path.read_text(encoding="utf-8"))
+    assert "mail-schedule-candidates" not in checkpoint["lanes"]
     assert not (settings.receipt_directory / "mail-schedule-candidates").exists()
+
+
+def test_rejects_overlong_human_review_title(tmp_path: Path) -> None:
+    review = tmp_path / "brain/review/mail/긴-제목.md"
+    review.parent.mkdir(parents=True)
+    title = "사용자 대시보드에서 한 줄로 읽을 수 없는 너무 긴 검토 제목은 자동화가 만들면 안 된다"
+    review.write_text(
+        "---\n"
+        "type: Candidate\n"
+        f'title: "{title}"\n'
+        "summary: 짧은 요약\n"
+        "publish: false\n"
+        "access: local-only\n"
+        "status: Review\n"
+        "---\n\n"
+        f"# {title}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WoonError, match="title is too long"):
+        validate_review_cards(tmp_path, ("brain/review/mail",))
+
+
+def test_person_memory_review_card_cannot_resolve_a_person_link(tmp_path: Path) -> None:
+    review = tmp_path / "brain/review/codex/김희준-면담-확인.md"
+    review.parent.mkdir(parents=True)
+    review.write_text(
+        "---\n"
+        "type: Candidate\n"
+        'title: "김희준: 면담 일정 확인"\n'
+        "summary: 면담 일정 확인\n"
+        "publish: false\n"
+        "access: local-only\n"
+        "status: Review\n"
+        "review_kind: 인물 정리\n"
+        "people: [[users/kim-heejun/README|김희준]]\n"
+        "---\n\n"
+        "# 김희준: 면담 일정 확인\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WoonError, match="must not resolve or link a person"):
+        validate_review_cards(tmp_path, ("brain/review/codex",))
 
 
 def test_rejects_proposal_lane_from_using_candidate_writer(tmp_path: Path) -> None:

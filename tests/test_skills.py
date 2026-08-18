@@ -251,7 +251,10 @@ def test_codex_selector_uses_isolated_strict_json(
         ]
         output_path = Path(command[command.index("--output-last-message") + 1])
         output_path.write_text('{"cases":[{"id":"case","skills":["demo"]}]}', encoding="utf-8")
-        assert "Available skills:\n- demo: Test skill." in str(options["input"])
+        prompt = str(options["input"])
+        assert "Available skills:\n- demo: Test skill." in prompt
+        assert "correct response is a refusal or clarification" in prompt
+        assert "public, published, blog, or draft may be context" in prompt
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr("woon_core.skills.codex_router.subprocess.run", fake_run)

@@ -5,6 +5,8 @@ import pytest
 
 from woon_core.errors import WoonError
 from woon_core.knowledge.orchestration import (
+    _AUTOMATION_PERSON_PROMPT_GUARD_TERMS,
+    _has_person_protection,
     load_orchestrator_settings,
     verify_codex_automation_registry,
 )
@@ -23,6 +25,7 @@ def write_policy(
     (vault / "docs").mkdir(parents=True, exist_ok=True)
     (vault / "config").mkdir(exist_ok=True)
     (vault / "docs/second-brain-operating-model.md").write_text("# policy\n", encoding="utf-8")
+    (vault / "config/person-schema.json").write_text("{}\n", encoding="utf-8")
     (vault / "config/second-brain-orchestrator.yaml").write_text(
         f"""version: 1
 policy_document: docs/second-brain-operating-model.md
@@ -32,6 +35,8 @@ repository_contract:
   brain_is_subdirectory_not_repository: true
   runtime_must_not_contain_git_repository: true
   reusable_code_repository: woon-core
+  vault_executable_sources: forbidden
+  vault_tool_interface: core-owned-cli
   public_export: manual_verified_one_way_only
 runtime:
   checkpoint_path: .local/woon/checkpoints.yaml
@@ -54,20 +59,34 @@ global_guards:
     public_output_requires_verified_claim: true
   mutations:
     raw_source_delete: forbidden
-    direct_things_database_access: forbidden
+    direct_app_database_access: forbidden
     calendar_write_requires_policy_authorization: true
+    task_write_requires_purpose: true
     public_publish_requires_separate_authorization: true
   schedule_bridge:
-    auto_apply_allowlisted_datetime_mail_only: true
-    schedule_apply_path: local-mail-automation
-    calendar_name: Woon Tasks
+    auto_apply_allowlisted_datetime_mail_only: false
+    schedule_apply_path: local-user-authorized
+    calendar_name: Woon 일정
     manual_apply_command: native-local-command
-    native_adapters: [things-url-scheme-v2, eventkit-full-access]
+    native_adapters: [eventkit-full-access]
     state_path: .local/woon-knowledge/schedule-bridge-state.json
-things_3:
+identity:
+  schema_path: config/person-schema.json
+  default_record_owner: choi-woonyoung
+  default_owner_mode: implicit-if-omitted
+  person_card_creation: explicit-or-repeated-evidence
+  automated_person_card_creation: forbidden
+  automated_person_candidate_creation: explicit-facts-review-only
+  novel_identity_import: forbidden
+  private_history_projection: explicit-local-ledger-only
+  private_history_review: candidate-only-delete-when-empty
+obsidian_tasks:
   authority: current-action
-  write_interface: url-scheme-v2
-  secret_ref: keychain:woon.second-brain.things-url-scheme/things-url-scheme
+  write_interface: local-mcp
+  routine_root: inbox/tasks/routines
+  daily_root: inbox/daily
+  receipt_path: .local/woon-knowledge/tasks-state.json
+  recurrence: materialize-kst-daily
   areas:
     - id: career
       title: 커리어·일
@@ -83,28 +102,9 @@ things_3:
       title: 건강·성장
     - id: admin
       title: 행정·재정
-  tag_groups:
-    - id: context
-      tags: [컴퓨터, 전화, 외부, 집]
-    - id: mode
-      tags: [집중, 빠른 처리]
-    - id: state
-      tags: [대기, 일정, 위임]
-  project:
-    required: [concrete-outcome, closure-condition]
-    prohibited: [knowledge-note, raw-original, person-profile, novel-manuscript]
   todo:
-    required: [verb-first-title, independently-verifiable-action]
-  calendar_context:
-    calendar_name: Woon Tasks
-    title_suffixes:
-      career: 커리어
-      learning: 학습
-      creative: 창작
-      life: 생활
-      relationship: 관계
-      health: 건강
-      admin: 행정
+    required: [verb-first-title, independently-verifiable-action, purpose]
+    prohibited: [knowledge-note, raw-original, person-profile, novel-manuscript]
 automations:
   - id: mail-schedule-candidates
     owner: mail-schedule-task
@@ -113,7 +113,7 @@ automations:
     output: [candidate]
     checkpoint_key: mail-schedule-candidates
     required_signals: [allowlist]
-    prohibited: [advertising-persistence]
+    prohibited: [advertising-persistence, person-profile-inference, unresolved-identity-link]
     execution:
       mode: candidate-only
       status: {status}
@@ -125,12 +125,12 @@ automations:
       owned_paths: [brain/review/mail]
   - id: policy-schedule-apply
     owner: policy-schedule-apply-task
-    cadence: allowlisted-mail-triggered
-    inputs: [policy-authorized-schedule-candidate]
+    cadence: explicit-local-request
+    inputs: [user-approved-schedule-candidate]
     output: [confirmed-write]
     checkpoint_key: policy-schedule-apply
-    required_signals: [allowlisted-mail]
-    prohibited: [ambiguous-mail-write]
+    required_signals: [user-approval]
+    prohibited: [ambiguous-mail-write, person-profile-inference, unresolved-identity-link]
     execution:
       mode: policy-authorized
       status: local-only
@@ -147,7 +147,7 @@ automations:
     output: [proposal]
     checkpoint_key: governance-audit
     required_signals: [instruction-inventory]
-    prohibited: [automatic-policy-delete]
+    prohibited: [automatic-policy-delete, person-profile-inference, unresolved-identity-link]
     execution:
       mode: proposal-only
       status: planned
@@ -284,15 +284,53 @@ def test_rejects_registered_local_only_schedule_apply(tmp_path: Path) -> None:
         load_orchestrator_settings(tmp_path)
 
 
-def test_rejects_unsafe_things_3_contract(tmp_path: Path) -> None:
+def test_rejects_unsafe_obsidian_task_contract(tmp_path: Path) -> None:
     write_policy(tmp_path)
     path = tmp_path / "config/second-brain-orchestrator.yaml"
     unsafe_policy = path.read_text(encoding="utf-8").replace(
-        "write_interface: url-scheme-v2", "write_interface: direct-database"
+        "write_interface: local-mcp", "write_interface: direct-database"
     )
     path.write_text(unsafe_policy, encoding="utf-8")
 
-    with pytest.raises(WoonError, match="Things 3 write interface"):
+    with pytest.raises(WoonError, match="Obsidian tasks must use the local MCP interface"):
+        load_orchestrator_settings(tmp_path)
+
+
+def test_rejects_unsafe_identity_contract_and_inference_capability(tmp_path: Path) -> None:
+    write_policy(tmp_path)
+    path = tmp_path / "config/second-brain-orchestrator.yaml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "automated_person_card_creation: forbidden",
+            "automated_person_card_creation: allowed",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WoonError, match="automated_person_card_creation"):
+        load_orchestrator_settings(tmp_path)
+
+    write_policy(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "automated_person_candidate_creation: explicit-facts-review-only",
+            "automated_person_candidate_creation: automatic-profile",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(WoonError, match="automated_person_candidate_creation"):
+        load_orchestrator_settings(tmp_path)
+
+    write_policy(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "prohibited: [advertising-persistence, person-profile-inference, "
+            "unresolved-identity-link]",
+            "prohibited: [advertising-persistence]",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(WoonError, match="must prohibit identity inference"):
         load_orchestrator_settings(tmp_path)
 
 
@@ -324,3 +362,46 @@ prompt = \"Run an unsafe unbounded lane.\"
 
     with pytest.raises(WoonError, match="prompt digest"):
         verify_codex_automation_registry(settings, tmp_path / "automations")
+
+
+def test_rejects_registered_heartbeat_without_person_protection(tmp_path: Path) -> None:
+    unsafe_prompt = "Run only the policy-approved candidate lane."
+    write_policy(
+        tmp_path,
+        status="enabled",
+        thread_id='"thread-001"',
+        codex_automation_id='"codex-001"',
+        rrule='"FREQ=DAILY;BYHOUR=6;BYMINUTE=0;BYSECOND=0"',
+        notification_policy='"failed_runs_only"',
+        prompt_sha256=f'"{hashlib.sha256(unsafe_prompt.encode()).hexdigest()}"',
+    )
+    settings = load_orchestrator_settings(tmp_path)
+    registry = tmp_path / "automations" / "codex-001"
+    registry.mkdir(parents=True)
+    (registry / "automation.toml").write_text(
+        f'''id = "codex-001"
+kind = "heartbeat"
+status = "ACTIVE"
+target_thread_id = "thread-001"
+rrule = "FREQ=DAILY;BYHOUR=6;BYMINUTE=0;BYSECOND=0"
+notification_policy = "failed_runs_only"
+prompt = "{unsafe_prompt}"
+''',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WoonError, match="person protection"):
+        verify_codex_automation_registry(settings, tmp_path / "automations")
+
+    assert "인물 카드" in _AUTOMATION_PERSON_PROMPT_GUARD_TERMS[4]
+
+
+def test_accepts_person_protection_with_safe_punctuation_variants() -> None:
+    prompt = (
+        "인물 이름, 저자, 자료 제공자, 참석자가 나타나도 외부 인물의 people, "
+        "person_roles, attributions, 인물 카드를 자동으로 만들거나 바꾸지 말고 "
+        "관계와 신상을 추정하지 마라. Novel과 private 원본의 인물은 읽거나 "
+        "일반 인물 지도와 검색에 넣지 마라."
+    )
+
+    assert _has_person_protection(prompt)

@@ -2,7 +2,7 @@
 
 This module owns only the local execution envelope: per-lane serialization,
 hash-only receipts, and cursor checkpoints.  It never reads mail or chat data,
-never invokes an LLM, and never writes Things or Calendar.  Connector adapters
+never invokes an LLM, and never writes Apple Calendar. Connector adapters
 must produce a validated :class:`RunOutcome` outside this boundary.
 """
 
@@ -29,6 +29,7 @@ _REVIEW_INTERNAL_TERM_RE = re.compile(
     r"(?:candidate|governance|preflight|heartbeat|thread|hash|[0-9a-f]{12,})",
     flags=re.IGNORECASE,
 )
+_REVIEW_TITLE_LIMIT = 48
 _CHECKPOINT_VERSION = 1
 _RECEIPT_VERSION = 1
 
@@ -81,7 +82,9 @@ def record_governance_preflight(
         expected_owned_revision=snapshot_owned_paths(settings.vault, contract.owned_paths),
         cursor_after=f"governance-policy-{policy_token}",
     )
-    return AutomationRunStore(settings).run(
+    store = AutomationRunStore(settings)
+    store.prune_retired_checkpoint_lanes()
+    return store.run(
         "governance-audit",
         request,
         lambda: RunOutcome(candidate_ids=(), output_sha256=output_sha256),
@@ -144,6 +147,28 @@ class AutomationRunStore:
             atomic_write(receipt_path, encode_json(receipt), mode=0o600)
             self._write_checkpoint(checkpoint, contract, request, receipt_id)
             return RunResult(receipt_id=receipt_id, replayed=False)
+
+    def prune_retired_checkpoint_lanes(self) -> tuple[str, ...]:
+        """Remove only checkpoint lanes that no longer exist in the policy.
+
+        This runs as part of the explicit governance preflight, never during a
+        worker run.  A current lane with an old policy hash remains intact so
+        its receipt can still enforce the normal policy-change gate.
+        """
+
+        current_keys = {contract.checkpoint_key for contract in self._contracts.values()}
+        lock_path = self._settings.lock_directory / "checkpoint-retirement.lock"
+        with exclusive_file_lock(lock_path):
+            checkpoint = self._load_checkpoint()
+            retired = tuple(
+                sorted(key for key in checkpoint["lanes"] if key not in current_keys)
+            )
+            if not retired:
+                return ()
+            for key in retired:
+                del checkpoint["lanes"][key]
+            atomic_write(self._settings.checkpoint_path, encode_json(checkpoint), mode=0o600)
+            return retired
 
     def run_review_candidates(
         self,
@@ -279,12 +304,12 @@ class AutomationRunStore:
 
         if contract.automation_id == "governance-audit":
             return
-        lane = checkpoint["lanes"].get(contract.checkpoint_key)
-        if not isinstance(lane, dict) or lane.get("policy_sha256") == self._settings.policy_sha256:
-            return
         governance = self._contracts.get("governance-audit")
         if governance is None:
-            raise WoonError("second-brain policy change requires a governance-audit lane")
+            return
+        lane = checkpoint["lanes"].get(contract.checkpoint_key)
+        if isinstance(lane, dict) and lane.get("policy_sha256") == self._settings.policy_sha256:
+            return
         message = (
             f"second-brain {contract.automation_id} requires governance preflight "
             "after policy change"
@@ -398,6 +423,8 @@ def _validate_review_card(path: Path) -> None:
         or not summary.strip()
     ):
         raise WoonError("second-brain review card must have human Candidate metadata")
+    if len(title) > _REVIEW_TITLE_LIMIT:
+        raise WoonError("second-brain review card title is too long for the human dashboard")
     heading = _first_h1(body)
     if heading != title:
         raise WoonError("second-brain review card title and H1 must match")
@@ -406,6 +433,10 @@ def _validate_review_card(path: Path) -> None:
         raise WoonError("second-brain review card must use a Korean human title")
     if _REVIEW_INTERNAL_TERM_RE.search(visible):
         raise WoonError("second-brain review card exposes an internal identifier")
+    if frontmatter.get("review_kind") == "인물 정리" and any(
+        field in frontmatter for field in ("people", "person_roles", "attributions", "person_id")
+    ):
+        raise WoonError("person-memory review card must not resolve or link a person")
 
 
 def _review_frontmatter(text: str) -> tuple[dict[str, str], str]:

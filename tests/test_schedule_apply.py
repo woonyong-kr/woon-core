@@ -22,8 +22,7 @@ def _write_candidate(vault: Path, **changes: object) -> Path:
         "authorized_at": "2026-08-15T12:00:00+00:00",
         "lifecycle": "create",
         "idempotency_key": "schedule-001",
-        "area_id": "career",
-        "things_tags": ["컴퓨터", "일정"],
+        "category_id": "career",
         "bridge_revision": 1,
     }
     values.update(changes)
@@ -38,8 +37,7 @@ def test_loads_only_local_policy_authorized_schedule_candidate(tmp_path: Path) -
 
     candidate = _load_candidate(tmp_path, path)
 
-    assert candidate.area_id == "career"
-    assert candidate.things_tags == ("컴퓨터", "일정")
+    assert candidate.category_id == "career"
     assert candidate.bridge_revision == 1
     assert candidate.authorized_at == datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
 

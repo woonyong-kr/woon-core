@@ -1,6 +1,6 @@
 """Validated, non-executing contracts for Woon second-brain automations.
 
-This module deliberately does not call Gmail, Things, Calendar, or Codex.  It
+This module deliberately does not call Gmail, Calendar, or Codex.  It
 only makes the policy file machine-checkable so a later adapter cannot silently
 turn a planned candidate task into an unbounded writer.
 """
@@ -23,11 +23,32 @@ _CADENCES = {
     "four-hourly",
     "daily",
     "daily-and-policy-gate",
-    "allowlisted-mail-triggered",
+    "explicit-local-request",
 }
-_EXECUTION_MODES = {"candidate-only", "review-only", "proposal-only", "policy-authorized"}
+_EXECUTION_MODES = {
+    "candidate-only",
+    "review-only",
+    "proposal-only",
+    "policy-authorized",
+    "materialize",
+}
 _EXECUTION_STATUSES = {"planned", "enabled", "disabled", "local-only"}
 _NOTIFICATION_POLICIES = {"failed_runs_only", "always", "none"}
+_AUTOMATION_PERSON_PROMPT_GUARD_TERMS = (
+    "인물 이름",
+    "저자",
+    "자료 제공자",
+    "참석자",
+    "외부 인물의 people, person_roles, attributions, 인물 카드를 자동으로 만들거나 바꾸지 말고",
+    "관계",
+    "신상",
+    "추정하지 마라",
+    "Novel",
+    "private 원본",
+    "일반 인물 지도",
+    "검색",
+    "넣지 마라",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +169,10 @@ def load_orchestrator_settings(vault: Path) -> OrchestratorSettings:
         if policy_change != "caller-must-run-governance-preflight":
             raise WoonError("policy-gated automation requires caller-must-run-governance-preflight")
     _validate_global_guards(raw.get("global_guards"))
-    _validate_things_3_contract(raw.get("things_3"))
+    _validate_identity_contract(resolved_vault, raw.get("identity"), contracts)
+    _validate_codex_conversation_contract(contracts)
+    _validate_daily_record_contract(contracts)
+    _validate_obsidian_tasks_contract(raw.get("obsidian_tasks"))
     _validate_schedule_apply_contract(contracts)
 
     return OrchestratorSettings(
@@ -203,8 +227,18 @@ def verify_codex_automation_registry(
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         if prompt_digest != lane.prompt_sha256:
             raise WoonError(f"Codex automation mismatch for {lane.automation_id}: prompt digest")
+        if not _has_person_protection(prompt):
+            raise WoonError(
+                f"Codex automation mismatch for {lane.automation_id}: person protection"
+            )
         verified.append(lane.automation_id)
     return tuple(verified)
+
+
+def _has_person_protection(prompt: str) -> bool:
+    """Require each privacy prohibition while allowing safe punctuation normalization."""
+
+    return all(term in prompt for term in _AUTOMATION_PERSON_PROMPT_GUARD_TERMS)
 
 
 def _automation(raw: object, index: int) -> AutomationContract:
@@ -339,27 +373,106 @@ def _validate_global_guards(value: object) -> None:
     mutations = _mapping(guards.get("mutations"), "global_guards.mutations")
     for field in (
         "raw_source_delete",
-        "direct_things_database_access",
+        "direct_app_database_access",
     ):
         if mutations.get(field) != "forbidden":
             raise WoonError(f"mutation guard {field} must be forbidden")
     if mutations.get("calendar_write_requires_policy_authorization") is not True:
         raise WoonError("calendar writes must require policy authorization")
+    if mutations.get("task_write_requires_purpose") is not True:
+        raise WoonError("task writes must require a purpose")
     if mutations.get("public_publish_requires_separate_authorization") is not True:
         raise WoonError("public publishing must require separate authorization")
     bridge = _mapping(guards.get("schedule_bridge"), "global_guards.schedule_bridge")
-    if bridge.get("auto_apply_allowlisted_datetime_mail_only") is not True:
-        raise WoonError("schedule bridge must limit automatic apply to allowlisted date-time mail")
-    if bridge.get("schedule_apply_path") != "local-mail-automation":
-        raise WoonError("schedule bridge must use the local mail automation path")
-    if bridge.get("calendar_name") != "Woon Tasks":
-        raise WoonError("schedule bridge must use the Woon Tasks calendar")
+    if bridge.get("auto_apply_allowlisted_datetime_mail_only") is not False:
+        raise WoonError("schedule bridge must not auto-apply mail candidates")
+    if bridge.get("schedule_apply_path") != "local-user-authorized":
+        raise WoonError("schedule bridge must use the local user-authorized path")
+    if bridge.get("calendar_name") != "Woon 일정":
+        raise WoonError("schedule bridge must use the Woon 일정 calendar")
     if bridge.get("manual_apply_command") != "native-local-command":
         raise WoonError("schedule bridge must use the native manual apply command")
-    if bridge.get("native_adapters") != ["things-url-scheme-v2", "eventkit-full-access"]:
-        raise WoonError("schedule bridge must declare only approved native adapters")
+    if bridge.get("native_adapters") != ["eventkit-full-access"]:
+        raise WoonError("schedule bridge must declare only the EventKit adapter")
     if bridge.get("state_path") != ".local/woon-knowledge/schedule-bridge-state.json":
         raise WoonError("schedule bridge state must stay in the local runtime path")
+
+
+def _validate_identity_contract(
+    vault: Path, value: object, contracts: tuple[AutomationContract, ...]
+) -> None:
+    """Keep person cards deliberate and prevent every automation from guessing identities."""
+
+    identity = _mapping(value, "identity")
+    if identity.get("schema_path") != "config/person-schema.json":
+        raise WoonError("identity schema_path must use config/person-schema.json")
+    if not (vault / "config/person-schema.json").is_file():
+        raise WoonError("identity schema document is missing")
+    expected = {
+        "default_record_owner": "choi-woonyoung",
+        "default_owner_mode": "implicit-if-omitted",
+        "person_card_creation": "explicit-or-repeated-evidence",
+        "automated_person_card_creation": "forbidden",
+        "automated_person_candidate_creation": "explicit-facts-review-only",
+        "novel_identity_import": "forbidden",
+        "private_history_projection": "explicit-local-ledger-only",
+        "private_history_review": "candidate-only-delete-when-empty",
+    }
+    for field, required in expected.items():
+        if identity.get(field) != required:
+            raise WoonError(f"identity contract {field} must be {required!r}")
+    forbidden = {"person-profile-inference", "unresolved-identity-link"}
+    for contract in contracts:
+        missing = forbidden.difference(contract.prohibited)
+        if missing:
+            raise WoonError(
+                f"automation {contract.automation_id} must prohibit identity inference: "
+                f"{', '.join(sorted(missing))}"
+            )
+
+
+def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, ...]) -> None:
+    """Keep one semantic projection between Codex chat and the two user views."""
+
+    matches = [item for item in contracts if item.automation_id == "codex-conversation-ingest"]
+    if not matches:
+        return
+    if len(matches) != 1:
+        raise WoonError("second-brain orchestrator has duplicate codex-conversation-ingest lanes")
+    lane = matches[0]
+    expected_paths = {
+        "brain/wiki",
+        "brain/review/codex",
+        ".local/woon-knowledge/codex-knowledge",
+    }
+    if lane.mode != "materialize" or set(lane.owned_paths) != expected_paths:
+        raise WoonError("codex conversation ingest must own the growth and local ledger boundary")
+    expected_outputs = {
+        "growth-wiki",
+        "daily-knowledge-ledger",
+        "decision-candidate",
+        "person-memory-review-candidate",
+    }
+    if set(lane.outputs) != expected_outputs:
+        raise WoonError(
+            "codex conversation ingest outputs must use the canonical knowledge projection"
+        )
+
+
+def _validate_daily_record_contract(contracts: tuple[AutomationContract, ...]) -> None:
+    """A daily digest must be able to materialize a missing daily shell."""
+
+    matches = [item for item in contracts if item.automation_id == "daily-record-materialization"]
+    if not matches:
+        return
+    if len(matches) != 1:
+        raise WoonError(
+            "second-brain orchestrator has duplicate daily-record-materialization lanes"
+        )
+    lane = matches[0]
+    required_paths = {"inbox/daily", "inbox/daily-digests"}
+    if lane.mode != "materialize" or not required_paths.issubset(lane.owned_paths):
+        raise WoonError("daily record materialization must own the daily note and digest")
 
 
 def _validate_repository_contract(value: object) -> None:
@@ -369,6 +482,8 @@ def _validate_repository_contract(value: object) -> None:
         "brain_is_subdirectory_not_repository": True,
         "runtime_must_not_contain_git_repository": True,
         "reusable_code_repository": "woon-core",
+        "vault_executable_sources": "forbidden",
+        "vault_tool_interface": "core-owned-cli",
         "public_export": "manual_verified_one_way_only",
     }
     for field, expected in required.items():
@@ -376,19 +491,22 @@ def _validate_repository_contract(value: object) -> None:
             raise WoonError(f"repository contract {field} must be {expected!r}")
 
 
-def _validate_things_3_contract(value: object) -> None:
-    """Keep actionable Things taxonomy separate from knowledge and private originals."""
+def _validate_obsidian_tasks_contract(value: object) -> None:
+    """Keep Markdown tasks actionable and separate from knowledge and originals."""
 
-    contract = _mapping(value, "things_3")
+    contract = _mapping(value, "obsidian_tasks")
     if contract.get("authority") != "current-action":
-        raise WoonError("Things 3 authority must stay current-action")
-    if contract.get("write_interface") != "url-scheme-v2":
-        raise WoonError("Things 3 write interface must stay url-scheme-v2")
-    required_secret_ref = (
-        "keychain:woon.second-brain.things-url-scheme/things-url-scheme"
-    )
-    if contract.get("secret_ref") != required_secret_ref:
-        raise WoonError("Things 3 token must stay in the declared Keychain reference")
+        raise WoonError("Obsidian task authority must stay current-action")
+    if contract.get("write_interface") != "local-mcp":
+        raise WoonError("Obsidian tasks must use the local MCP interface")
+    if contract.get("routine_root") != "inbox/tasks/routines":
+        raise WoonError("Obsidian tasks must use the routine source root")
+    if contract.get("daily_root") != "inbox/daily":
+        raise WoonError("Obsidian tasks must materialize in the daily root")
+    if contract.get("receipt_path") != ".local/woon-knowledge/tasks-state.json":
+        raise WoonError("Obsidian task receipts must stay in the local runtime path")
+    if contract.get("recurrence") != "materialize-kst-daily":
+        raise WoonError("Obsidian tasks must materialize with the KST daily rule")
 
     expected_areas = (
         ("career", "커리어·일"),
@@ -399,73 +517,37 @@ def _validate_things_3_contract(value: object) -> None:
         ("health", "건강·성장"),
         ("admin", "행정·재정"),
     )
-    areas = _list(contract.get("areas"), "things_3.areas")
+    areas = _list(contract.get("areas"), "obsidian_tasks.areas")
     actual_areas = tuple(
         (
             _required_slug(
-                _mapping(item, "things_3.areas[]").get("id"),
-                "things_3.areas[].id",
+                _mapping(item, "obsidian_tasks.areas[]").get("id"),
+                "obsidian_tasks.areas[].id",
             ),
             _required_string(
-                _mapping(item, "things_3.areas[]").get("title"),
-                "things_3.areas[].title",
+                _mapping(item, "obsidian_tasks.areas[]").get("title"),
+                "obsidian_tasks.areas[].title",
             ),
         )
         for item in areas
     )
     if actual_areas != expected_areas:
-        raise WoonError("Things 3 areas must match the canonical responsibility taxonomy")
+        raise WoonError("Obsidian task areas must match the canonical responsibility taxonomy")
 
-    expected_tags = {
-        "context": ("컴퓨터", "전화", "외부", "집"),
-        "mode": ("집중", "빠른 처리"),
-        "state": ("대기", "일정", "위임"),
-    }
-    groups = _list(contract.get("tag_groups"), "things_3.tag_groups")
-    actual_tags: dict[str, tuple[str, ...]] = {}
-    for item in groups:
-        group = _mapping(item, "things_3.tag_groups[]")
-        identifier = _required_slug(group.get("id"), "things_3.tag_groups[].id")
-        if identifier in actual_tags:
-            raise WoonError("duplicate second-brain Things 3 tag group")
-        actual_tags[identifier] = _string_list(group.get("tags"), "things_3.tag_groups[].tags")
-    if actual_tags != expected_tags:
-        raise WoonError("Things 3 tags must remain action-context and state only")
-
-    project = _mapping(contract.get("project"), "things_3.project")
-    if _string_list(project.get("required"), "things_3.project.required") != (
-        "concrete-outcome",
-        "closure-condition",
+    todo = _mapping(contract.get("todo"), "obsidian_tasks.todo")
+    if _string_list(todo.get("required"), "obsidian_tasks.todo.required") != (
+        "verb-first-title",
+        "independently-verifiable-action",
+        "purpose",
     ):
-        raise WoonError("Things 3 projects must require a concrete closure")
-    if _string_list(project.get("prohibited"), "things_3.project.prohibited") != (
+        raise WoonError("Obsidian tasks must have a purpose and a verifiable action")
+    if _string_list(todo.get("prohibited"), "obsidian_tasks.todo.prohibited") != (
         "knowledge-note",
         "raw-original",
         "person-profile",
         "novel-manuscript",
     ):
-        raise WoonError("Things 3 projects must not store knowledge or private originals")
-    todo = _mapping(contract.get("todo"), "things_3.todo")
-    if _string_list(todo.get("required"), "things_3.todo.required") != (
-        "verb-first-title",
-        "independently-verifiable-action",
-    ):
-        raise WoonError("Things 3 to-dos must be independently verifiable actions")
-
-    context = _mapping(contract.get("calendar_context"), "things_3.calendar_context")
-    if context.get("calendar_name") != "Woon Tasks":
-        raise WoonError("Things 3 calendar context must use Woon Tasks")
-    expected_suffixes = {
-        "career": "커리어",
-        "learning": "학습",
-        "creative": "창작",
-        "life": "생활",
-        "relationship": "관계",
-        "health": "건강",
-        "admin": "행정",
-    }
-    if context.get("title_suffixes") != expected_suffixes:
-        raise WoonError("calendar context suffixes must match Things 3 areas")
+        raise WoonError("Obsidian tasks must not store knowledge or private originals")
 
 
 def _validate_schedule_apply_contract(contracts: tuple[AutomationContract, ...]) -> None:
@@ -476,7 +558,7 @@ def _validate_schedule_apply_contract(contracts: tuple[AutomationContract, ...])
     if (
         lane.mode != "policy-authorized"
         or lane.status != "local-only"
-        or lane.cadence != "allowlisted-mail-triggered"
+        or lane.cadence != "explicit-local-request"
     ):
         raise WoonError("policy-schedule-apply must stay local-only and unscheduled")
     if any(

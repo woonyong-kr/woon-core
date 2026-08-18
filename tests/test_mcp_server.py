@@ -54,6 +54,7 @@ def test_mcp_server_stdio_archives_searches_and_reads_a_section(tmp_path: Path) 
                 "woon_knowledge_archive_conversation",
                 "woon_knowledge_read_excerpt",
                 "woon_knowledge_search",
+                "woon_automation_record_mail_schedule_candidates",
             }.issubset({tool.name for tool in tools.tools})
 
             created = await session.call_tool(
