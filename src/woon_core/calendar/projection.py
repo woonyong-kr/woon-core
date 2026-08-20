@@ -111,17 +111,23 @@ class CalendarProjectionService:
         self,
         *,
         now: datetime | None = None,
-        days_before: int = 1,
+        days_before: int | None = None,
         days_after: int = 90,
     ) -> CalendarProjectionResult:
-        """Refresh a bounded private view with a fixed, non-sensitive category marker."""
+        """Refresh a bounded private view that always retains the current month."""
 
-        if not 0 <= days_before <= 31 or not 1 <= days_after <= 366:
+        invalid_days_before = days_before is not None and not 0 <= days_before <= 31
+        if invalid_days_before or not 1 <= days_after <= 366:
             raise WoonError("calendar projection range is outside the allowed window")
         current = now or datetime.now(_KST)
         if current.tzinfo is None or current.utcoffset() is None:
             raise WoonError("calendar projection requires a timezone-aware current time")
-        start_at = current - timedelta(days=days_before)
+        if days_before is None:
+            start_at = current.astimezone(_KST).replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0
+            )
+        else:
+            start_at = current - timedelta(days=days_before)
         end_at = current + timedelta(days=days_after)
         events = self._reader.list_events(start_at=start_at, end_at=end_at)
         _validate_events(events, start_at, end_at)

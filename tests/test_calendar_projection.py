@@ -141,6 +141,16 @@ def test_refresh_does_not_rewrite_an_unchanged_projection_when_time_moves(tmp_pa
     assert second.changed is False
 
 
+def test_refresh_default_window_starts_at_the_current_month_boundary(tmp_path: Path) -> None:
+    reader = FakeCalendarReader((_event(),))
+    service = CalendarProjectionService(tmp_path, reader)
+
+    result = service.refresh(now=datetime(2026, 8, 20, 3, 0, tzinfo=UTC))
+
+    assert result.start_at.isoformat() == "2026-08-01T00:00:00+09:00"
+    assert reader.calls[0][0] == result.start_at
+
+
 def test_refresh_uses_a_date_suffix_only_for_duplicate_calendar_titles(tmp_path: Path) -> None:
     reader = FakeCalendarReader(
         (
