@@ -26,6 +26,7 @@ from woon_core.knowledge.document_quality import (
     unresolved_wikilinks,
     validate_markdown_candidate,
 )
+from woon_core.knowledge.source_catalog import assert_disjoint_source_and_target
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +86,7 @@ def reconcile_catalog(
         raise WoonError("reconciliation reasoning_effort must be low, medium, or high")
     source = source_root.expanduser().resolve()
     target = target_root.expanduser().resolve()
+    assert_disjoint_source_and_target(source, target)
     catalog = _load_mapping(catalog_path)
     ledger = _load_ledger(ledger_path, str(catalog.get("source", "")))
     records = catalog.get("records")
@@ -256,6 +258,7 @@ def audit_reconciliation(
 
     source = source_root.expanduser().resolve()
     target = target_root.expanduser().resolve()
+    assert_disjoint_source_and_target(source, target)
     catalog = _load_mapping(catalog_path)
     ledger = _load_ledger(ledger_path, str(catalog.get("source", "")))
     raw_records = catalog.get("records")
@@ -1102,27 +1105,7 @@ def _document_scope(locator: str) -> str:
             "viewer 규칙은 학습 내용이 아니다. 설명 흐름은 Mermaid 정본을 우선하고 같은 흐름의 "
             "ASCII를 중복하지 않는다."
         )
-    scopes = {
-        "ai-reference/wiki-style-guide.md": (
-            "학습 문서의 문체, 제목, frontmatter, 선형 설명, 코드·수치 예시, Mermaid·ASCII "
-            "선택, wikilink·외부 링크 표기를 소유한다. 공개 외부 스타일 가이드 URL과 QEMU "
-            "공개 source link 형식은 보존한다. 색인 생애주기, build script, viewer 설치·동기화는 "
-            "소유하지 않는다."
-        ),
-        "ai-reference/vault-index-architecture.md": (
-            "WIKI, 분야, 주제, 문서의 색인 계층과 문서 역할·도달성·중복 금지를 소유한다. "
-            "viewer 설치와 공개 build 명령은 소유하지 않는다."
-        ),
-        "ai-reference/local-viewer-guide.md": (
-            "Obsidian 로컬 보기, private 지식과 공개 Blog의 소유 경계·승격 흐름을 소유한다. "
-            "문체와 주제별 학습 내용은 소유하지 않는다."
-        ),
-        "ai-reference/os-vault-navigation-guide.md": (
-            "OS 학습 문서의 대표 탐색 입구와 활성 map 연결만 소유한다. 전체 vault 공개·build "
-            "정책과 문체는 소유하지 않는다."
-        ),
-    }
-    return scopes.get(locator, "문서 title과 첫 H1이 나타내는 하나의 질문·책임만 소유한다.")
+    return "문서 title과 첫 H1이 나타내는 하나의 질문·책임만 소유한다."
 
 
 def apply_markdown_additions(target: str, additions: list[object]) -> tuple[str, list[str]]:

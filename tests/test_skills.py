@@ -251,7 +251,10 @@ def test_codex_selector_uses_isolated_strict_json(
         ]
         output_path = Path(command[command.index("--output-last-message") + 1])
         output_path.write_text('{"cases":[{"id":"case","skills":["demo"]}]}', encoding="utf-8")
-        assert "Available skills:\n- demo: Test skill." in str(options["input"])
+        prompt = str(options["input"])
+        assert "Available skills:\n- demo: Test skill." in prompt
+        assert "correct response is a refusal or clarification" in prompt
+        assert "public, published, blog, or draft may be context" in prompt
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr("woon_core.skills.codex_router.subprocess.run", fake_run)
@@ -276,6 +279,7 @@ def test_claude_selector_disables_customization_and_tools(
             "demo"
         ]
         assert "Available skills:\n- demo: Test skill." in str(options["input"])
+        assert options["timeout"] == 300
         output = json.dumps(
             {
                 "type": "result",

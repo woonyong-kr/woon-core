@@ -3,14 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import date
 from functools import lru_cache
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Settings as FastMCPSettings
 from mcp.types import ToolAnnotations
 
+from woon_core.knowledge.codex_daily_digest import (
+    entries_from_records as daily_digest_entries_from_records,
+)
+from woon_core.knowledge.codex_daily_digest import (
+    record_codex_daily_digest,
+    record_daily_digest_from_codex_ledger,
+)
+from woon_core.knowledge.codex_knowledge import (
+    entries_from_records as codex_knowledge_entries_from_records,
+)
+from woon_core.knowledge.codex_knowledge import record_codex_knowledge_entries
 from woon_core.knowledge.domain import DocumentMetadata
 from woon_core.knowledge.factory import build_knowledge_service
+from woon_core.knowledge.mail_schedule_automation import (
+    record_mail_schedule_candidates,
+    submissions_from_records,
+)
 from woon_core.knowledge.service import KnowledgeService
 
 # mcp 1.29.0 leaves the generic lifespan annotation unresolved until explicitly rebuilt.
@@ -114,6 +130,8 @@ def archive_conversation(
     related: list[str] | None = None,
     source_session_ids: list[str] | None = None,
     expected_revision: str | None = None,
+    archive_origin: str = "manual-reviewed",
+    approved_review_id: str | None = None,
 ) -> dict[str, object]:
     """Create or optimistically replace one deduplicated canonical document.
 
@@ -141,6 +159,8 @@ def archive_conversation(
         ),
         body,
         expected_revision,
+        archive_origin=archive_origin,
+        approved_review_id=approved_review_id,
     )
     return {
         "created": result.created,
@@ -198,6 +218,136 @@ def audit_compiled_knowledge() -> dict[str, object]:
 
     audit = _service().compilation_audit()
     return {"status": "ok" if audit.complete else "invalid", **asdict(audit)}
+
+
+@mcp.tool(
+    name="woon_automation_record_mail_schedule_candidates",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def record_mail_schedule_candidates_run(
+    run_token: str,
+    candidates: list[dict[str, object]],
+) -> dict[str, object]:
+    """Record a mail polling window with zero or more minimized candidates.
+
+    Call this exactly once after reading only allowlisted mail. Pass ``[]`` when
+    no new actionable item exists. The tool writes a hash-only receipt and
+    never reads or writes Apple Calendar; Calendar application remains a
+    separate policy-authorized local action.
+    """
+
+    result = record_mail_schedule_candidates(
+        build_knowledge_service()[0].vault,
+        run_token=run_token,
+        submissions=submissions_from_records(candidates),
+    )
+    return asdict(result)
+
+
+@mcp.tool(
+    name="woon_automation_record_codex_daily_digest",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def record_codex_daily_digest_run(
+    day: str,
+    entries: list[dict[str, object]],
+) -> dict[str, object]:
+    """Record one Korean daily digest from opted-in Codex conclusions only.
+
+    ``entries`` may contain only a short ``kind``, ``title``, ``summary``, and
+    optional links to existing local Wiki or map documents.  Do not pass a raw
+    chat transcript, system/developer text, tool output, tokens, or locators.
+    """
+
+    try:
+        target_day = date.fromisoformat(day)
+    except ValueError as error:
+        raise ValueError("day must use YYYY-MM-DD") from error
+    result = record_codex_daily_digest(
+        build_knowledge_service()[0].vault,
+        day=target_day,
+        entries=daily_digest_entries_from_records(entries),
+    )
+    return asdict(result)
+
+
+@mcp.tool(
+    name="woon_automation_record_codex_knowledge_entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def record_codex_knowledge_entries_run(
+    source_range: str,
+    day: str,
+    entries: list[dict[str, object]],
+    input_state: str = "processed",
+) -> dict[str, object]:
+    """Record one day of short Codex conclusions, never a transcript.
+
+    Each entry has one Korean category such as ``활동``, ``일정``, ``인물``,
+    ``학습``, ``개념``, ``커리어``, ``창작`` or ``자료`` plus a short title and
+    summary.  Every entry enters the local daily ledger; reusable ``학습``,
+    ``개념`` and ``결정`` also become a local-only Growth Wiki page.  Pass
+    ``input_state=unavailable`` with ``entries=[]`` when the persisted session
+    for that day is absent, so a blank note explains its cause.  Do not pass
+    raw chat text, system/developer text, tool output, reasoning, credentials,
+    opaque locators, private originals, or Novel text.
+    """
+
+    try:
+        target_day = date.fromisoformat(day)
+    except ValueError as error:
+        raise ValueError("day must use YYYY-MM-DD") from error
+
+    result = record_codex_knowledge_entries(
+        build_knowledge_service()[0].vault,
+        source_range=source_range,
+        day=target_day,
+        entries=codex_knowledge_entries_from_records(entries),
+        input_state=input_state,  # type: ignore[arg-type]
+    )
+    return asdict(result)
+
+
+@mcp.tool(
+    name="woon_automation_materialize_codex_daily_digest",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def materialize_codex_daily_digest_run(
+    day: str,
+    replace_empty_digest: bool = False,
+) -> dict[str, object]:
+    """Create one daily digest from the minimized local Codex ledger only."""
+
+    try:
+        target_day = date.fromisoformat(day)
+    except ValueError as error:
+        raise ValueError("day must use YYYY-MM-DD") from error
+    result = record_daily_digest_from_codex_ledger(
+        build_knowledge_service()[0].vault,
+        day=target_day,
+        replace_empty_digest=replace_empty_digest,
+    )
+    return asdict(result)
 
 
 @mcp.tool(
