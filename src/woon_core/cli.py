@@ -136,9 +136,11 @@ Usage:
   woon knowledge audit [--vault <path>]
   woon knowledge vault-tool <name> [tool-options...] [--vault <path>]
   woon knowledge obsidian-plugin <status|install|remove-detected-mindmaps|
+    install-local-build|
     configure-prisma-calendar|configure-full-calendar-remastered|
     configure-notion-bases-calendar|configure-simple-calendar|retire>
-    [--plugin <approved-plugin-id>...] [--vault <path>]
+    [--plugin <approved-plugin-id>...] [--source-dir <path>] [--version <semver>]
+    [--vault <path>]
   woon knowledge history <canonical-id> [--limit <1..100>] [--vault <path>]
   woon knowledge migrate-compiled [--vault <path>]
   woon knowledge initialize-curation [--vault <path>]
@@ -907,55 +909,78 @@ def _run_obsidian_plugin(arguments: list[str], output: TextIO) -> None:
 
     if not arguments:
         raise WoonError(
-            "knowledge obsidian-plugin requires status, install, remove-detected-mindmaps, "
+            "knowledge obsidian-plugin requires status, install, install-local-build, "
+            "remove-detected-mindmaps, "
             "configure-prisma-calendar, configure-full-calendar-remastered, "
             "configure-notion-bases-calendar, configure-simple-calendar, or retire"
         )
     action, *raw_options = arguments
     plugin_ids: list[str] = []
     options: list[str] = []
+    local_options: dict[str, str] = {}
     index = 0
     while index < len(raw_options):
         option = raw_options[index]
-        if option != "--plugin":
+        if option not in {"--plugin", "--source-dir", "--version"}:
             options.append(option)
             index += 1
             continue
         if index + 1 >= len(raw_options):
-            raise WoonError("--plugin requires one plugin ID")
-        plugin_ids.append(raw_options[index + 1])
+            raise WoonError(f"{option} requires one value")
+        value = raw_options[index + 1]
+        if option == "--plugin":
+            plugin_ids.append(value)
+        elif option in local_options:
+            raise WoonError(f"{option} may only be provided once")
+        else:
+            local_options[option] = value
         index += 2
     vault, remaining = _parse_knowledge_options(options)
     if remaining:
         raise WoonError("unexpected obsidian-plugin argument: " + " ".join(remaining))
     service = ObsidianPluginService(vault or resolve_knowledge_vault())
     if action == "status":
-        if plugin_ids:
-            raise WoonError("obsidian-plugin status does not accept --plugin")
+        if plugin_ids or local_options:
+            raise WoonError("obsidian-plugin status does not accept install options")
         result = service.status()
     elif action == "install":
+        if local_options:
+            raise WoonError("obsidian-plugin install does not accept local build options")
         result = service.install(plugin_ids)
+    elif action == "install-local-build":
+        if len(plugin_ids) != 1:
+            raise WoonError("install-local-build requires exactly one --plugin")
+        missing = sorted({"--source-dir", "--version"}.difference(local_options))
+        if missing:
+            raise WoonError("install-local-build requires " + ", ".join(missing))
+        result = service.install_local_build(
+            plugin_ids[0],
+            Path(local_options["--source-dir"]),
+            local_options["--version"],
+        )
     elif action == "remove-detected-mindmaps":
-        if plugin_ids:
+        if plugin_ids or local_options:
             raise WoonError("remove-detected-mindmaps discovers targets from installed manifests")
         result = service.remove_detected_mindmaps()
     elif action == "configure-prisma-calendar":
-        if plugin_ids:
+        if plugin_ids or local_options:
             raise WoonError("configure-prisma-calendar does not accept --plugin")
         result = service.configure_prisma_calendar()
     elif action == "configure-full-calendar-remastered":
-        if plugin_ids:
+        if plugin_ids or local_options:
             raise WoonError("configure-full-calendar-remastered does not accept --plugin")
         result = service.configure_full_calendar_remastered()
     elif action == "configure-notion-bases-calendar":
-        if plugin_ids:
+        if plugin_ids or local_options:
             raise WoonError("configure-notion-bases-calendar does not accept --plugin")
         result = service.configure_notion_bases_calendar()
     elif action == "configure-simple-calendar":
-        if plugin_ids:
+        if plugin_ids or local_options:
             raise WoonError("configure-simple-calendar does not accept --plugin")
         result = service.configure_simple_calendar()
     elif action == "retire":
+        if local_options:
+            raise WoonError("obsidian-plugin retire does not accept local build options")
         result = service.retire(plugin_ids)
     else:
         raise WoonError(f"unknown obsidian-plugin action {action!r}")

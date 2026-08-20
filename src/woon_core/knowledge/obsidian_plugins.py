@@ -38,6 +38,8 @@ FULL_CALENDAR_SOURCE_COLOR = "#687B86"
 NOTION_BASES_ID = "notion-bases"
 SIMPLE_CALENDAR_ID = "woon-simple-calendar"
 SIMPLE_CALENDAR_SOURCE = "inbox/calendar/events"
+CONTEXT_GRAPH_ID = "context-graph"
+LOCAL_DEVELOPMENT_PLUGINS = frozenset({CONTEXT_GRAPH_ID})
 
 
 @dataclass(frozen=True)
@@ -173,6 +175,122 @@ class ObsidianPluginService:
             receipt_root / f"{receipt_id}.json",
             (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
         )
+        return receipt
+
+    def install_local_build(
+        self,
+        plugin_id: str,
+        source_directory: Path,
+        expected_version: str,
+    ) -> dict[str, Any]:
+        """Install one explicitly approved local development build with rollback evidence.
+
+        This path is intentionally narrower than the official release installer: only
+        allowlisted user-owned development plugins are accepted, the caller must pin
+        the manifest version, and every runtime asset is hashed into a local receipt.
+        Existing non-runtime files such as plugin settings are preserved verbatim.
+        """
+
+        self._require_vault()
+        if plugin_id not in LOCAL_DEVELOPMENT_PLUGINS:
+            raise WoonError(f"unapproved local Obsidian plugin ID: {plugin_id}")
+        if not expected_version.strip():
+            raise WoonError("local Obsidian plugin version is required")
+
+        source = source_directory.expanduser().resolve()
+        if not source.is_dir():
+            raise WoonError(f"local Obsidian plugin source directory is missing: {source}")
+        assets: dict[str, bytes] = {}
+        asset_hashes: dict[str, str] = {}
+        for asset_name in REQUIRED_ASSETS:
+            asset_path = source / asset_name
+            if not asset_path.is_file() or asset_path.is_symlink():
+                raise WoonError(f"local Obsidian plugin asset is invalid: {asset_name}")
+            content = asset_path.read_bytes()
+            assets[asset_name] = content
+            asset_hashes[asset_name] = _sha256(content)
+
+        try:
+            manifest = json.loads(assets["manifest.json"].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise WoonError("local Obsidian plugin manifest is unreadable") from error
+        if not isinstance(manifest, dict) or manifest.get("id") != plugin_id:
+            raise WoonError(f"local manifest ID does not match requested plugin: {plugin_id}")
+        if manifest.get("version") != expected_version:
+            raise WoonError(
+                f"local manifest version does not match expected version: {expected_version}"
+            )
+
+        receipt_id = self._receipt_id()
+        receipt_root = self._local / "receipts"
+        backup_root = self._local / "backups" / receipt_id
+        destination = self._plugins / plugin_id
+        backup = backup_root / plugin_id
+        stage = self._plugins / f".{plugin_id}.staging-{uuid.uuid4().hex}"
+        enabled_before = self._enabled_path.read_bytes() if self._enabled_path.is_file() else None
+        self._plugins.mkdir(parents=True, exist_ok=True)
+        stage.mkdir()
+        preserved: list[str] = []
+        replaced_existing = False
+        try:
+            for asset_name, content in assets.items():
+                _atomic_write(stage / asset_name, content)
+            if destination.exists():
+                for item in destination.iterdir():
+                    if item.name in REQUIRED_ASSETS:
+                        continue
+                    if not item.is_file() or item.is_symlink():
+                        raise WoonError(
+                            f"local Obsidian plugin has unsupported settings entry: {item.name}"
+                        )
+                    _atomic_write(stage / item.name, item.read_bytes())
+                    preserved.append(item.name)
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(destination, backup)
+                replaced_existing = True
+            os.replace(stage, destination)
+            enabled = self._enabled_ids()
+            enabled.add(plugin_id)
+            self._write_enabled_ids(enabled, backup_root)
+            installed = next(
+                (item for item in self.status()["plugins"] if item["id"] == plugin_id),
+                None,
+            )
+            if (
+                installed is None
+                or installed["version"] != expected_version
+                or not installed["enabled_in_config"]
+            ):
+                raise WoonError("local Obsidian plugin install could not be verified")
+
+            receipt = {
+                "receipt_id": receipt_id,
+                "action": "install-local-build",
+                "created_at": datetime.now(UTC).isoformat(),
+                "plugin": {
+                    "id": plugin_id,
+                    "version": expected_version,
+                    "assets_sha256": asset_hashes,
+                    "preserved_settings": sorted(preserved),
+                },
+                "backup": backup.relative_to(self._vault).as_posix() if replaced_existing else None,
+                "runtime_loaded": "unknown-until-Obsidian-reloads",
+            }
+            _atomic_write(
+                receipt_root / f"{receipt_id}.json",
+                (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+            )
+        except Exception:
+            shutil.rmtree(stage, ignore_errors=True)
+            if destination.exists():
+                shutil.rmtree(destination)
+            if replaced_existing and backup.exists():
+                os.replace(backup, destination)
+            if enabled_before is None:
+                self._enabled_path.unlink(missing_ok=True)
+            else:
+                _atomic_write(self._enabled_path, enabled_before)
+            raise
         return receipt
 
     def remove_detected_mindmaps(self) -> dict[str, Any]:

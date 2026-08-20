@@ -15,6 +15,7 @@ from woon_core.calendar.projection import (
 from woon_core.errors import WoonError
 from woon_core.knowledge import obsidian_plugins
 from woon_core.knowledge.obsidian_plugins import (
+    CONTEXT_GRAPH_ID,
     FULL_CALENDAR_REMASTERED_ID,
     FULL_CALENDAR_SOURCE_COLOR,
     NOTION_BASES_ID,
@@ -282,6 +283,135 @@ def test_install_restores_existing_plugin_if_stage_replace_fails(
 
     restored = json.loads((existing / "manifest.json").read_text(encoding="utf-8"))
     assert restored["name"] == "Old Light Mindmap"
+
+
+def _local_context_graph_build(root: Path, version: str = "0.4.1") -> Path:
+    source = root / "context-graph-build"
+    source.mkdir()
+    (source / "main.js").write_text("module.exports = { version: 'new' };\n", encoding="utf-8")
+    (source / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": CONTEXT_GRAPH_ID,
+                "name": "Context Graph",
+                "version": version,
+                "minAppVersion": "1.8.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (source / "styles.css").write_text(".context-graph { display: block; }\n", encoding="utf-8")
+    return source
+
+
+def test_install_local_build_preserves_settings_backup_hashes_and_enabled_config(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination.mkdir()
+    (destination / "main.js").write_text("old runtime\n", encoding="utf-8")
+    (destination / "manifest.json").write_text(
+        json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
+    )
+    (destination / "styles.css").write_text("old styles\n", encoding="utf-8")
+    settings = b'{"defaultGraphId":"interview"}\n'
+    (destination / "data.json").write_bytes(settings)
+    source = _local_context_graph_build(tmp_path)
+
+    receipt = ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+
+    assert receipt["action"] == "install-local-build"
+    assert receipt["plugin"]["id"] == CONTEXT_GRAPH_ID
+    assert receipt["plugin"]["version"] == "0.4.1"
+    assert receipt["plugin"]["preserved_settings"] == ["data.json"]
+    assert (
+        receipt["plugin"]["assets_sha256"]["main.js"]
+        == hashlib.sha256((source / "main.js").read_bytes()).hexdigest()
+    )
+    assert (destination / "main.js").read_bytes() == (source / "main.js").read_bytes()
+    assert (destination / "data.json").read_bytes() == settings
+    backup = vault / str(receipt["backup"])
+    assert (backup / "main.js").read_text(encoding="utf-8") == "old runtime\n"
+    assert CONTEXT_GRAPH_ID in json.loads(
+        (vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")
+    )
+    assert list((vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json"))
+
+
+def test_install_local_build_rejects_a_version_mismatch_before_mutating_the_vault(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    source = _local_context_graph_build(tmp_path, version="0.4.0")
+
+    with pytest.raises(WoonError, match="version does not match"):
+        ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+
+    assert not (vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID).exists()
+    assert json.loads((vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")) == [
+        "homepage"
+    ]
+
+
+def test_install_local_build_restores_runtime_settings_and_enabled_config_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination.mkdir()
+    (destination / "main.js").write_text("old runtime\n", encoding="utf-8")
+    (destination / "manifest.json").write_text(
+        json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
+    )
+    (destination / "styles.css").write_text("old styles\n", encoding="utf-8")
+    (destination / "data.json").write_text('{"kept":true}\n', encoding="utf-8")
+    enabled_before = (vault / ".obsidian/community-plugins.json").read_bytes()
+    source = _local_context_graph_build(tmp_path)
+    service = ObsidianPluginService(vault)
+
+    def fail_enabled_write(enabled: set[str], backup_root: Path) -> None:
+        raise OSError("simulated enabled config failure")
+
+    monkeypatch.setattr(service, "_write_enabled_ids", fail_enabled_write)
+
+    with pytest.raises(OSError, match="simulated enabled config failure"):
+        service.install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+
+    assert (destination / "main.js").read_text(encoding="utf-8") == "old runtime\n"
+    assert (destination / "data.json").read_text(encoding="utf-8") == '{"kept":true}\n'
+    assert (vault / ".obsidian/community-plugins.json").read_bytes() == enabled_before
+
+
+def test_install_local_build_rolls_back_if_receipt_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination.mkdir()
+    (destination / "main.js").write_text("old runtime\n", encoding="utf-8")
+    (destination / "manifest.json").write_text(
+        json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
+    )
+    (destination / "styles.css").write_text("old styles\n", encoding="utf-8")
+    (destination / "data.json").write_text('{"kept":true}\n', encoding="utf-8")
+    enabled_before = (vault / ".obsidian/community-plugins.json").read_bytes()
+    source = _local_context_graph_build(tmp_path)
+    atomic_write = obsidian_plugins._atomic_write
+
+    def fail_receipt_write(path: Path, content: bytes) -> None:
+        if "receipts" in path.parts:
+            raise OSError("simulated receipt failure")
+        atomic_write(path, content)
+
+    monkeypatch.setattr(obsidian_plugins, "_atomic_write", fail_receipt_write)
+
+    with pytest.raises(OSError, match="simulated receipt failure"):
+        ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+
+    assert (destination / "main.js").read_text(encoding="utf-8") == "old runtime\n"
+    assert (destination / "data.json").read_text(encoding="utf-8") == '{"kept":true}\n'
+    assert (vault / ".obsidian/community-plugins.json").read_bytes() == enabled_before
 
 
 def test_configure_prisma_calendar_writes_a_read_only_projection_mapping(tmp_path: Path) -> None:

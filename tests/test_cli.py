@@ -235,6 +235,55 @@ def test_knowledge_configure_simple_calendar_uses_the_receipt_adapter(
     assert '"action": "configure-simple-calendar"' in output.getvalue()
 
 
+def test_knowledge_install_local_build_uses_the_receipt_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    source = tmp_path / "build"
+
+    class PluginService:
+        def __init__(self, vault: Path) -> None:
+            captured["vault"] = vault
+
+        def install_local_build(
+            self, plugin_id: str, source_directory: Path, expected_version: str
+        ) -> dict[str, str]:
+            captured.update(
+                plugin_id=plugin_id,
+                source_directory=source_directory,
+                expected_version=expected_version,
+            )
+            return {"action": "install-local-build"}
+
+    monkeypatch.setattr(cli, "ObsidianPluginService", PluginService)
+    output = StringIO()
+
+    run(
+        [
+            "knowledge",
+            "obsidian-plugin",
+            "install-local-build",
+            "--plugin",
+            "context-graph",
+            "--source-dir",
+            str(source),
+            "--version",
+            "0.4.1",
+            "--vault",
+            str(tmp_path),
+        ],
+        output,
+    )
+
+    assert captured == {
+        "vault": tmp_path,
+        "plugin_id": "context-graph",
+        "source_directory": source,
+        "expected_version": "0.4.1",
+    }
+    assert '"action": "install-local-build"' in output.getvalue()
+
+
 def test_calendar_upsert_uses_one_user_authorized_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
