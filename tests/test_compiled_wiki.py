@@ -83,9 +83,9 @@ def write_page(vault: Path, relative: str, title: str, body: str) -> None:
 def approve_archive(vault: Path, review_id: str, body: str) -> str:
     """Add a human approval fixture bound to the exact normalized body."""
 
-    normalized = "\n".join(
-        line.rstrip() for line in body.replace("\r\n", "\n").split("\n")
-    ).strip() + "\n"
+    normalized = (
+        "\n".join(line.rstrip() for line in body.replace("\r\n", "\n").split("\n")).strip() + "\n"
+    )
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     path = vault / "catalog/llm-wiki/review-queue.yaml"
     existing = (
@@ -103,9 +103,7 @@ def approve_archive(vault: Path, review_id: str, body: str) -> str:
         }
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(existing, allow_unicode=True, sort_keys=False), encoding="utf-8"
-    )
+    path.write_text(yaml.safe_dump(existing, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return review_id
 
 
@@ -259,9 +257,9 @@ def test_curated_revision_preserves_legacy_source_and_archives_prior_curated_bod
     curated = next(item for item in sources if item["kind"] == "curated-wiki")
     assert legacy["lifecycle"] == "compiled"
     assert curated["body"].startswith("## 시작")
-    page = yaml.safe_load(
-        (tmp_path / "catalog/llm-wiki/pages.yaml").read_text(encoding="utf-8")
-    )["pages"][0]
+    page = yaml.safe_load((tmp_path / "catalog/llm-wiki/pages.yaml").read_text(encoding="utf-8"))[
+        "pages"
+    ][0]
     assert legacy["source_id"] in page["source_ids"]
     assert page["render"] == {"kind": "source-body", "source_id": curated["source_id"]}
     curation = yaml.safe_load(
@@ -295,8 +293,7 @@ def test_curated_revision_preserves_legacy_source_and_archives_prior_curated_bod
         (tmp_path / "catalog/llm-wiki/claims.yaml").read_text(encoding="utf-8")
     )["claims"]
     assert any(
-        item["status"] == "superseded" and item["kind"] == "curated-document"
-        for item in claims
+        item["status"] == "superseded" and item["kind"] == "curated-document" for item in claims
     )
     assert compiler.audit().complete
 
@@ -675,9 +672,7 @@ def test_git_restore_rejects_hash_that_does_not_match_body(tmp_path: Path) -> No
 def test_compiled_wiki_restores_confirmed_git_revision(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q", tmp_path], check=True)
     subprocess.run(["git", "-C", tmp_path, "config", "user.name", "Test"], check=True)
-    subprocess.run(
-        ["git", "-C", tmp_path, "config", "user.email", "test@example.com"], check=True
-    )
+    subprocess.run(["git", "-C", tmp_path, "config", "user.email", "test@example.com"], check=True)
     write_page(tmp_path, "os/seed.md", "초기 정본", "컴파일러 입력을 초기화한다.")
     compiler = CompiledWiki(compiled_settings(tmp_path))
     compiler.migrate()

@@ -34,8 +34,10 @@ def run_people(arguments: list[str], output: TextIO) -> None:
         output.write(
             "status: ok\n"
             f"changed: {str(history_result.changed).lower()}\n"
-            f"people: {history_result.people}\nlinks: {history_result.links}\n"
+            f"works: {history_result.works}\npeople: {history_result.people}\n"
+            f"links: {history_result.links}\n"
             f"candidates: {history_result.candidates}\n"
+            f"novel_work_catalog: {history_result.novel_work_catalog_path}\n"
             f"vault_dashboard_directory: {history_result.vault_dashboard_directory}\n"
         )
         return
@@ -114,9 +116,7 @@ def run_people(arguments: list[str], output: TextIO) -> None:
         identifier_result = service.set_identity_identifiers(
             person_id=values["--person"],
             identifiers=tuple(
-                PersonIdentityIdentifierInput(
-                    value=item.strip(), context_terms=context_terms
-                )
+                PersonIdentityIdentifierInput(value=item.strip(), context_terms=context_terms)
                 for item in values["--identifiers"].split(",")
                 if item.strip()
             ),

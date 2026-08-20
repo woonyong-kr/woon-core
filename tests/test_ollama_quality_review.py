@@ -131,15 +131,11 @@ def _criterion_evidence() -> dict[str, dict[str, str]]:
         },
         "natural_korean": {
             "anchor": "문장은 연결 표현으로 앞뒤 관계를 드러낸다.",
-            "reason": (
-                "“문장은 연결 표현으로 앞뒤 관계를 드러낸다.”는 자연스러운 문체를 보인다."
-            ),
+            "reason": ("“문장은 연결 표현으로 앞뒤 관계를 드러낸다.”는 자연스러운 문체를 보인다."),
         },
         "evidence_boundary": {
             "anchor": "사실과 해석의 근거를 구분한다.",
-            "reason": (
-                "“사실과 해석의 근거를 구분한다.”는 확인 가능한 근거 경계를 보인다."
-            ),
+            "reason": ("“사실과 해석의 근거를 구분한다.”는 확인 가능한 근거 경계를 보인다."),
         },
         "revisitability": {
             "anchor": "찾기",
@@ -251,8 +247,7 @@ def test_compiles_local_model_anchor_selection_into_final_evidence(
     assert evidence["reader_goal"] == {
         "anchor": "질문",
         "reason": (
-            "인용한 부분 “질문”에서 독자가 무엇을 이해할지 보여 주므로 "
-            "독자 목표 기준을 통과한다."
+            "인용한 부분 “질문”에서 독자가 무엇을 이해할지 보여 주므로 독자 목표 기준을 통과한다."
         ),
     }
     assert "evidence_anchors" not in saved["reviews"][0]
@@ -260,10 +255,10 @@ def test_compiles_local_model_anchor_selection_into_final_evidence(
 
 def test_joins_streamed_ollama_fragments_only_after_terminal_record() -> None:
     response = ollama_quality_review._decode_ollama_stream(  # noqa: SLF001
-        '\n'.join(
+        "\n".join(
             [
-                '{"response":"{\\\"version\\\":1,","done":false}',
-                '{"response":"\\\"reviews\\\":[]}","done":true}',
+                '{"response":"{\\"version\\":1,","done":false}',
+                '{"response":"\\"reviews\\":[]}","done":true}',
             ]
         )
     )
@@ -367,8 +362,7 @@ def test_normalizes_local_model_reason_that_denies_its_quoted_anchor(
     saved = json.loads((results / "quality-001.result.json").read_text(encoding="utf-8"))
     reason = saved["reviews"][0]["criterion_evidence"]["reader_goal"]["reason"]
     assert reason == (
-        "인용한 부분 “질문”에서 독자가 무엇을 이해할지 보여 주므로 "
-        "독자 목표 기준을 통과한다."
+        "인용한 부분 “질문”에서 독자가 무엇을 이해할지 보여 주므로 독자 목표 기준을 통과한다."
     )
 
 
@@ -547,9 +541,10 @@ def test_accepts_only_provenance_bound_rebased_results(
 
     assert report["skipped_batches"] == ("quality-001",)
     run_manifest = json.loads((results / "run-manifest.json").read_text(encoding="utf-8"))
-    assert run_manifest["inherited_results_sha256"] == hashlib.sha256(
-        marker_path.read_bytes()
-    ).hexdigest()
+    assert (
+        run_manifest["inherited_results_sha256"]
+        == hashlib.sha256(marker_path.read_bytes()).hexdigest()
+    )
 
 
 def test_accepts_json_surrounded_by_model_explanation(

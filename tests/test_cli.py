@@ -31,8 +31,7 @@ def test_daily_digest_repair_gate_accepts_only_the_requested_missing_fragment() 
     payload = {
         "issues": {
             "daily_digest_projection_violations": [
-                "inbox/daily/2026-08-17.md: missing daily digest "
-                "inbox/daily-digests/2026-08-17.md"
+                "inbox/daily/2026-08-17.md: missing daily digest inbox/daily-digests/2026-08-17.md"
             ],
             "broken_links": [],
         }

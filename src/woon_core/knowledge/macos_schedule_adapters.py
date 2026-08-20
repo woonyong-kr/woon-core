@@ -110,6 +110,49 @@ class MacOSCalendarPort:
         if response.get("status") != "absent" or response.get("calendar_event_id") != event_id:
             raise WoonError("calendar bridge cancellation verification mismatch")
 
+    def update_category(self, event_id: str, category_id: str) -> None:
+        """Change only Woon's fixed category marker, preserving event content."""
+
+        response = self._runner(
+            {
+                "action": "set-category",
+                "calendarName": OWNED_CALENDAR_NAME,
+                "existingID": event_id,
+                "categoryID": category_id,
+                "title": None,
+                "startAt": None,
+                "endAt": None,
+                "location": None,
+                "notes": None,
+            }
+        )
+        if response.get("calendar_event_id") != event_id:
+            raise WoonError("calendar category update receipt mismatch")
+
+    def verify_category(self, event_id: str, category_id: str) -> None:
+        """Re-read the category marker before accepting a correction receipt."""
+
+        response = self._runner(
+            {
+                "action": "verify-category",
+                "calendarName": OWNED_CALENDAR_NAME,
+                "existingID": event_id,
+                "categoryID": category_id,
+                "title": None,
+                "startAt": None,
+                "endAt": None,
+                "location": None,
+                "notes": None,
+            }
+        )
+        if (
+            response.get("status") != "verified"
+            or response.get("calendar_event_id") != event_id
+            or response.get("calendar_name") != OWNED_CALENDAR_NAME
+            or response.get("category_id") != category_id
+        ):
+            raise WoonError("calendar category verification mismatch")
+
     def migrate_legacy_owned_calendar(
         self, *, expected_event_id: str, legacy_name: str, target_name: str
     ) -> str:

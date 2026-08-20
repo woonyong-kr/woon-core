@@ -215,8 +215,7 @@ def validate_criterion_evidence(
         reason = _text(raw_item.get("reason"), "quality review criterion evidence reason")
         if "__CRITERION_REASON__" in reason:
             raise WoonError(
-                "quality review criterion evidence kept its placeholder: "
-                f"{page_id}/{criterion}"
+                f"quality review criterion evidence kept its placeholder: {page_id}/{criterion}"
             )
         if len(reason) < 16:
             raise WoonError(
@@ -437,8 +436,10 @@ def _text(value: object, field: str) -> str:
 
 
 def _digest(value: object, field: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise WoonError(f"{field} must be a SHA-256 digest")
     return value

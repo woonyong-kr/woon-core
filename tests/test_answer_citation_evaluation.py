@@ -90,9 +90,7 @@ def _write_answers(path: Path, *, quote: str = "target evidence") -> None:
     )
 
 
-def test_evaluates_current_quotes_and_semantic_judgments(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_evaluates_current_quotes_and_semantic_judgments(tmp_path: Path, monkeypatch) -> None:
     cases = tmp_path / "cases.json"
     answers = tmp_path / "answers.json"
     _write_cases(cases)
@@ -113,9 +111,7 @@ def test_evaluates_current_quotes_and_semantic_judgments(
     assert result["semantic"]["status"] == "passed"
 
 
-def test_rejects_a_quote_that_is_not_in_the_current_excerpt(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_rejects_a_quote_that_is_not_in_the_current_excerpt(tmp_path: Path, monkeypatch) -> None:
     cases = tmp_path / "cases.json"
     answers = tmp_path / "answers.json"
     _write_cases(cases)
@@ -133,9 +129,7 @@ def test_rejects_a_quote_that_is_not_in_the_current_excerpt(
     )
 
 
-def test_keeps_semantics_unverified_without_a_judgment_payload(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_keeps_semantics_unverified_without_a_judgment_payload(tmp_path: Path, monkeypatch) -> None:
     cases = tmp_path / "cases.json"
     answers = tmp_path / "answers.json"
     _write_cases(cases)

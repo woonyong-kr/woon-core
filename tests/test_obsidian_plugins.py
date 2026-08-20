@@ -132,6 +132,7 @@ source: apple-calendar-readonly
 calendar: Woon 일정
 Date: 2026-08-18
 Category: 학습
+Category ID: learning
 All Day: true
 woon_projection: apple-calendar
 ---
@@ -156,6 +157,7 @@ cssclasses: woon-simple-calendar-dashboard
 source: inbox/calendar/events
 date_field: Date
 category_field: Category
+category_id_field: Category ID
 ```
 """,
         encoding="utf-8",
@@ -256,9 +258,7 @@ def test_install_restores_existing_plugin_if_stage_replace_fails(
         json.dumps({"id": "light-mindmap", "name": "Old Light Mindmap", "version": "0.1.0"}),
         encoding="utf-8",
     )
-    release, assets = _release(
-        "light-mindmap", "1.5.0", "https://github.com/ninglg/light-mindmap"
-    )
+    release, assets = _release("light-mindmap", "1.5.0", "https://github.com/ninglg/light-mindmap")
     downloads = {
         "https://api.github.com/repos/ninglg/light-mindmap/releases/latest": json.dumps(
             release
@@ -515,9 +515,7 @@ def test_retire_notion_bases_keeps_a_backup_after_simple_calendar_validates(tmp_
 
     assert receipt["retired"] == [NOTION_BASES_ID]
     assert not notion_bases.exists()
-    assert list(
-        (vault / ".local/woon-knowledge/obsidian-plugins/backups").rglob(NOTION_BASES_ID)
-    )
+    assert list((vault / ".local/woon-knowledge/obsidian-plugins/backups").rglob(NOTION_BASES_ID))
 
 
 def test_retire_full_calendar_requires_notion_bases_month_projection(tmp_path: Path) -> None:
@@ -596,7 +594,5 @@ def test_retire_moves_only_the_explicit_legacy_calendar_renderer(tmp_path: Path)
         (vault / ".obsidian/community-plugins.json").read_text()
     )
     assert list(
-        (vault / ".local/woon-knowledge/obsidian-plugins/backups").rglob(
-            PRISMA_CALENDAR_ID
-        )
+        (vault / ".local/woon-knowledge/obsidian-plugins/backups").rglob(PRISMA_CALENDAR_ID)
     )

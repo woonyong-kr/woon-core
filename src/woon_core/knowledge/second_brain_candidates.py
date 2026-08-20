@@ -69,7 +69,7 @@ class ReviewCandidate:
     """Safe, local-only review record; not an instruction or an external write."""
 
     candidate_id: str
-    kind: Literal["mail-schedule", "codex-history", "person-memory"]
+    kind: Literal["mail-schedule", "codex-history", "person-memory", "codex-projection"]
     source_locator: str
     summary: str
     occurred_at: datetime
@@ -79,6 +79,8 @@ class ReviewCandidate:
     person_name: str | None = None
     explicit_facts: tuple[str, ...] = ()
     next_action: str | None = None
+    display_title: str | None = None
+    review_kind: str | None = None
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -247,7 +249,7 @@ def _review_root(vault: Path, owned_root: str) -> Path:
 
 
 def _render_candidate(candidate: ReviewCandidate) -> str:
-    title = candidate.summary.strip()
+    title = (candidate.display_title or candidate.summary).strip()
     frontmatter = {
         "type": "Candidate",
         "title": title,
@@ -259,6 +261,8 @@ def _render_candidate(candidate: ReviewCandidate) -> str:
     }
     if candidate.kind == "person-memory":
         frontmatter["review_kind"] = "인물 정리"
+    elif candidate.review_kind is not None:
+        frontmatter["review_kind"] = candidate.review_kind
     # Codex projections deliberately have no persisted message timestamp.
     # Do not render the epoch placeholder as a misleading 1970 date.
     if candidate.occurred_at != datetime.fromtimestamp(0, tz=UTC):
@@ -303,7 +307,7 @@ def _render_candidate(candidate: ReviewCandidate) -> str:
                 "",
             ]
         )
-    else:
+    elif candidate.kind == "mail-schedule":
         lines.extend(
             [
                 "## 반영 경계",
@@ -315,13 +319,26 @@ def _render_candidate(candidate: ReviewCandidate) -> str:
                 "",
             ]
         )
+    else:
+        lines.extend(
+            [
+                "## 반영 경계",
+                "",
+                "- 이 카드는 사람의 검토를 위한 파생 후보이며 Things, Calendar, "
+                "인물 카드, 원본 자료를 직접 바꾸지 않는다.",
+                "- 원문 대화·system/tool/reasoning·비밀값은 이 파일에 복사하지 않는다.",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
 def _candidate_filename(candidate: ReviewCandidate) -> str:
     """Use a readable Obsidian filename; opaque IDs stay in runtime receipts."""
 
-    stem = _DISPLAY_FILE_STEM_RE.sub("-", candidate.summary.strip()).strip("-_")
+    stem = _DISPLAY_FILE_STEM_RE.sub(
+        "-", (candidate.display_title or candidate.summary).strip()
+    ).strip("-_")
     if not stem:
         stem = "검토-후보"
     return f"{stem[:80]}.md"

@@ -13,7 +13,7 @@ def _service(tmp_path: Path) -> TaskService:
     template = tmp_path / "templates/daily-note.md"
     template.parent.mkdir(parents=True)
     template.write_text(
-        "---\ntype: Daily\ntitle: \"{{date}}\"\n---\n\n# {{date}}\n\n## 오늘의 초점\n",
+        '---\ntype: Daily\ntitle: "{{date}}"\n---\n\n# {{date}}\n\n## 오늘의 초점\n',
         encoding="utf-8",
     )
     return TaskService(tmp_path)
@@ -87,3 +87,49 @@ def test_task_requires_purpose_and_never_materializes_before_start_date(tmp_path
     result = service.materialize_due(on_date=date(2026, 8, 17))
 
     assert result.tasks == ()
+
+
+def test_goal_condition_stops_a_daily_routine_after_user_confirmed_metric(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    service.upsert_goal(
+        goal_id="health-95kg",
+        title="95kg 건강 목표",
+        purpose="건강 목표에 도달할 때까지 아침 러닝을 유지한다.",
+        completion_condition="사용자 확인 체중이 95kg 이하가 되면 종료한다.",
+        current_value=96,
+        target_value=95,
+        target_operator="at-most",
+        unit="kg",
+        measurement_confirmed=True,
+    )
+    service.upsert_recurring_todo(
+        task_id="health-morning-run",
+        title="아침에 러닝하기",
+        purpose="95kg 건강 목표를 향해 매일 아침 러닝한다.",
+        area="health",
+        start_date=date(2026, 8, 17),
+        goal_id="health-95kg",
+    )
+
+    active = service.materialize_due(on_date=date(2026, 8, 20))
+    routine = service.list_routines()[0]
+    goal = service.list_goals()[0]
+    service.upsert_goal(
+        goal_id="health-95kg",
+        title=goal.title,
+        purpose=goal.purpose,
+        completion_condition=goal.completion_condition,
+        current_value=95,
+        target_value=95,
+        target_operator="at-most",
+        unit="kg",
+        measurement_confirmed=True,
+        expected_revision=goal.revision,
+    )
+    achieved = service.materialize_due(on_date=date(2026, 8, 21))
+
+    assert [task.task_id for task in active.tasks] == [routine.task_id]
+    assert achieved.tasks == ()
+    assert 'goal_id: "health-95kg"' in (tmp_path / routine.relative_path).read_text(
+        encoding="utf-8"
+    )

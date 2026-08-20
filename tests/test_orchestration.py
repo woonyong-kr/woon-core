@@ -237,8 +237,7 @@ def test_rejects_unsafe_global_guard_and_enabled_schedule_apply(tmp_path: Path) 
     write_policy(tmp_path)
     path = tmp_path / "config/second-brain-orchestrator.yaml"
     path.write_text(
-        path.read_text(encoding="utf-8")
-        .replace(
+        path.read_text(encoding="utf-8").replace(
             "action: ignore_without_persistence\n    persist_fields: []\n    mutate_mailbox: false",
             "action: persist\n    persist_fields: []\n    mutate_mailbox: false",
         ),
@@ -275,9 +274,7 @@ def test_rejects_registered_local_only_schedule_apply(tmp_path: Path) -> None:
     before, schedule_lane = path.read_text(encoding="utf-8").split(
         "  - id: policy-schedule-apply", 1
     )
-    schedule_lane = schedule_lane.replace(
-        "task_thread_id: null", 'task_thread_id: "thread-001"', 1
-    )
+    schedule_lane = schedule_lane.replace("task_thread_id: null", 'task_thread_id: "thread-001"', 1)
     path.write_text(before + "  - id: policy-schedule-apply" + schedule_lane, encoding="utf-8")
 
     with pytest.raises(WoonError, match="local-only schedule apply must not register"):

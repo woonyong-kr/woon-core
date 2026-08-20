@@ -103,9 +103,7 @@ def run_ollama_quality_reviews(
             "model": normalized_model,
             "context_tokens": context_tokens,
             "adaptive_context": adaptive_context,
-            "adaptive_context_policy": _adaptive_context_manifest()
-            if adaptive_context
-            else None,
+            "adaptive_context_policy": _adaptive_context_manifest() if adaptive_context else None,
             "response_tokens": DEFAULT_RESPONSE_TOKENS,
             "inherited_results_sha256": inherited_results_sha256,
             "timeout_seconds": timeout_seconds,
@@ -127,9 +125,7 @@ def run_ollama_quality_reviews(
             batch = _input_batch(plan, manifest_batch, plan_root)
             targets = _targets(batch.get("targets"), batch_id)
             if len(targets) != 1:
-                raise WoonError(
-                    "local Ollama quality review requires exactly one page per batch"
-                )
+                raise WoonError("local Ollama quality review requires exactly one page per batch")
             if result_path.exists():
                 _validate_result(
                     _load_json(result_path, "quality review result"), batch_id, targets
@@ -428,9 +424,7 @@ def _canonicalize_model_evidence_reasons(result: dict[str, object]) -> None:
             anchor = raw_item["anchor"].strip()
             if not anchor:
                 continue
-            raw_item["reason"] = _canonical_reason(
-                criterion, str(rubric[criterion]), anchor
-            )
+            raw_item["reason"] = _canonical_reason(criterion, str(rubric[criterion]), anchor)
 
 
 def _canonical_reason(criterion: str, score: str, anchor: str) -> str:
@@ -462,9 +456,7 @@ def _canonical_reason(criterion: str, score: str, anchor: str) -> str:
     return quoted + fail_reasons[criterion]
 
 
-def _response_schema(
-    batch_id: str, targets: dict[str, ReviewTarget]
-) -> dict[str, object]:
+def _response_schema(batch_id: str, targets: dict[str, ReviewTarget]) -> dict[str, object]:
     """Constrain the compact local response without asking for immutable IDs."""
 
     if len(targets) != 1:
@@ -581,9 +573,7 @@ def _input_batch(
         raise WoonError(f"quality review input does not match manifest: {batch_id}")
     for reference_name in ("standard", "prompt"):
         if reference_name in plan and batch.get(reference_name) != plan[reference_name]:
-            raise WoonError(
-                f"quality review input has a different {reference_name}: {batch_id}"
-            )
+            raise WoonError(f"quality review input has a different {reference_name}: {batch_id}")
     return batch
 
 
@@ -660,13 +650,17 @@ def _validate_result(
         if raw_review.get("verdict") not in VERDICTS:
             raise WoonError(f"Ollama quality review has invalid verdict: {page_id}")
         target = targets.get(page_id)
-        if target is None or _digest(
-            raw_review.get("output_sha256"), "quality review output_sha256"
-        ) != target["output_sha256"]:
+        if (
+            target is None
+            or _digest(raw_review.get("output_sha256"), "quality review output_sha256")
+            != target["output_sha256"]
+        ):
             raise WoonError(f"Ollama quality review is stale or unknown: {page_id}")
         rubric = raw_review.get("rubric")
-        if not isinstance(rubric, dict) or set(rubric) != RUBRIC or any(
-            score not in {"pass", "fail"} for score in rubric.values()
+        if (
+            not isinstance(rubric, dict)
+            or set(rubric) != RUBRIC
+            or any(score not in {"pass", "fail"} for score in rubric.values())
         ):
             raise WoonError(f"Ollama quality review has invalid rubric: {page_id}")
         hard_failures = raw_review.get("hard_failures")
@@ -733,12 +727,16 @@ def _validate_inherited_results(destination: Path) -> str | None:
     if not marker_path.is_file():
         return None
     marker = _load_json(marker_path, "quality review inherited results marker")
-    if set(marker) != {
-        "version",
-        "prior_plan_sha256",
-        "prior_run_manifest_sha256",
-        "result_files",
-    } or marker.get("version") != 1:
+    if (
+        set(marker)
+        != {
+            "version",
+            "prior_plan_sha256",
+            "prior_run_manifest_sha256",
+            "result_files",
+        }
+        or marker.get("version") != 1
+    ):
         raise WoonError("quality review inherited results marker has an invalid schema")
     _digest(marker.get("prior_plan_sha256"), "inherited quality review prior_plan_sha256")
     _digest(
@@ -759,9 +757,7 @@ def _validate_inherited_results(destination: Path) -> str | None:
         listed_paths.add(relative)
         actual_path = destination / relative
         actual_digest = (
-            hashlib.sha256(actual_path.read_bytes()).hexdigest()
-            if actual_path.is_file()
-            else None
+            hashlib.sha256(actual_path.read_bytes()).hexdigest() if actual_path.is_file() else None
         )
         if actual_digest != expected_digest:
             raise WoonError("quality review inherited result does not match its provenance marker")
@@ -803,8 +799,10 @@ def _text(value: object, field: str) -> str:
 
 
 def _digest(value: object, field: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise WoonError(f"{field} must be a SHA-256 digest")
     return value

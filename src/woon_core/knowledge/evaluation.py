@@ -68,9 +68,7 @@ def evaluate(vault: Path, cases_path: Path) -> dict[str, object]:
         forbidden = set(_strings(case.get("forbidden", []), f"{identifier}.forbidden"))
         expect_empty = bool(case.get("expect_empty", False))
         if expect_empty == bool(relevant):
-            raise WoonError(
-                f"evaluation case {identifier!r} must define relevant or expect_empty"
-            )
+            raise WoonError(f"evaluation case {identifier!r} must define relevant or expect_empty")
         runs: list[tuple[str, ...]] = []
         latencies: list[float] = []
         first_results = []
@@ -260,10 +258,9 @@ def _validate_case_paths(vault: Path, raw_cases: list[object]) -> None:
     for raw_case in raw_cases:
         case = _mapping(raw_case, "case")
         identifier = _string(case.get("id"), "case.id")
-        paths = (
-            _strings(case.get("relevant", case.get("expected_any", [])), f"{identifier}.relevant")
-            + _strings(case.get("forbidden", []), f"{identifier}.forbidden")
-        )
+        paths = _strings(
+            case.get("relevant", case.get("expected_any", [])), f"{identifier}.relevant"
+        ) + _strings(case.get("forbidden", []), f"{identifier}.forbidden")
         for relative_path in paths:
             candidate = (root / relative_path).resolve()
             try:
@@ -288,9 +285,7 @@ def _answer_and_citation_contract(config: dict[str, Any]) -> dict[str, str]:
     contract = _mapping(raw, "answer_and_citation")
     mode = _string(contract.get("mode"), "answer_and_citation.mode")
     if mode not in {"manual-review", "not-applicable"}:
-        raise WoonError(
-            "answer_and_citation.mode must be manual-review or not-applicable"
-        )
+        raise WoonError("answer_and_citation.mode must be manual-review or not-applicable")
     return {
         "status": "not-evaluated",
         "mode": mode,

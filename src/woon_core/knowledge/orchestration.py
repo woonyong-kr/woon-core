@@ -236,9 +236,32 @@ def verify_codex_automation_registry(
 
 
 def _has_person_protection(prompt: str) -> bool:
-    """Require each privacy prohibition while allowing safe punctuation normalization."""
+    """Require an identity boundary, allowing the explicit-facts candidate lane.
 
-    return all(term in prompt for term in _AUTOMATION_PERSON_PROMPT_GUARD_TERMS)
+    Most lanes must promise not to create person records at all.  The Codex
+    projection lane is intentionally narrower: it may create a local review
+    *candidate* from explicit facts, while still prohibiting identity matching,
+    relation inference, and general-map insertion.  Requiring the former text
+    verbatim would reject the safer, user-requested candidate workflow.
+    """
+
+    strict = all(term in prompt for term in _AUTOMATION_PERSON_PROMPT_GUARD_TERMS)
+    candidate = all(
+        term in prompt
+        for term in (
+            "local-only 인물 정리 후보",
+            "같은 이름의 카드와 연결",
+            "관계",
+            "신상",
+            "추정하지 않는다",
+            "Novel",
+            "private 원본",
+            "일반 인물 지도",
+            "검색",
+            "넣지 마라",
+        )
+    )
+    return strict or candidate
 
 
 def _automation(raw: object, index: int) -> AutomationContract:
@@ -449,9 +472,13 @@ def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, .
         raise WoonError("codex conversation ingest must own the growth and local ledger boundary")
     expected_outputs = {
         "growth-wiki",
-        "daily-knowledge-ledger",
-        "decision-candidate",
+        "daily-history-ledger",
+        "calendar-document-context",
+        "schedule-action-review-candidate",
         "person-memory-review-candidate",
+        "career-evidence-review-candidate",
+        "creative-link-review-candidate",
+        "source-intake-review-candidate",
     }
     if set(lane.outputs) != expected_outputs:
         raise WoonError(

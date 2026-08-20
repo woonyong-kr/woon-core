@@ -85,13 +85,13 @@ def test_audit_paths_ignores_local_and_generated_files(tmp_path: Path) -> None:
 def test_audit_paths_allows_regex_detector_but_rejects_runtime_value(tmp_path: Path) -> None:
     write(
         tmp_path / "detector.py",
-        'import re\nMACHINE_PATH = re.compile(r"/' + "Users/|/home/[^/]+\")\n",
+        'import re\nMACHINE_PATH = re.compile(r"/' + 'Users/|/home/[^/]+")\n',
     )
     audit_paths(tmp_path, [], [])
 
     write(
         tmp_path / "settings.py",
-        'data_directory = "/' + "Users/example/private\"\n",
+        'data_directory = "/' + 'Users/example/private"\n',
     )
     with pytest.raises(WoonError, match="absolute user paths"):
         audit_paths(tmp_path, [], [])

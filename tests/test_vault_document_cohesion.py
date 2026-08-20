@@ -9,8 +9,7 @@ import unittest
 from pathlib import Path
 
 SCRIPT = (
-    Path(__file__).parents[1]
-    / "src/woon_core/knowledge/vault_tools/assess-document-cohesion.py"
+    Path(__file__).parents[1] / "src/woon_core/knowledge/vault_tools/assess-document-cohesion.py"
 )
 SPEC = importlib.util.spec_from_file_location("assess_document_cohesion", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None

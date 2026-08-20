@@ -577,10 +577,7 @@ class ObsidianPluginService:
         dashboard = dashboard_path.read_text(encoding="utf-8")
         required_database = ("calendarDateField: Date\n", "calendarViewMode: month\n")
         required_dashboard = (
-            "```nb-database\n"
-            f"path: {APPLE_CALENDAR_EVENTS_RELATIVE_PATH}\n"
-            "type: calendar\n"
-            "```\n"
+            f"```nb-database\npath: {APPLE_CALENDAR_EVENTS_RELATIVE_PATH}\ntype: calendar\n```\n"
         )
         if any(field not in database for field in required_database):
             raise WoonError("Notion Bases database must use the date-only month view")
@@ -612,6 +609,7 @@ class ObsidianPluginService:
             f"source: {SIMPLE_CALENDAR_SOURCE}\n"
             "date_field: Date\n"
             "category_field: Category\n"
+            "category_id_field: Category ID\n"
             "```\n"
         )
         if required_dashboard not in dashboard:
@@ -622,6 +620,7 @@ class ObsidianPluginService:
                 "woon_projection: apple-calendar\n" not in content
                 or "Date: " not in content
                 or "Category: " not in content
+                or "Category ID: " not in content
             ):
                 raise WoonError("Simple Calendar rows must be Core-generated categorized notes")
             if path.stat().st_mode & 0o777 != 0o400:

@@ -118,15 +118,11 @@ def _criterion_evidence() -> dict[str, dict[str, str]]:
         },
         "natural_korean": {
             "anchor": "문장은 연결 표현으로 앞뒤 관계를 드러낸다.",
-            "reason": (
-                "“문장은 연결 표현으로 앞뒤 관계를 드러낸다.”는 자연스러운 문체를 보인다."
-            ),
+            "reason": ("“문장은 연결 표현으로 앞뒤 관계를 드러낸다.”는 자연스러운 문체를 보인다."),
         },
         "evidence_boundary": {
             "anchor": "사실과 해석의 근거를 구분한다.",
-            "reason": (
-                "“사실과 해석의 근거를 구분한다.”는 확인 가능한 근거 경계를 보인다."
-            ),
+            "reason": ("“사실과 해석의 근거를 구분한다.”는 확인 가능한 근거 경계를 보인다."),
         },
         "revisitability": {
             "anchor": "찾기",
@@ -256,8 +252,7 @@ def test_fails_when_needs_revision_verdict_has_no_failed_rubric(tmp_path: Path) 
 
     assert result["passed"] is False
     assert any(
-        "needs-revision quality review has no failed rubric" in error
-        for error in result["errors"]
+        "needs-revision quality review has no failed rubric" in error for error in result["errors"]
     )
 
 
@@ -296,12 +291,16 @@ def test_refuses_reason_that_denies_its_quoted_anchor(tmp_path: Path) -> None:
 def test_allows_a_negative_statement_inside_the_required_quote() -> None:
     anchor = "손실 함수의 해는 대부분 존재하지 않는다."
 
-    assert _reason_denies_anchor(
-        f"인용한 부분 “{anchor}”에서 근거의 한계를 드러낸다.", anchor
-    ) is False
-    assert _reason_denies_anchor(
-        f"인용한 부분 “{anchor}”은 현재 문서에 존재하지 않아 근거를 확인할 수 없다.", anchor
-    ) is True
+    assert (
+        _reason_denies_anchor(f"인용한 부분 “{anchor}”에서 근거의 한계를 드러낸다.", anchor)
+        is False
+    )
+    assert (
+        _reason_denies_anchor(
+            f"인용한 부분 “{anchor}”은 현재 문서에 존재하지 않아 근거를 확인할 수 없다.", anchor
+        )
+        is True
+    )
 
 
 def test_fails_when_blocked_verdict_has_no_hard_failure(tmp_path: Path) -> None:

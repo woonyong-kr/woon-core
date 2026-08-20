@@ -479,9 +479,7 @@ class CompiledWiki:
             break
         raise WoonError("compiled archive requires an approved review bound to the input hash")
 
-    def curate_revisions(
-        self, revisions: tuple[CuratedRevision, ...]
-    ) -> CuratedRevisionReport:
+    def curate_revisions(self, revisions: tuple[CuratedRevision, ...]) -> CuratedRevisionReport:
         """Promote reviewed prose without overwriting the legacy source it came from.
 
         A reader-facing revision is a new ``curated-wiki`` source.  The prior
@@ -501,9 +499,7 @@ class CompiledWiki:
         changed: list[str] = []
         try:
             for revision in sorted(revisions, key=lambda item: item.page_id):
-                page_id = _required_string(
-                    {"page_id": revision.page_id}, "page_id"
-                )
+                page_id = _required_string({"page_id": revision.page_id}, "page_id")
                 page = pages.get(page_id)
                 if page is None:
                     raise WoonError(f"compiled Wiki page spec not found: {page_id}")
@@ -611,8 +607,7 @@ class CompiledWiki:
     ) -> None:
         used_elsewhere = any(
             other_page_id != page_id
-            and prior_source_id
-            in _string_list(other_page.get("source_ids"), "page source_ids")
+            and prior_source_id in _string_list(other_page.get("source_ids"), "page source_ids")
             for other_page_id, other_page in pages.items()
         )
         if not used_elsewhere:
@@ -632,14 +627,12 @@ class CompiledWiki:
         retained: list[str] = []
         for prior_claim_id in claim_ids:
             claim = claims[prior_claim_id]
-            is_prior_curated_claim = (
-                claim.get("kind") == "curated-document"
-                and claim.get("source_ids") == [prior_source_id]
-            )
+            is_prior_curated_claim = claim.get("kind") == "curated-document" and claim.get(
+                "source_ids"
+            ) == [prior_source_id]
             used_elsewhere = any(
                 other_page_id != page_id
-                and prior_claim_id
-                in _string_list(other_page.get("claim_ids"), "page claim_ids")
+                and prior_claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
                 for other_page_id, other_page in pages.items()
             )
             if not is_prior_curated_claim or used_elsewhere:
@@ -747,9 +740,7 @@ class CompiledWiki:
         sources = _indexed(
             _load_yaml_list(self._settings.sources_path, "sources"), "source_id", "source"
         )
-        pages = _indexed(
-            _load_yaml_list(self._settings.pages_path, "pages"), "page_id", "page"
-        )
+        pages = _indexed(_load_yaml_list(self._settings.pages_path, "pages"), "page_id", "page")
         curations = []
         for page_id, page in sorted(pages.items()):
             title = _required_string(page, "title")
@@ -784,10 +775,7 @@ class CompiledWiki:
         refreshed = 0
         for page_id, page in sorted(pages.items()):
             curation = self._page_curation(page, curations)
-            if (
-                curation["basis"] != "legacy-page-metadata"
-                or curation["status"] != "provisional"
-            ):
+            if curation["basis"] != "legacy-page-metadata" or curation["status"] != "provisional":
                 continue
             title = _required_string(page, "title")
             frontmatter = page.get("frontmatter")
@@ -1447,14 +1435,10 @@ def _initial_curation(
     elif isinstance(existing, str) and existing.strip():
         current_use = existing.strip()
     elif frontmatter.get("index_role") == "folder-index" or title.endswith("지도"):
-        current_use = (
-            f"{title} 관련 문서를 찾고 학습 순서를 잡을 때, "
-            "탐색의 출발점으로 사용한다."
-        )
+        current_use = f"{title} 관련 문서를 찾고 학습 순서를 잡을 때, 탐색의 출발점으로 사용한다."
     else:
         current_use = (
-            f"{title} 내용을 다시 학습하거나 설명할 때, "
-            "관련 개념과 자료를 찾는 기준으로 사용한다."
+            f"{title} 내용을 다시 학습하거나 설명할 때, 관련 개념과 자료를 찾는 기준으로 사용한다."
         )
     if kinds == {"legacy-wiki"}:
         basis = "legacy-page-metadata"

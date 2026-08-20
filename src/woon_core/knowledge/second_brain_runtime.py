@@ -160,9 +160,7 @@ class AutomationRunStore:
         lock_path = self._settings.lock_directory / "checkpoint-retirement.lock"
         with exclusive_file_lock(lock_path):
             checkpoint = self._load_checkpoint()
-            retired = tuple(
-                sorted(key for key in checkpoint["lanes"] if key not in current_keys)
-            )
+            retired = tuple(sorted(key for key in checkpoint["lanes"] if key not in current_keys))
             if not retired:
                 return ()
             for key in retired:

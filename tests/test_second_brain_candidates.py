@@ -121,9 +121,7 @@ def test_codex_candidate_hides_unknown_epoch_from_human_review_file(tmp_path: Pa
 
     persist_review_candidates(tmp_path, "brain/review/codex", (candidate,))
 
-    content = (tmp_path / "brain/review/codex/작업-경계를-검토했다.md").read_text(
-        encoding="utf-8"
-    )
+    content = (tmp_path / "brain/review/codex/작업-경계를-검토했다.md").read_text(encoding="utf-8")
     assert "1970-" not in content
 
 
@@ -160,7 +158,7 @@ def test_person_memory_candidate_keeps_only_explicit_facts_pending_review(tmp_pa
     persist_review_candidates(tmp_path, "brain/review/codex", (candidate,))
 
     content = next((tmp_path / "brain/review/codex").glob("*.md")).read_text(encoding="utf-8")
-    assert "review_kind: \"인물 정리\"" in content
+    assert 'review_kind: "인물 정리"' in content
     assert "김희준" in content
     assert "금요일 면담 일정이 언급되었다." in content
     assert "면담 시간을 확인한다." in content

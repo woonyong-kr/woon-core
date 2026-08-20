@@ -13,6 +13,7 @@ struct Request: Decodable {
     let startAt: String?
     let endAt: String?
     let existingID: String?
+    let categoryID: String?
     let location: String?
     let notes: String?
 }
@@ -123,6 +124,40 @@ func verifySavedEvent(_ store: EKEventStore, _ calendar: EKCalendar, _ request: 
     }
 }
 
+func storedCategoryID(from notes: String?) -> String? {
+    guard let notes else { return nil }
+    let lines = notes.split(separator: "\n", omittingEmptySubsequences: false)
+    guard lines.first == "Woon이 생성한 시간 일정입니다." else { return nil }
+    let prefix = "Woon category: "
+    guard let categoryLine = lines.dropFirst().first(where: { $0.hasPrefix(prefix) }) else {
+        return nil
+    }
+    let value = String(categoryLine.dropFirst(prefix.count))
+    return isCategoryID(value) ? value : nil
+}
+
+func isCategoryID(_ value: String) -> Bool {
+    return value.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) != nil
+}
+
+func notesWithCategory(_ notes: String?, _ categoryID: String) -> String {
+    let marker = "Woon이 생성한 시간 일정입니다."
+    let categoryMarker = "Woon category: \(categoryID)"
+    guard let notes, !notes.isEmpty else {
+        return "\(marker)\n\(categoryMarker)"
+    }
+    var lines = notes.components(separatedBy: "\n")
+    if lines.first == marker {
+        if let index = lines.firstIndex(where: { $0.hasPrefix("Woon category: ") }) {
+            lines[index] = categoryMarker
+        } else {
+            lines.insert(categoryMarker, at: 1)
+        }
+        return lines.joined(separator: "\n")
+    }
+    return "\(marker)\n\(categoryMarker)\n\n\(notes)"
+}
+
 func run() throws {
     let data = FileHandle.standardInput.readDataToEndOfFile()
     let request = try JSONDecoder().decode(Request.self, from: data)
@@ -200,13 +235,60 @@ func run() throws {
             throw BridgeError.verificationMismatch
         }
         try writeJSON(["calendar_event_id": id, "status": "absent"])
+    case "set-category":
+        guard let id = request.existingID, !id.isEmpty else {
+            throw BridgeError.invalidRequest("missing event identifier")
+        }
+        guard let categoryID = request.categoryID, isCategoryID(categoryID) else {
+            throw BridgeError.invalidRequest("invalid calendar category")
+        }
+        let event = try ownedEvent(store, calendar, id)
+        event.notes = notesWithCategory(event.notes, categoryID)
+        try store.save(event, span: .thisEvent, commit: true)
+        try writeJSON(["calendar_event_id": id])
+    case "verify-category":
+        guard let id = request.existingID, !id.isEmpty else {
+            throw BridgeError.invalidRequest("missing event identifier")
+        }
+        guard let categoryID = request.categoryID, isCategoryID(categoryID) else {
+            throw BridgeError.invalidRequest("invalid calendar category")
+        }
+        let event = try ownedEvent(store, calendar, id)
+        guard storedCategoryID(from: event.notes) == categoryID else {
+            throw BridgeError.verificationMismatch
+        }
+        try writeJSON([
+            "calendar_event_id": id,
+            "calendar_name": calendar.title,
+            "category_id": categoryID,
+            "status": "verified"
+        ])
     default:
         throw BridgeError.invalidRequest("unsupported action")
     }
 }
 
+func runSelfTest() throws {
+    let original = "기존 메모"
+    let categorized = notesWithCategory(original, "learning")
+    guard storedCategoryID(from: categorized) == "learning", categorized.contains(original) else {
+        throw BridgeError.verificationMismatch
+    }
+    let updated = notesWithCategory(categorized, "relationship")
+    guard storedCategoryID(from: updated) == "relationship",
+          updated.components(separatedBy: "Woon category: ").count == 2,
+          !isCategoryID("invalid category") else {
+        throw BridgeError.verificationMismatch
+    }
+    try writeJSON(["status": "passed"])
+}
+
 do {
-    try run()
+    if CommandLine.arguments.contains("--self-test") {
+        try runSelfTest()
+    } else {
+        try run()
+    }
 } catch {
     FileHandle.standardError.write(Data("woon-calendar-bridge: \(error.localizedDescription)\n".utf8))
     exit(1)

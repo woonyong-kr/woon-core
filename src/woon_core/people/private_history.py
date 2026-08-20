@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,9 +16,12 @@ from woon_core.people.service import PersonCard, PersonDocument, PersonService
 
 NOVEL_PERSON_LEDGER_RELATIVE_PATH = "work/people/person-link-ledger.yaml"
 NOVEL_PERSON_DASHBOARD_RELATIVE_DIRECTORY = "work/people/dashboards"
+NOVEL_WORK_CATALOG_RELATIVE_PATH = "work/work-catalog.yaml"
+NOVEL_WORK_DASHBOARD_RELATIVE_DIRECTORY = "work/dashboards"
 VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY = "inbox/private-person-history"
 VAULT_PRIVATE_HISTORY_REVIEW_RELATIVE_PATH = "inbox/review/private-person-history-review.md"
 _NOVEL_DASHBOARD_MARKER = "woon_projection: novel-private-person-history\n"
+_NOVEL_WORK_DASHBOARD_MARKER = "woon_projection: novel-private-work\n"
 _VAULT_DASHBOARD_MARKER = "woon_projection: vault-private-person-history\n"
 _VAULT_REVIEW_MARKER = "woon_projection: private-person-history-review\n"
 _CARD_HISTORY_START = "<!-- woon-private-person-history:start -->"
@@ -25,12 +29,43 @@ _CARD_HISTORY_END = "<!-- woon-private-person-history:end -->"
 _READONLY_FILE_MODE = 0o400
 _WRITABLE_DIRECTORY_MODE = 0o700
 _READONLY_DIRECTORY_MODE = 0o500
+_WORK_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateWorkNavigation:
+    """One local navigation target owned by a private creative work."""
+
+    path: str
+    role: str
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateWork:
+    """One first-class local-only creative work."""
+
+    work_id: str
+    work_number: int
+    entity_type: str
+    category: str
+    title: str
+    status: str
+    canonical_entry: str
+    navigation: tuple[PrivateWorkNavigation, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateWorkCatalog:
+    """Validated local-only work entities used by private projections."""
+
+    works: tuple[PrivateWork, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class PrivateHistoryLink:
     """One explicit relationship between a person card and a private source file."""
 
+    work_id: str
     path: str
     role: str
     basis: str
@@ -41,6 +76,7 @@ class PrivateHistoryLink:
 class PrivateHistoryCandidate:
     """A named source candidate that must not be promoted without a user decision."""
 
+    work_id: str
     name: str
     path: str
     evidence: str
@@ -67,10 +103,12 @@ class PrivateHistorySyncResult:
     """Paths and counts produced by one deterministic private-history sync."""
 
     changed: bool
+    works: int
     people: int
     links: int
     candidates: int
     novel_ledger_path: str
+    novel_work_catalog_path: str
     vault_dashboard_directory: str
 
 
@@ -81,45 +119,67 @@ class PrivatePersonHistoryService:
         self._vault = vault.expanduser().resolve()
         self._novel_root = novel_root.expanduser().resolve()
         self._ledger_path = self._novel_root / NOVEL_PERSON_LEDGER_RELATIVE_PATH
+        self._work_catalog_path = self._novel_root / NOVEL_WORK_CATALOG_RELATIVE_PATH
+        self._novel_work_dashboard_directory = (
+            self._novel_root / NOVEL_WORK_DASHBOARD_RELATIVE_DIRECTORY
+        )
         self._novel_dashboard_directory = (
             self._novel_root / NOVEL_PERSON_DASHBOARD_RELATIVE_DIRECTORY
         )
-        self._vault_dashboard_directory = (
-            self._vault / VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY
-        )
+        self._vault_dashboard_directory = self._vault / VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY
         self._vault_review_path = self._vault / VAULT_PRIVATE_HISTORY_REVIEW_RELATIVE_PATH
         self._people = PersonService(self._vault)
-        self._state_lock = (
-            self._vault / ".local/woon-knowledge/private-person-history.lock"
-        )
+        self._state_lock = self._vault / ".local/woon-knowledge/private-person-history.lock"
 
     def sync(self) -> PrivateHistorySyncResult:
         """Regenerate Novel and Vault views from a user-confirmed private ledger."""
 
-        ledger = self._load_ledger()
+        catalog = self._load_work_catalog()
+        ledger = self._load_ledger(catalog)
         cards = {
             entry.person_id: self._people.private_history_card(entry.person_id)
             for entry in ledger.entries
         }
         with exclusive_file_lock(self._state_lock):
-            changed = self._refresh_novel_dashboards(ledger, cards)
-            changed = self._refresh_vault_dashboards(ledger, cards) or changed
+            changed = self._refresh_novel_work_dashboards(catalog, ledger, cards)
+            changed = self._refresh_novel_dashboards(catalog, ledger, cards) or changed
+            changed = self._refresh_vault_dashboards(catalog, ledger, cards) or changed
             changed = self._refresh_card_history_links(ledger, cards) or changed
             changed = self._refresh_vault_review(ledger) or changed
         return PrivateHistorySyncResult(
             changed=changed,
+            works=len(catalog.works),
             people=len(ledger.entries),
             links=sum(len(entry.links) for entry in ledger.entries),
             candidates=len(ledger.candidates),
             novel_ledger_path=NOVEL_PERSON_LEDGER_RELATIVE_PATH,
+            novel_work_catalog_path=NOVEL_WORK_CATALOG_RELATIVE_PATH,
             vault_dashboard_directory=VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY,
         )
 
-    def _load_ledger(self) -> PrivateHistoryLedger:
+    def _validate_local_root(self) -> None:
         if not self._novel_root.is_dir():
             raise WoonError("private history Novel root does not exist")
         if (self._novel_root / ".git").exists():
             raise WoonError("Novel private history root must not be a Git worktree")
+
+    def _load_work_catalog(self) -> PrivateWorkCatalog:
+        self._validate_local_root()
+        if not self._work_catalog_path.is_file():
+            raise WoonError("private Novel work catalog is missing")
+        try:
+            raw = yaml.safe_load(self._work_catalog_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as error:
+            raise WoonError("private Novel work catalog YAML is invalid") from error
+        if not isinstance(raw, dict) or raw.get("version") != 1:
+            raise WoonError("private Novel work catalog must declare version: 1")
+        if raw.get("access") != "local-only" or raw.get("publish") is not False:
+            raise WoonError("private Novel work catalog must stay local-only and unpublished")
+        works = _parse_works(raw.get("works"), self._novel_root)
+        return PrivateWorkCatalog(works=works)
+
+    def _load_ledger(self, catalog: PrivateWorkCatalog) -> PrivateHistoryLedger:
+        self._validate_local_root()
         if not self._ledger_path.is_file():
             raise WoonError(
                 "private person history ledger is missing; "
@@ -129,25 +189,51 @@ class PrivatePersonHistoryService:
             raw = yaml.safe_load(self._ledger_path.read_text(encoding="utf-8"))
         except yaml.YAMLError as error:
             raise WoonError("private person history ledger YAML is invalid") from error
-        if not isinstance(raw, dict) or raw.get("version") != 1:
-            raise WoonError("private person history ledger must declare version: 1")
+        if not isinstance(raw, dict) or raw.get("version") != 2:
+            raise WoonError("private person history ledger must declare version: 2")
         if raw.get("access") != "local-only" or raw.get("source_kind") != "novel":
             raise WoonError("private person history ledger must stay local-only Novel metadata")
-        entries = _parse_entries(raw.get("people"), self._novel_root)
-        candidates = _parse_candidates(raw.get("review_candidates"), self._novel_root)
+        if raw.get("work_catalog") != NOVEL_WORK_CATALOG_RELATIVE_PATH:
+            raise WoonError(
+                "private person history ledger must reference the canonical work catalog"
+            )
+        work_ids = {work.work_id for work in catalog.works}
+        entries = _parse_entries(raw.get("people"), self._novel_root, work_ids)
+        candidates = _parse_candidates(raw.get("review_candidates"), self._novel_root, work_ids)
         known_ids = {entry.person_id for entry in entries}
         if len(known_ids) != len(entries):
             raise WoonError("private person history ledger has duplicate person IDs")
         return PrivateHistoryLedger(entries=entries, candidates=candidates)
 
+    def _refresh_novel_work_dashboards(
+        self,
+        catalog: PrivateWorkCatalog,
+        ledger: PrivateHistoryLedger,
+        cards: dict[str, PersonCard],
+    ) -> bool:
+        return _refresh_directory(
+            self._novel_work_dashboard_directory,
+            {
+                f"{work.work_id}.md": _render_novel_work_dashboard(
+                    work, ledger, cards, self._novel_root
+                )
+                for work in catalog.works
+            }
+            | {"README.md": _render_novel_work_dashboard_index(catalog)},
+            _NOVEL_WORK_DASHBOARD_MARKER,
+        )
+
     def _refresh_novel_dashboards(
-        self, ledger: PrivateHistoryLedger, cards: dict[str, PersonCard]
+        self,
+        catalog: PrivateWorkCatalog,
+        ledger: PrivateHistoryLedger,
+        cards: dict[str, PersonCard],
     ) -> bool:
         return _refresh_directory(
             self._novel_dashboard_directory,
             {
                 f"{entry.person_id}.md": _render_novel_dashboard(
-                    entry, cards[entry.person_id], self._novel_root
+                    entry, cards[entry.person_id], catalog, self._novel_root
                 )
                 for entry in ledger.entries
             }
@@ -156,7 +242,10 @@ class PrivatePersonHistoryService:
         )
 
     def _refresh_vault_dashboards(
-        self, ledger: PrivateHistoryLedger, cards: dict[str, PersonCard]
+        self,
+        catalog: PrivateWorkCatalog,
+        ledger: PrivateHistoryLedger,
+        cards: dict[str, PersonCard],
     ) -> bool:
         return _refresh_directory(
             self._vault_dashboard_directory,
@@ -165,6 +254,7 @@ class PrivatePersonHistoryService:
                     entry,
                     cards[entry.person_id],
                     self._people.private_history_documents(entry.person_id),
+                    catalog,
                 )
                 for entry in ledger.entries
             }
@@ -181,9 +271,7 @@ class PrivatePersonHistoryService:
             path = self._vault / card.relative_path
             original = path.read_text(encoding="utf-8")
             if card.person_id not in entries:
-                updated = _remove_owned_block(
-                    original, _CARD_HISTORY_START, _CARD_HISTORY_END
-                )
+                updated = _remove_owned_block(original, _CARD_HISTORY_START, _CARD_HISTORY_END)
                 if updated != original:
                     atomic_write(path, updated.encode("utf-8"))
                     changed = True
@@ -209,8 +297,7 @@ class PrivatePersonHistoryService:
 
         if (
             self._vault_review_path.exists()
-            and _VAULT_REVIEW_MARKER
-            not in self._vault_review_path.read_text(encoding="utf-8")
+            and _VAULT_REVIEW_MARKER not in self._vault_review_path.read_text(encoding="utf-8")
         ):
             raise WoonError("private person history review path is not a Core-generated projection")
         if not ledger.candidates:
@@ -221,12 +308,72 @@ class PrivatePersonHistoryService:
         self._vault_review_path.parent.mkdir(
             mode=_WRITABLE_DIRECTORY_MODE, parents=True, exist_ok=True
         )
-        return _write_owned_file(
-            self._vault_review_path, _render_vault_review(ledger.candidates)
+        return _write_owned_file(self._vault_review_path, _render_vault_review(ledger.candidates))
+
+
+def _parse_works(value: object, novel_root: Path) -> tuple[PrivateWork, ...]:
+    if not isinstance(value, list) or not value:
+        raise WoonError("private Novel work catalog needs at least one work")
+    works: list[PrivateWork] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise WoonError("private Novel work entries must be mappings")
+        work_id = _required_string(item.get("work_id"), "work_id")
+        if not _WORK_ID_RE.fullmatch(work_id):
+            raise WoonError("private Novel work_id must be a kebab-case identifier")
+        work_number = item.get("work_number")
+        if not isinstance(work_number, int) or isinstance(work_number, bool) or work_number < 1:
+            raise WoonError("private Novel work_number must be a positive integer")
+        entity_type = _required_string(item.get("entity_type"), "work entity_type")
+        category = _required_string(item.get("category"), "work category")
+        if entity_type != "creative-work" or category != "novel":
+            raise WoonError("private Novel works must be creative-work entities in novel category")
+        status = _required_string(item.get("status"), "work status")
+        if status not in {"draft", "active", "complete", "archived"}:
+            raise WoonError("private Novel work status is invalid")
+        canonical_entry = _safe_novel_path(
+            _required_string(item.get("canonical_entry"), "work canonical_entry"), novel_root
         )
+        navigation_value = item.get("navigation")
+        if not isinstance(navigation_value, list):
+            raise WoonError("private Novel work navigation must be a list")
+        navigation: list[PrivateWorkNavigation] = []
+        for navigation_item in navigation_value:
+            if not isinstance(navigation_item, dict):
+                raise WoonError("private Novel work navigation entries must be mappings")
+            navigation.append(
+                PrivateWorkNavigation(
+                    path=_safe_novel_path(
+                        _required_string(navigation_item.get("path"), "work navigation path"),
+                        novel_root,
+                    ),
+                    role=_required_string(navigation_item.get("role"), "work navigation role"),
+                )
+            )
+        if len({entry.path for entry in navigation}) != len(navigation):
+            raise WoonError(f"private Novel work has duplicate navigation paths: {work_id}")
+        works.append(
+            PrivateWork(
+                work_id=work_id,
+                work_number=work_number,
+                entity_type=entity_type,
+                category=category,
+                title=_required_string(item.get("title"), "work title"),
+                status=status,
+                canonical_entry=canonical_entry,
+                navigation=tuple(navigation),
+            )
+        )
+    if len({work.work_id for work in works}) != len(works):
+        raise WoonError("private Novel work catalog has duplicate work IDs")
+    if len({work.work_number for work in works}) != len(works):
+        raise WoonError("private Novel work catalog has duplicate work numbers")
+    return tuple(works)
 
 
-def _parse_entries(value: object, novel_root: Path) -> tuple[PrivateHistoryEntry, ...]:
+def _parse_entries(
+    value: object, novel_root: Path, work_ids: set[str]
+) -> tuple[PrivateHistoryEntry, ...]:
     if not isinstance(value, list) or not value:
         raise WoonError("private person history ledger needs at least one person entry")
     entries: list[PrivateHistoryEntry] = []
@@ -241,11 +388,15 @@ def _parse_entries(value: object, novel_root: Path) -> tuple[PrivateHistoryEntry
         for link_value in links_value:
             if not isinstance(link_value, dict):
                 raise WoonError(f"private history link must be a mapping for {person_id}")
+            work_id = _required_string(link_value.get("work_id"), "private history work_id")
+            if work_id not in work_ids:
+                raise WoonError(f"private history link references unknown work: {work_id}")
             relative_path = _safe_novel_path(
                 _required_string(link_value.get("path"), "private history link path"), novel_root
             )
             links.append(
                 PrivateHistoryLink(
+                    work_id=work_id,
                     path=relative_path,
                     role=_required_string(link_value.get("role"), "private history link role"),
                     basis=_required_string(link_value.get("basis"), "private history link basis"),
@@ -254,13 +405,15 @@ def _parse_entries(value: object, novel_root: Path) -> tuple[PrivateHistoryEntry
                     ),
                 )
             )
-        if len({link.path for link in links}) != len(links):
+        if len({(link.work_id, link.path) for link in links}) != len(links):
             raise WoonError(f"private history has duplicate source paths for {person_id}")
         entries.append(PrivateHistoryEntry(person_id=person_id, links=tuple(links)))
     return tuple(entries)
 
 
-def _parse_candidates(value: object, novel_root: Path) -> tuple[PrivateHistoryCandidate, ...]:
+def _parse_candidates(
+    value: object, novel_root: Path, work_ids: set[str]
+) -> tuple[PrivateHistoryCandidate, ...]:
     if value in (None, ""):
         return ()
     if not isinstance(value, list):
@@ -269,8 +422,12 @@ def _parse_candidates(value: object, novel_root: Path) -> tuple[PrivateHistoryCa
     for item in value:
         if not isinstance(item, dict):
             raise WoonError("private person history candidate must be a mapping")
+        work_id = _required_string(item.get("work_id"), "private history candidate work_id")
+        if work_id not in work_ids:
+            raise WoonError(f"private history candidate references unknown work: {work_id}")
         candidates.append(
             PrivateHistoryCandidate(
+                work_id=work_id,
                 name=_required_string(item.get("name"), "private history candidate name"),
                 path=_safe_novel_path(
                     _required_string(item.get("path"), "private history candidate path"), novel_root
@@ -280,6 +437,10 @@ def _parse_candidates(value: object, novel_root: Path) -> tuple[PrivateHistoryCa
                 ),
             )
         )
+    if len(
+        {(candidate.work_id, candidate.name, candidate.path) for candidate in candidates}
+    ) != len(candidates):
+        raise WoonError("private person history review candidates must be unique")
     return tuple(candidates)
 
 
@@ -311,8 +472,7 @@ def _refresh_directory(directory: Path, expected: dict[str, str], marker: str) -
         ]
         if unmanaged:
             raise WoonError(
-                "private person history directory contains unmanaged files: "
-                + ", ".join(unmanaged)
+                "private person history directory contains unmanaged files: " + ", ".join(unmanaged)
             )
         changed = False
         for name, content in expected.items():
@@ -340,8 +500,115 @@ def _write_owned_file(path: Path, content: str) -> bool:
     return False
 
 
+def _work_display_title(work: PrivateWork) -> str:
+    return f"창작물 {work.work_number} · {work.title}"
+
+
+def _work_navigation_label(role: str) -> str:
+    return {
+        "catalog": "전체 자료 목록",
+        "event-ledger": "사건별 사실·해석·허구 장부",
+        "writing-plan": "전체 독해와 집필 판단",
+    }.get(role, role)
+
+
+def _render_novel_work_dashboard(
+    work: PrivateWork,
+    ledger: PrivateHistoryLedger,
+    cards: dict[str, PersonCard],
+    novel_root: Path,
+) -> str:
+    title = _work_display_title(work)
+    canonical = os.path.relpath(
+        novel_root / work.canonical_entry,
+        novel_root / NOVEL_WORK_DASHBOARD_RELATIVE_DIRECTORY,
+    )
+    lines = [
+        "---",
+        "type: private-creative-work",
+        "entity_type: creative-work",
+        f"work_id: {work.work_id}",
+        f"work_number: {work.work_number}",
+        f"category: {work.category}",
+        f"title: {json.dumps(title, ensure_ascii=False)}",
+        "access: local-only",
+        "publish: false",
+        "status: Generated",
+        _NOVEL_WORK_DASHBOARD_MARKER.rstrip(),
+        "---",
+        "",
+        f"# {title}",
+        "",
+        "독립된 비공개 소설 작품의 탐색 화면이다. 원문을 복사하지 않고 집필 정본, "
+        "사건 장부와 사용자가 확인한 인물 연결만 모아 보여 준다.",
+        "",
+        "## 작품 정본",
+        "",
+        f"- [{work.title}]({canonical}) · `{work.status}`",
+        "",
+        "## 작품 내부 탐색",
+        "",
+    ]
+    for navigation in work.navigation:
+        relative = os.path.relpath(
+            novel_root / navigation.path,
+            novel_root / NOVEL_WORK_DASHBOARD_RELATIVE_DIRECTORY,
+        )
+        lines.append(f"- [{_work_navigation_label(navigation.role)}]({relative})")
+    lines.extend(("", "## 연결 인물", ""))
+    linked_people = [
+        entry
+        for entry in ledger.entries
+        if any(link.work_id == work.work_id for link in entry.links)
+    ]
+    if not linked_people:
+        lines.append("- 아직 사용자가 확인한 인물 연결이 없습니다.")
+    for entry in linked_people:
+        links = [link for link in entry.links if link.work_id == work.work_id]
+        roles = ", ".join(sorted({_history_role_label(link.role) for link in links}))
+        person_path = f"../people/dashboards/{entry.person_id}.md"
+        lines.append(
+            f"- [{cards[entry.person_id].title}]({person_path}) · {roles} · 자료 {len(links)}개"
+        )
+    lines.extend(
+        (
+            "",
+            "이 화면과 연결된 인물 화면은 모두 `local-only`이며 일반 Woon Graph·검색·공개 "
+            "projection에 포함하지 않는다.",
+            "",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _render_novel_work_dashboard_index(catalog: PrivateWorkCatalog) -> str:
+    lines = [
+        "---",
+        "type: private-creative-work-index",
+        'title: "비공개 소설 작품"',
+        "access: local-only",
+        "publish: false",
+        "status: Generated",
+        _NOVEL_WORK_DASHBOARD_MARKER.rstrip(),
+        "---",
+        "",
+        "# 비공개 소설 작품",
+        "",
+        "작품 단위로 집필 정본·사건·인물을 다시 찾는 local-only 목록이다.",
+        "",
+    ]
+    for work in sorted(catalog.works, key=lambda item: item.work_number):
+        lines.append(
+            f"- [{_work_display_title(work)}]({work.work_id}.md) · `소설` · `{work.status}`"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _render_novel_dashboard(
-    entry: PrivateHistoryEntry, card: PersonCard, novel_root: Path
+    entry: PrivateHistoryEntry,
+    card: PersonCard,
+    catalog: PrivateWorkCatalog,
+    novel_root: Path,
 ) -> str:
     lines = _document_header(
         title=f"{card.title} · Novel 비공개 이력",
@@ -356,6 +623,19 @@ def _render_novel_dashboard(
             "",
             "원문을 복사하지 않고, 확정된 관계와 원본 위치만 다시 찾기 위한 대시보드다.",
             "",
+            "## 연결 작품",
+            "",
+        )
+    )
+    works_by_id = {work.work_id: work for work in catalog.works}
+    for work_id in sorted(
+        {link.work_id for link in entry.links}, key=lambda item: works_by_id[item].work_number
+    ):
+        work = works_by_id[work_id]
+        lines.append(f"- [{_work_display_title(work)}](../../dashboards/{work_id}.md)")
+    lines.extend(
+        (
+            "",
             "## 연결 자료",
             "",
         )
@@ -365,9 +645,12 @@ def _render_novel_dashboard(
             novel_root / link.path,
             novel_root / NOVEL_PERSON_DASHBOARD_RELATIVE_DIRECTORY,
         )
+        work_dashboard = f"../../dashboards/{link.work_id}.md"
         lines.extend(
             (
-                f"- [{Path(link.path).name}]({relative}) · `{link.role}`",
+                f"- [{Path(link.path).name}]({relative}) · "
+                f"[{_work_display_title(works_by_id[link.work_id])}]({work_dashboard}) "
+                f"· `{link.role}`",
                 f"  - 근거: {link.evidence} ({link.basis})",
             )
         )
@@ -397,12 +680,18 @@ def _render_novel_dashboard_index(
     if not ledger.candidates:
         lines.append("- 현재 확인 대기 인물이 없습니다.")
     for candidate in ledger.candidates:
-        lines.append(f"- `{candidate.name}` · `{candidate.path}` · {candidate.evidence}")
+        lines.append(
+            f"- `{candidate.name}` · `{candidate.work_id}` · `{candidate.path}` · "
+            f"{candidate.evidence}"
+        )
     return "\n".join(lines) + "\n"
 
 
 def _render_vault_dashboard(
-    entry: PrivateHistoryEntry, card: PersonCard, documents: tuple[PersonDocument, ...]
+    entry: PrivateHistoryEntry,
+    card: PersonCard,
+    documents: tuple[PersonDocument, ...],
+    catalog: PrivateWorkCatalog,
 ) -> str:
     link = f"[[{card.relative_path.removesuffix('.md')}|{card.title}]]"
     lines = _document_header(
@@ -416,8 +705,7 @@ def _render_vault_dashboard(
             "",
             f"# {card.title} · 비공개 이력",
             "",
-            "일정·Vault 연결과 별도 Novel workspace의 확정 관계를 함께 보는 "
-            "local-only 요약이다.",
+            "일정·Vault 연결과 별도 Novel workspace의 확정 관계를 함께 보는 local-only 요약이다.",
             "",
             "## Vault에서 연결된 기록",
             "",
@@ -435,10 +723,19 @@ def _render_vault_dashboard(
     lines.extend(
         (
             "",
-            "## Novel 확정 연결",
+            "## 비공개 소설 작품 연결",
             "",
-            f"- 확정 자료: {len(entry.links)}개",
-            "- 원문 내용과 파일 경로는 Novel local-only dashboard에서만 확인한다.",
+        )
+    )
+    works_by_id = {work.work_id: work for work in catalog.works}
+    for work_id in sorted(
+        {link.work_id for link in entry.links}, key=lambda item: works_by_id[item].work_number
+    ):
+        count = sum(link.work_id == work_id for link in entry.links)
+        lines.append(f"- {_work_display_title(works_by_id[work_id])} · 확정 자료 {count}개")
+    lines.extend(
+        (
+            "- 작품 원문과 로컬 경로는 Novel workspace의 작품·인물 대시보드에서만 확인한다.",
             "",
         )
     )
@@ -450,6 +747,7 @@ def _history_role_label(role: str) -> str:
 
     return {
         "organizer": "일정 주관",
+        "record-owner": "기록 소유자",
         "mentioned": "일정에 언급",
         "participant": "참석자",
         "speaker": "발화자",
@@ -481,7 +779,7 @@ def _render_vault_dashboard_index(
         "",
         "# 비공개 인물 이력",
         "",
-        "Novel 원문을 복사하지 않고, local-only 연결 상태와 Vault 기록만 보여 준다.",
+        "Novel 원문을 복사하지 않고, local-only 작품 연결 상태와 Vault 기록만 보여 준다.",
         "",
     ]
     for entry in ledger.entries:
@@ -519,16 +817,15 @@ def _render_vault_review(candidates: tuple[PrivateHistoryCandidate, ...]) -> str
         lines.extend(
             (
                 f"- `{candidate.name}`",
-                f"  - 출처: `{candidate.path}`",
+                f"  - 작품: `{candidate.work_id}`",
                 f"  - 확인 근거: {candidate.evidence}",
+                "  - 원본 경로는 Novel local-only ledger에서만 확인한다.",
             )
         )
     return "\n".join(lines) + "\n"
 
 
-def _document_header(
-    title: str, marker: str, person_id: str, person_link: str | None
-) -> list[str]:
+def _document_header(title: str, marker: str, person_id: str, person_link: str | None) -> list[str]:
     lines = [
         "---",
         "type: private-person-history",

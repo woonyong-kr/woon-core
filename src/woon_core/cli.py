@@ -198,7 +198,7 @@ Usage:
     [--candidates-json <json-array>] [--vault <path>]
   woon knowledge record-codex-daily-digest --day <YYYY-MM-DD> --entries-json <json-array>
     [--repair-missing-digest] [--vault <path>]
-  woon knowledge record-codex-knowledge-entries --source-range <safe-token>
+  woon knowledge record-codex-knowledge-entries --source-range <safe-token> --day <YYYY-MM-DD>
     --entries-json <json-array> [--vault <path>]
   woon knowledge materialize-codex-daily-digest --day <YYYY-MM-DD>
     [--replace-empty-digest] [--vault <path>]
@@ -1070,7 +1070,7 @@ def _run_codex_knowledge_entry_recording(arguments: list[str], output: TextIO) -
     index = 0
     while index < len(arguments):
         option = arguments[index]
-        if option not in {"--source-range", "--entries-json"}:
+        if option not in {"--source-range", "--day", "--entries-json", "--input-state"}:
             raw_options.append(option)
             index += 1
             continue
@@ -1079,10 +1079,20 @@ def _run_codex_knowledge_entry_recording(arguments: list[str], output: TextIO) -
         values[option] = arguments[index + 1]
         index += 2
     vault, options = _parse_knowledge_options(raw_options)
-    if options or set(values) != {"--source-range", "--entries-json"}:
+    required = {"--source-range", "--day", "--entries-json"}
+    if (
+        options
+        or not required.issubset(values)
+        or set(values).difference(required | {"--input-state"})
+    ):
         raise WoonError(
-            "knowledge record-codex-knowledge-entries requires --source-range and --entries-json"
+            "knowledge record-codex-knowledge-entries requires --source-range, --day "
+            "and --entries-json"
         )
+    try:
+        target_day = date.fromisoformat(values["--day"])
+    except ValueError as error:
+        raise WoonError("Codex knowledge day must be YYYY-MM-DD") from error
     try:
         parsed = json.loads(values["--entries-json"])
     except json.JSONDecodeError as error:
@@ -1092,7 +1102,9 @@ def _run_codex_knowledge_entry_recording(arguments: list[str], output: TextIO) -
     result = record_codex_knowledge_entries(
         vault or resolve_knowledge_vault(),
         source_range=values["--source-range"],
+        day=target_day,
         entries=codex_knowledge_entries_from_records(parsed),
+        input_state=values.get("--input-state", "processed"),  # type: ignore[arg-type]
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
 

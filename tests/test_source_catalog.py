@@ -85,9 +85,7 @@ def test_source_catalog_output_is_deterministic_and_readable(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("source_kind", ["same", "child", "parent", "symlink-child"])
-def test_source_catalog_rejects_source_target_overlap(
-    tmp_path: Path, source_kind: str
-) -> None:
+def test_source_catalog_rejects_source_target_overlap(tmp_path: Path, source_kind: str) -> None:
     target = tmp_path / "target"
     child = target / "source"
     child.mkdir(parents=True)

@@ -292,21 +292,33 @@ def record_codex_daily_digest_run(
 )
 def record_codex_knowledge_entries_run(
     source_range: str,
+    day: str,
     entries: list[dict[str, object]],
+    input_state: str = "processed",
 ) -> dict[str, object]:
-    """Record only short opted-in Codex conclusions, never a transcript.
+    """Record one day of short Codex conclusions, never a transcript.
 
-    Each entry is a Korean ``학습``, ``결정``, ``질문`` or ``다음 행동`` with
-    a short title and summary.  ``학습`` and ``결정`` become small local-only
-    Growth Wiki pages; all entries enter a local daily ledger for the daily
-    note.  Do not pass raw chat text, system/developer text, tool output,
-    reasoning, credentials, opaque locators, private originals, or Novel text.
+    Each entry has one Korean category such as ``활동``, ``일정``, ``인물``,
+    ``학습``, ``개념``, ``커리어``, ``창작`` or ``자료`` plus a short title and
+    summary.  Every entry enters the local daily ledger; reusable ``학습``,
+    ``개념`` and ``결정`` also become a local-only Growth Wiki page.  Pass
+    ``input_state=unavailable`` with ``entries=[]`` when the persisted session
+    for that day is absent, so a blank note explains its cause.  Do not pass
+    raw chat text, system/developer text, tool output, reasoning, credentials,
+    opaque locators, private originals, or Novel text.
     """
+
+    try:
+        target_day = date.fromisoformat(day)
+    except ValueError as error:
+        raise ValueError("day must use YYYY-MM-DD") from error
 
     result = record_codex_knowledge_entries(
         build_knowledge_service()[0].vault,
         source_range=source_range,
+        day=target_day,
         entries=codex_knowledge_entries_from_records(entries),
+        input_state=input_state,  # type: ignore[arg-type]
     )
     return asdict(result)
 

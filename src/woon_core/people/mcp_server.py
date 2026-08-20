@@ -155,8 +155,10 @@ def set_identity_identifiers(
     for item in identifiers:
         value = item.get("value")
         context_terms = item.get("context_terms", [])
-        if not isinstance(value, str) or not isinstance(context_terms, list) or not all(
-            isinstance(term, str) for term in context_terms
+        if (
+            not isinstance(value, str)
+            or not isinstance(context_terms, list)
+            or not all(isinstance(term, str) for term in context_terms)
         ):
             raise WoonError("identifiers need string value and optional string context_terms")
         inputs.append(
@@ -189,9 +191,11 @@ def sync_private_history(novel_root: str) -> dict[str, object]:
     result = PrivatePersonHistoryService(resolve_knowledge_vault(), Path(novel_root)).sync()
     return {
         "changed": result.changed,
+        "works": result.works,
         "people": result.people,
         "links": result.links,
         "candidates": result.candidates,
+        "novel_work_catalog": result.novel_work_catalog_path,
         "vault_dashboard_directory": result.vault_dashboard_directory,
     }
 

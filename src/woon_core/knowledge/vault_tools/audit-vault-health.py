@@ -204,9 +204,7 @@ def daily_digest_embed_issues(vault: Path) -> list[str]:
             if not digest.is_file():
                 note_path = note.relative_to(vault).as_posix()
                 digest_path = digest.relative_to(vault).as_posix()
-                issues.append(
-                    f"{note_path}: missing daily digest {digest_path}"
-                )
+                issues.append(f"{note_path}: missing daily digest {digest_path}")
     return issues
 
 
@@ -394,15 +392,17 @@ def calendar_projection_issues(vault: Path) -> list[str]:
                 issues.append(f"{relative}: calendar projection type must be calendar-event")
             if not isinstance(metadata.get("title"), str) or not str(metadata["title"]).strip():
                 issues.append(f"{relative}: calendar projection title is required")
-            if not isinstance(metadata.get("calendar"), str) or not str(
-                metadata["calendar"]
-            ).strip():
+            if (
+                not isinstance(metadata.get("calendar"), str)
+                or not str(metadata["calendar"]).strip()
+            ):
                 issues.append(f"{relative}: calendar projection calendar is required")
             if not isinstance(metadata.get("Date"), str) or not str(metadata["Date"]).strip():
                 issues.append(f"{relative}: calendar projection requires Date")
-            if not isinstance(metadata.get("Category"), str) or not str(
-                metadata["Category"]
-            ).strip():
+            if (
+                not isinstance(metadata.get("Category"), str)
+                or not str(metadata["Category"]).strip()
+            ):
                 issues.append(f"{relative}: calendar projection requires Category")
             all_day = metadata.get("All Day")
             if all_day is False:
@@ -436,6 +436,7 @@ def calendar_projection_issues(vault: Path) -> list[str]:
             "source: inbox/calendar/events\n"
             "date_field: Date\n"
             "category_field: Category\n"
+            "category_id_field: Category ID\n"
             "```"
         )
         if required_dashboard not in dashboard_content:
@@ -717,9 +718,7 @@ def person_schema_issues(vault: Path) -> list[str]:
             registry_text.find("\n---", 4) if registry_text.startswith("---\n") else -1
         )
         registry_body = (
-            registry_text[frontmatter_end + 4 :]
-            if frontmatter_end != -1
-            else registry_text
+            registry_text[frontmatter_end + 4 :] if frontmatter_end != -1 else registry_text
         )
         registry_links = {match.group(1) for match in WIKILINK_RE.finditer(registry_body)}
         for relative in registered_cards:
@@ -902,9 +901,7 @@ def main() -> int:
         brain_activity_log_issues(VAULT / "brain/log.md")
     )
     issues["person_schema_violations"].extend(person_schema_issues(VAULT))
-    issues["vault_execution_ownership_violations"].extend(
-        vault_execution_ownership_issues(VAULT)
-    )
+    issues["vault_execution_ownership_violations"].extend(vault_execution_ownership_issues(VAULT))
     issues["calendar_projection_violations"].extend(calendar_projection_issues(VAULT))
     issues["daily_digest_projection_violations"].extend(daily_digest_embed_issues(VAULT))
 
@@ -1198,9 +1195,7 @@ def main() -> int:
                 issues["absolute_local_paths"].append(f"{r}: line {no}")
             for label in re.findall(r'\["([^"\]]+)"\]', line):
                 if label.strip() in MERMAID_PLACEHOLDER_LABELS:
-                    issues["mermaid_placeholder_nodes"].append(
-                        f"{r}: line {no}: {label.strip()}"
-                    )
+                    issues["mermaid_placeholder_nodes"].append(f"{r}: line {no}: {label.strip()}")
         if is_noncanonical_map_archive(path):
             # Preserved exports remain resolvable targets but are deliberately
             # outside the canonical metadata/title corpus.

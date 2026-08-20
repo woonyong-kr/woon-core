@@ -13,11 +13,16 @@ from zoneinfo import ZoneInfo
 
 from woon_core.calendar.categories import (
     CALENDAR_CATEGORY_IDS,
+    UNCATEGORIZED_CALENDAR_CATEGORY_ID,
     calendar_category_title,
 )
 from woon_core.calendar.constants import OWNED_CALENDAR_NAME
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
+from woon_core.knowledge.codex_knowledge import (
+    CalendarDocumentLink,
+    calendar_document_links_for_event,
+)
 from woon_core.people.service import (
     CalendarIdentityAmbiguity,
     CalendarIdentityResolution,
@@ -36,9 +41,7 @@ APPLE_CALENDAR_NOTION_DATABASE_RELATIVE_PATH = (
     f"{APPLE_CALENDAR_EVENTS_RELATIVE_PATH}/{APPLE_CALENDAR_NOTION_DATABASE_FILENAME}"
 )
 APPLE_CALENDAR_DASHBOARD_FILENAME = "apple-calendar.md"
-APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH = (
-    f"inbox/calendar/{APPLE_CALENDAR_DASHBOARD_FILENAME}"
-)
+APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH = f"inbox/calendar/{APPLE_CALENDAR_DASHBOARD_FILENAME}"
 CALENDAR_PERSON_IDENTITY_REVIEW_RELATIVE_PATH = "inbox/review/calendar-person-identity-review.md"
 PRISMA_VIRTUAL_EVENTS_FILENAME = ".prisma-virtual-events.md"
 PRISMA_EMPTY_VIRTUAL_EVENTS = "\n```prisma-virtual-events\n[]\n```\n"
@@ -150,9 +153,8 @@ class CalendarProjectionService:
                 for path in existing.values()
                 if _MARKDOWN_MARKER not in path.read_text(encoding="utf-8")
             ]
-            if (
-                legacy_database is not None
-                and not is_core_calendar_notion_database(legacy_database)
+            if legacy_database is not None and not is_core_calendar_notion_database(
+                legacy_database
             ):
                 unmanaged.append(legacy_database.relative_to(self._vault).as_posix())
             if unmanaged:
@@ -164,12 +166,32 @@ class CalendarProjectionService:
             changed = False
             identity_reviews: list[CalendarPersonIdentityReview] = []
             current_names: set[str] = set()
+            # The conversation ledger intentionally does not retain opaque
+            # EventKit IDs.  Consequently a same-day, same-title pair cannot
+            # be identified safely from an explicit title context alone.  Do
+            # not project a document link onto either event in that case.
+            # This is stricter than guessing from time or filename and keeps
+            # one conversation outcome from becoming two event histories.
+            linkable_event_keys = _unique_document_link_event_keys(events)
             for event, name in _markdown_filenames(events):
                 current_names.add(name)
                 destination = self._markdown_directory / name
                 resolution = self._people.calendar_title_resolution(event.title)
                 identity_reviews.extend(_identity_reviews(event, resolution))
-                content = _render_markdown(event, self._calendar_people(event, resolution))
+                document_links = (
+                    calendar_document_links_for_event(
+                        self._vault,
+                        day=event.start_at.astimezone(_KST).date(),
+                        event_title=event.title,
+                    )
+                    if _document_link_event_key(event) in linkable_event_keys
+                    else ()
+                )
+                content = _render_markdown(
+                    event,
+                    self._calendar_people(event, resolution),
+                    document_links,
+                )
                 if _write_projection_file(destination, content):
                     changed = True
 
@@ -235,11 +257,7 @@ class CalendarProjectionService:
         """Keep a local rollback copy when a source event leaves the bounded window."""
 
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        return (
-            self._vault
-            / ".local/woon-knowledge/calendar-projection/retired"
-            / timestamp
-        )
+        return self._vault / ".local/woon-knowledge/calendar-projection/retired" / timestamp
 
     def _calendar_people(
         self, event: CalendarProjectionEvent, resolution: CalendarIdentityResolution
@@ -360,9 +378,35 @@ def _calendar_filename_stem(title: str) -> str:
     return stem[:120] or "일정"
 
 
+def _document_link_event_key(event: CalendarProjectionEvent) -> tuple[str, str]:
+    """Return the human-safe identity available to conversation contexts."""
+
+    day = event.start_at.astimezone(_KST).date().isoformat()
+    normalized_title = " ".join(event.title.split())
+    return (day, normalized_title)
+
+
+def _unique_document_link_event_keys(
+    events: tuple[CalendarProjectionEvent, ...],
+) -> frozenset[tuple[str, str]]:
+    """Keep links off duplicate visible Calendar occurrences.
+
+    The ledger deliberately stores no EventKit identifiers, so its strongest
+    safe match is one exact KST-day/title pair.  Requiring that pair to occur
+    once in the current projection prevents silent fan-out to duplicate events.
+    """
+
+    counts: dict[tuple[str, str], int] = {}
+    for event in events:
+        key = _document_link_event_key(event)
+        counts[key] = counts.get(key, 0) + 1
+    return frozenset(key for key, count in counts.items() if count == 1)
+
+
 def _render_markdown(
     event: CalendarProjectionEvent,
     people: tuple[tuple[CalendarPersonReference, str, str, str], ...],
+    document_links: tuple[CalendarDocumentLink, ...],
 ) -> str:
     """Render searchable event summaries without exposing an EventKit identifier."""
 
@@ -378,6 +422,7 @@ def _render_markdown(
         "record_owner: choi-woonyoung",
         f"Date: {_yaml_string(event.start_at.astimezone(_KST).date().isoformat())}",
         f"Category: {_yaml_string(calendar_category_title(event.category_id))}",
+        f"Category ID: {_yaml_string(event.category_id or UNCATEGORIZED_CALENDAR_CATEGORY_ID)}",
     ]
     if people:
         lines.append("people:")
@@ -393,11 +438,7 @@ def _render_markdown(
                 )
             )
     if event.all_day:
-        lines.extend(
-            (
-                "All Day: true",
-            )
-        )
+        lines.extend(("All Day: true",))
     else:
         lines.extend(
             (
@@ -421,32 +462,50 @@ def _render_markdown(
             "일정 변경이 필요하면 Apple Calendar에서 수정합니다.",
         )
     )
+    if document_links:
+        lines.extend(
+            (
+                "",
+                "## 관련 문서",
+                "",
+                "대화 지식화에서 이 일정과 직접 함께 확인된 문서입니다.",
+                "",
+            )
+        )
+        for link in document_links:
+            lines.append(
+                f"- [[{link.relative_path[:-3]}|{link.title}]] · {', '.join(link.reasons)}"
+            )
     return "\n".join(lines) + "\n"
 
 
 def _render_dashboard() -> str:
     """Render the month-only Simple Calendar entrypoint without document chrome."""
 
-    return "\n".join(
-        (
-            "---",
-            "type: calendar-dashboard",
-            "title: Apple Calendar",
-            "publish: false",
-            "access: local-only",
-            "status: Generated",
-            "source: apple-calendar-readonly",
-            "woon_projection: apple-calendar-dashboard",
-            "cssclasses: woon-simple-calendar-dashboard",
-            "---",
-            "",
-            "```woon-simple-calendar",
-            f"source: {APPLE_CALENDAR_EVENTS_RELATIVE_PATH}",
-            "date_field: Date",
-            "category_field: Category",
-            "```",
+    return (
+        "\n".join(
+            (
+                "---",
+                "type: calendar-dashboard",
+                "title: Apple Calendar",
+                "publish: false",
+                "access: local-only",
+                "status: Generated",
+                "source: apple-calendar-readonly",
+                "woon_projection: apple-calendar-dashboard",
+                "cssclasses: woon-simple-calendar-dashboard",
+                "---",
+                "",
+                "```woon-simple-calendar",
+                f"source: {APPLE_CALENDAR_EVENTS_RELATIVE_PATH}",
+                "date_field: Date",
+                "category_field: Category",
+                "category_id_field: Category ID",
+                "```",
+            )
         )
-    ) + "\n"
+        + "\n"
+    )
 
 
 def _render_person_identity_review(reviews: tuple[CalendarPersonIdentityReview, ...]) -> str:

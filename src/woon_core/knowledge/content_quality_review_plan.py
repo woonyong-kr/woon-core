@@ -205,8 +205,7 @@ def rebase_content_quality_review_plan(
         targets = _targets_from_manifest(batch.get("targets"))
         reviews = [prior_reviews.get(page_id) for page_id in targets]
         if len(reviews) == len(targets) and all(
-            review is not None
-            and review["output_sha256"] == target["output_sha256"]
+            review is not None and review["output_sha256"] == target["output_sha256"]
             for review, target in zip(reviews, targets.values(), strict=True)
         ):
             result_file = _safe_relative(
@@ -237,15 +236,11 @@ def rebase_content_quality_review_plan(
             encode_json(
                 {
                     "version": 1,
-                    "prior_plan_sha256": _file_sha256(
-                        prior_plan_path, "prior quality review plan"
-                    ),
+                    "prior_plan_sha256": _file_sha256(prior_plan_path, "prior quality review plan"),
                     "prior_run_manifest_sha256": _file_sha256(
                         prior_run_manifest, "prior quality review run manifest"
                     ),
-                    "result_files": _result_file_digests(
-                        results_destination, reused_batches
-                    ),
+                    "result_files": _result_file_digests(results_destination, reused_batches),
                 }
             ),
         )
@@ -654,8 +649,10 @@ def _text(value: object, field: str) -> str:
 
 
 def _digest(value: object, field: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise WoonError(f"{field} must be a SHA-256 digest")
     return value

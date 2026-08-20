@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -52,11 +53,7 @@ def _write_person_card(
     path.parent.mkdir(parents=True, exist_ok=True)
     identifier_lines = ""
     for value, context_terms in identifiers:
-        identifier_lines += (
-            "identifiers:\n"
-            if not identifier_lines
-            else ""
-        )
+        identifier_lines += "identifiers:\n" if not identifier_lines else ""
         identifier_lines += (
             f"  - value: {value}\n"
             "    basis: user-confirmed\n"
@@ -110,6 +107,7 @@ def test_refresh_writes_only_approved_event_summary_fields(tmp_path: Path) -> No
     assert "woon_projection: apple-calendar" in markdown
     assert 'Date: "2026-08-17"' in markdown
     assert 'Category: "기타"' in markdown
+    assert 'Category ID: "other"' in markdown
     assert "- 시간: 오전 10:00 - 오전 11:00" in markdown
     assert "opaque-event-001" not in markdown
     assert (markdown_files[0].stat().st_mode & 0o777) == 0o400
@@ -128,6 +126,7 @@ def test_refresh_writes_only_approved_event_summary_fields(tmp_path: Path) -> No
     assert "cssclasses: woon-simple-calendar-dashboard" in dashboard
     assert "```woon-simple-calendar" in dashboard
     assert "source: inbox/calendar/events" in dashboard
+    assert "category_id_field: Category ID" in dashboard
     assert (tmp_path / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH).stat().st_mode & 0o777 == 0o400
 
 
@@ -246,7 +245,130 @@ def test_refresh_projects_an_explicit_calendar_category_without_changing_ics(
 
     markdown = next((tmp_path / result.relative_path).glob("*.md")).read_text(encoding="utf-8")
     assert 'Category: "학습"' in markdown
+    assert 'Category ID: "learning"' in markdown
     assert b"CATEGORY" not in (tmp_path / result.ics_relative_path).read_bytes()
+
+
+def test_refresh_renders_explicit_conversation_document_links_for_exact_event_context(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "brain/wiki/일정-준비-원칙.md"
+    document.parent.mkdir(parents=True)
+    document.write_text("# 큐 설계\n", encoding="utf-8")
+    ledger = tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-17/context.json"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "kind": "학습",
+                "title": "일정 준비 원칙",
+                "summary": "일정 준비와 함께 문서를 만들었다.",
+                "related_documents": [],
+                "calendar_contexts": [
+                    {
+                        "event_day": "2026-08-17",
+                        "event_title": "러닝 약속, 공원",
+                        "related_documents": [],
+                        "reason": "준비",
+                        "include_generated_growth_page": True,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CalendarProjectionService(tmp_path, FakeCalendarReader((_event(),))).refresh(
+        now=datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
+    )
+
+    markdown = next((tmp_path / result.relative_path).glob("*.md")).read_text(encoding="utf-8")
+    assert "## 관련 문서" in markdown
+    assert "[[brain/wiki/일정-준비-원칙|큐 설계]] · 준비" in markdown
+
+
+def test_refresh_does_not_link_same_day_context_with_a_different_event_title(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "brain/wiki/queue-design.md"
+    document.parent.mkdir(parents=True)
+    document.write_text("# 큐 설계\n", encoding="utf-8")
+    ledger = tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-17/context.json"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "kind": "결정",
+                "title": "학습 순서를 정한다",
+                "summary": "다른 일정의 준비 문서다.",
+                "related_documents": ["brain/wiki/queue-design.md"],
+                "calendar_contexts": [
+                    {
+                        "event_day": "2026-08-17",
+                        "event_title": "다른 학습 약속",
+                        "related_documents": ["brain/wiki/queue-design.md"],
+                        "reason": "준비",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CalendarProjectionService(tmp_path, FakeCalendarReader((_event(),))).refresh(
+        now=datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
+    )
+
+    markdown = next((tmp_path / result.relative_path).glob("*.md")).read_text(encoding="utf-8")
+    assert "## 관련 문서" not in markdown
+
+
+def test_refresh_does_not_fan_out_context_to_duplicate_same_day_event_titles(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "brain/wiki/queue-design.md"
+    document.parent.mkdir(parents=True)
+    document.write_text("# 큐 설계\n", encoding="utf-8")
+    ledger = tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-17/context.json"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "kind": "결정",
+                "title": "면접 준비 순서를 정한다",
+                "summary": "면접 약속을 준비하며 문서를 만들었다.",
+                "related_documents": ["brain/wiki/queue-design.md"],
+                "calendar_contexts": [
+                    {
+                        "event_day": "2026-08-17",
+                        "event_title": "면접 준비",
+                        "related_documents": ["brain/wiki/queue-design.md"],
+                        "reason": "준비",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    first = _event(source_event_id="opaque-event-001", title="면접 준비")
+    second = _event(
+        source_event_id="opaque-event-002",
+        title="면접 준비",
+        start_at=datetime(2026, 8, 17, 3, 0, tzinfo=UTC),
+        end_at=datetime(2026, 8, 17, 4, 0, tzinfo=UTC),
+    )
+    result = CalendarProjectionService(tmp_path, FakeCalendarReader((first, second))).refresh(
+        now=datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
+    )
+
+    documents = [
+        path.read_text(encoding="utf-8") for path in (tmp_path / result.relative_path).glob("*.md")
+    ]
+    assert all("## 관련 문서" not in markdown for markdown in documents)
 
 
 def test_refresh_links_known_people_and_owned_calendar_owner(tmp_path: Path) -> None:
@@ -298,9 +420,7 @@ def test_refresh_writes_review_without_linking_an_ambiguous_calendar_identifier(
     )
 
     markdown = next((tmp_path / result.relative_path).glob("*.md")).read_text(encoding="utf-8")
-    review = (tmp_path / CALENDAR_PERSON_IDENTITY_REVIEW_RELATIVE_PATH).read_text(
-        encoding="utf-8"
-    )
+    review = (tmp_path / CALENDAR_PERSON_IDENTITY_REVIEW_RELATIVE_PATH).read_text(encoding="utf-8")
     assert "users/park-minjeong" not in markdown
     assert "users/kim-minjeong" not in markdown
     assert "calendar-person-identity-review" in review

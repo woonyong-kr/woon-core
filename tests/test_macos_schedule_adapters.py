@@ -154,6 +154,50 @@ def test_calendar_port_requeries_after_cancellation() -> None:
     ]
 
 
+def test_calendar_port_updates_only_the_category_marker_then_requeries() -> None:
+    payloads: list[dict[str, str | None]] = []
+
+    def runner(payload: dict[str, str | None]) -> dict[str, str]:
+        payloads.append(payload)
+        if payload["action"] == "verify-category":
+            return {
+                "status": "verified",
+                "calendar_event_id": "event-001",
+                "calendar_name": "Woon 일정",
+                "category_id": "relationship",
+            }
+        return {"calendar_event_id": "event-001"}
+
+    port = MacOSCalendarPort(runner)
+    port.update_category("event-001", "relationship")
+    port.verify_category("event-001", "relationship")
+
+    assert payloads == [
+        {
+            "action": "set-category",
+            "calendarName": "Woon 일정",
+            "existingID": "event-001",
+            "categoryID": "relationship",
+            "title": None,
+            "startAt": None,
+            "endAt": None,
+            "location": None,
+            "notes": None,
+        },
+        {
+            "action": "verify-category",
+            "calendarName": "Woon 일정",
+            "existingID": "event-001",
+            "categoryID": "relationship",
+            "title": None,
+            "startAt": None,
+            "endAt": None,
+            "location": None,
+            "notes": None,
+        },
+    ]
+
+
 def test_calendar_port_migrates_only_the_receipt_proven_legacy_calendar() -> None:
     payloads: list[dict[str, str | None]] = []
 

@@ -14,6 +14,7 @@ from woon_core.calendar.factory import build_calendar_projection_service
 from woon_core.calendar.manual_schedule import (
     UserScheduleRequest,
     apply_user_authorized_schedule,
+    update_user_authorized_schedule_category,
 )
 from woon_core.errors import WoonError
 from woon_core.knowledge.factory import resolve_knowledge_vault
@@ -29,7 +30,9 @@ mcp = FastMCP(
         "Use a stated purpose before creating a routine, materialize before completion, "
         "and never operate a graphical task application or an external task database. "
         "Create or update Apple Calendar events only through woon_calendar_upsert after "
-        "the user has explicitly supplied the appointment details and authorization."
+        "the user has explicitly supplied the appointment details and authorization. "
+        "Correct an existing Woon event category only through woon_calendar_set_category "
+        "after direct user authorization."
     ),
     json_response=True,
 )
@@ -72,6 +75,7 @@ def upsert_recurring_todo(
     purpose: str,
     area: str,
     start_date: str | None = None,
+    goal_id: str | None = None,
     expected_revision: str | None = None,
 ) -> dict[str, object]:
     """Create or update a daily Markdown routine. purpose is required, never inferred."""
@@ -82,9 +86,52 @@ def upsert_recurring_todo(
         purpose=purpose,
         area=area,
         start_date=_parse_day(start_date) if start_date else None,
+        goal_id=goal_id,
         expected_revision=expected_revision,
     )
     return {"created": result.created, "changed": result.changed, "routine": asdict(result.routine)}
+
+
+@mcp.tool(
+    name="woon_tasks_upsert_goal",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def upsert_goal(
+    goal_id: str,
+    title: str,
+    purpose: str,
+    completion_condition: str,
+    end_date: str | None = None,
+    current_value: float | None = None,
+    target_value: float | None = None,
+    target_operator: str | None = None,
+    unit: str | None = None,
+    measurement_confirmed: bool = False,
+    status: str = "active",
+    expected_revision: str | None = None,
+) -> dict[str, object]:
+    """Create or update a user-editable daily-routine goal and its stop condition."""
+
+    result = _service().upsert_goal(
+        goal_id=goal_id,
+        title=title,
+        purpose=purpose,
+        completion_condition=completion_condition,
+        end_date=_parse_day(end_date) if end_date else None,
+        current_value=current_value,
+        target_value=target_value,
+        target_operator=target_operator,
+        unit=unit,
+        measurement_confirmed=measurement_confirmed,
+        status=status,
+        expected_revision=expected_revision,
+    )
+    return {"created": result.created, "changed": result.changed, "goal": asdict(result.goal)}
 
 
 @mcp.tool(
@@ -199,6 +246,45 @@ def upsert_calendar_event(
         "status": "ok",
         "receipt": asdict(receipt),
         "duration_defaulted": defaulted_end,
+        "projection": asdict(projection),
+    }
+
+
+@mcp.tool(
+    name="woon_calendar_set_category",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def set_calendar_category(
+    event_id: str,
+    category_id: str,
+    user_authorized: bool,
+) -> dict[str, object]:
+    """Correct a receipt-proven Woon event category while preserving event content."""
+
+    if user_authorized is not True:
+        raise ValueError("calendar writes require explicit user authorization")
+    vault = resolve_knowledge_vault()
+    receipt = update_user_authorized_schedule_category(
+        vault,
+        event_id=event_id,
+        category_id=category_id,
+    )
+    try:
+        projection = build_calendar_projection_service(vault).refresh()
+    except WoonError as error:
+        return {
+            "status": "applied_projection_pending",
+            "receipt": asdict(receipt),
+            "projection_error": str(error),
+        }
+    return {
+        "status": "ok",
+        "receipt": asdict(receipt),
         "projection": asdict(projection),
     }
 

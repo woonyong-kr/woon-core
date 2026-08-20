@@ -30,7 +30,7 @@ def _service(tmp_path: Path) -> PersonService:
             "status: Active\nentity_type: person\nperson_id: choi-woonyoung\n"
             "person_kind: vault-owner\nperson_scope: general\n"
             "relationship_to_owner: 볼트 사용자\npeople:\n"
-            "  - \"[[users/choi-woonyoung/README|최우녕]]\"",
+            '  - "[[users/choi-woonyoung/README|최우녕]]"',
         ),
         encoding="utf-8",
     )
@@ -93,9 +93,7 @@ def test_links_one_document_with_explicit_roles_without_duplicate_entries(tmp_pa
     assert first.changed is True
     assert second.changed is False
     documents = service.documents_for("kim-heejun")
-    assert documents == (
-        documents[0],
-    )
+    assert documents == (documents[0],)
     assert documents[0].relative_path == "inbox/meeting.md"
     assert documents[0].roles == ("participant", "source-provider")
 
@@ -220,9 +218,7 @@ def test_calendar_title_resolution_uses_explicit_private_identifiers_only(tmp_pa
         (item.reference.person_id, item.identifier.value)
         for item in private_after_confirmation.matches
     ]
-    assert private_matches == [
-        ("lee-minjeong", "민정")
-    ]
+    assert private_matches == [("lee-minjeong", "민정")]
 
 
 def test_upsert_records_korean_full_and_surname_free_default_identifiers(tmp_path: Path) -> None:
@@ -269,9 +265,7 @@ def test_calendar_title_resolution_leaves_same_identifier_for_review_until_conte
     )
     service.set_identity_identifiers(
         person_id="kim-minjeong",
-        identifiers=(
-            PersonIdentityIdentifierInput("민정", context_terms=("프로젝트",)),
-        ),
+        identifiers=(PersonIdentityIdentifierInput("민정", context_terms=("프로젝트",)),),
         evidence="사용자가 프로젝트 일정의 민정은 김민정이라고 직접 확인함",
     )
 
@@ -283,9 +277,7 @@ def test_calendar_title_resolution_leaves_same_identifier_for_review_until_conte
         (item.identifier, [candidate.person_id for candidate in item.candidates])
         for item in ambiguous.ambiguities
     ]
-    assert ambiguities == [
-        ("민정", ["kim-minjeong", "park-minjeong"])
-    ]
+    assert ambiguities == [("민정", ["kim-minjeong", "park-minjeong"])]
     assert [(item.reference.person_id, item.identifier.value) for item in contextual.matches] == [
         ("kim-minjeong", "민정")
     ]
@@ -315,15 +307,15 @@ def test_materializes_default_owner_without_rewriting_private_or_novel_records(
 
     assert first.changed == 1
     assert second.changed == 0
-    assert "record_owner: choi-woonyoung" in (
-        tmp_path / "brain/decision.md"
-    ).read_text(encoding="utf-8")
-    assert "record_owner:" not in (
-        tmp_path / "sources/private/original.md"
-    ).read_text(encoding="utf-8")
-    assert "record_owner:" not in (
-        tmp_path / "users/lee-minjeong/notes.md"
-    ).read_text(encoding="utf-8")
+    assert "record_owner: choi-woonyoung" in (tmp_path / "brain/decision.md").read_text(
+        encoding="utf-8"
+    )
+    assert "record_owner:" not in (tmp_path / "sources/private/original.md").read_text(
+        encoding="utf-8"
+    )
+    assert "record_owner:" not in (tmp_path / "users/lee-minjeong/notes.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_rejects_guess_driven_cards_and_compiled_or_private_link_targets(tmp_path: Path) -> None:

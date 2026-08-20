@@ -292,8 +292,7 @@ class KnowledgeService:
                 )
             else:
                 historical_body_hash = hashlib.sha256(
-                    historical.body.replace("\r\n", "\n").rstrip().encode("utf-8")
-                    + b"\n"
+                    historical.body.replace("\r\n", "\n").rstrip().encode("utf-8") + b"\n"
                 ).hexdigest()
                 self._compiled_wiki.restore_from_git(
                     replace(historical.metadata),

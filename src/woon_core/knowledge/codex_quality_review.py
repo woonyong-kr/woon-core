@@ -379,9 +379,7 @@ def _compact_response_contract(targets: dict[str, ReviewTarget]) -> dict[str, ob
             for page_id, target in sorted(targets.items())
         ],
         "response": {
-            "reviews": [
-                {"r": "pppppp", "a": [0] * len(CRITERIA)} for _ in sorted(targets)
-            ]
+            "reviews": [{"r": "pppppp", "a": [0] * len(CRITERIA)} for _ in sorted(targets)]
         },
     }
 

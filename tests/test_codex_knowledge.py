@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -34,6 +35,15 @@ def test_projects_one_safe_batch_to_growth_wiki_and_daily_ledger(tmp_path: Path)
                 ),
                 "next_question": "결정 후보와 인물 후보는 어떤 기준으로 검토 경로에만 둘까?",
                 "related_documents": ["brain/wiki/herdr.md"],
+                "calendar_contexts": [
+                    {
+                        "event_day": "2026-08-18",
+                        "event_title": "학습 모임",
+                        "related_documents": ["brain/wiki/herdr.md"],
+                        "reason": "준비",
+                        "include_generated_growth_page": True,
+                    }
+                ],
             },
             {
                 "day": "2026-08-18",
@@ -61,6 +71,13 @@ def test_projects_one_safe_batch_to_growth_wiki_and_daily_ledger(tmp_path: Path)
     rendered = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
     assert "대화 지식화는 한 번 분류하고 두 번 사용한다" in rendered
     assert "대화 후보의 승격 기준을 어떻게 좁힐까" in rendered
+    records = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-18").glob("*.json")
+        if path.name != "_input-status.json"
+    ]
+    record = next(item for item in records if item["kind"] == "학습")
+    assert record["calendar_contexts"][0]["include_generated_growth_page"] is True
 
 
 def test_rejects_raw_like_or_conflicting_growth_entries_without_receipt(tmp_path: Path) -> None:
@@ -98,6 +115,62 @@ def test_rejects_raw_like_or_conflicting_growth_entries_without_receipt(tmp_path
         )
     assert page.read_text(encoding="utf-8") == "사용자가 고친 문서\n"
     assert not (settings.receipt_directory / "codex-conversation-ingest").exists()
+
+
+def test_records_an_empty_conversation_range_without_creating_knowledge(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    result = record_codex_knowledge_entries(
+        tmp_path,
+        source_range="codex-scope-20260818-empty",
+        entries=entries_from_records([]),
+    )
+
+    assert result.entry_count == 0
+    assert result.growth_page_count == 0
+    assert (settings.receipt_directory / "codex-conversation-ingest").is_dir()
+    status = json.loads(
+        (
+            tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-18/_input-status.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert status == {"input_state": "processed"}
+
+
+def test_allows_a_pending_day_to_become_processed_when_the_session_flushes(tmp_path: Path) -> None:
+    _settings(tmp_path)
+    pending = record_codex_knowledge_entries(
+        tmp_path,
+        source_range="codex-scope-20260818-pending",
+        day=date(2026, 8, 18),
+        entries=entries_from_records([]),
+        input_state="pending",
+    )
+    completed = record_codex_knowledge_entries(
+        tmp_path,
+        source_range="codex-scope-20260818-completed",
+        day=date(2026, 8, 18),
+        entries=entries_from_records(
+            [
+                {
+                    "day": "2026-08-18",
+                    "kind": "활동",
+                    "title": "저장된 대화를 처리했다",
+                    "summary": "열려 있던 대화가 저장된 뒤 하루 기록으로 처리했다.",
+                }
+            ]
+        ),
+        input_state="processed",
+    )
+
+    assert pending.input_state == "pending"
+    assert completed.input_state == "processed"
+    status = json.loads(
+        (
+            tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-18/_input-status.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert status == {"input_state": "processed"}
 
 
 def test_can_repair_only_a_previously_empty_daily_digest(tmp_path: Path) -> None:
@@ -139,6 +212,63 @@ def test_can_repair_only_a_previously_empty_daily_digest(tmp_path: Path) -> None
     assert "성장 Wiki 승격 경로를 만든다" in digest.read_text(encoding="utf-8")
 
 
+def test_projects_daily_activity_and_explicit_person_facts_without_identity_link(
+    tmp_path: Path,
+) -> None:
+    _settings(tmp_path)
+    (tmp_path / "inbox/daily").mkdir(parents=True)
+    (tmp_path / "inbox/daily/2026-08-19.md").write_text("# 일일 기록\n", encoding="utf-8")
+    entries = entries_from_records(
+        [
+            {
+                "day": "2026-08-19",
+                "kind": "활동",
+                "title": "면접 준비를 도왔다",
+                "summary": "사용자가 확인한 일상 활동으로, 면접 준비를 함께 도운 사실만 남긴다.",
+                "people": [
+                    {
+                        "display_name": "민정",
+                        "explicit_facts": ["면접 준비를 함께 도왔다."],
+                        "next_action": "후속 일정이 생기면 확인한다.",
+                    }
+                ],
+            },
+            {
+                "day": "2026-08-19",
+                "kind": "일정",
+                "title": "면접 일정 확인 필요",
+                "summary": "시각과 목적이 모두 확인되면 별도 일정 반영 경로에서 처리한다.",
+            },
+        ]
+    )
+
+    record_codex_knowledge_entries(
+        tmp_path,
+        source_range="codex-scope-20260819-001",
+        entries=entries,
+    )
+    digest = record_daily_digest_from_codex_ledger(tmp_path, day=date(2026, 8, 19))
+
+    rendered = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
+    candidates = list((tmp_path / "brain/review/codex").glob("*.md"))
+    assert "하루의 활동" in rendered
+    assert "일정·할 일" in rendered
+    assert "관련 인물: 민정" in rendered
+    person_candidate = next(
+        candidate
+        for candidate in candidates
+        if "같은 이름의 기존 인물과 자동으로 연결하지 않는다."
+        in candidate.read_text(encoding="utf-8")
+    )
+    schedule_candidate = next(
+        candidate
+        for candidate in candidates
+        if "일정 검토" in candidate.read_text(encoding="utf-8")
+    )
+    assert "people:" not in person_candidate.read_text(encoding="utf-8")
+    assert "Things, Calendar, 인물 카드" in schedule_candidate.read_text(encoding="utf-8")
+
+
 def _settings(vault: Path):
     write_policy(vault)
     policy = vault / "config/second-brain-orchestrator.yaml"
@@ -156,8 +286,10 @@ def _settings(vault: Path):
     cadence: four-hourly
     inputs: [codex-response-items]
     output:
-      [growth-wiki, daily-knowledge-ledger, decision-candidate,
-       person-memory-review-candidate]
+      [growth-wiki, daily-history-ledger, calendar-document-context,
+       schedule-action-review-candidate, person-memory-review-candidate,
+       career-evidence-review-candidate, creative-link-review-candidate,
+       source-intake-review-candidate]
     checkpoint_key: codex-conversation-ingest
     required_signals: [message-range, privacy-classification]
     prohibited:

@@ -199,8 +199,7 @@ class PersonService:
         if not self._users_root.exists():
             return ()
         return tuple(
-            _read_card(path, self._vault)
-            for path in sorted(self._users_root.glob("*/README.md"))
+            _read_card(path, self._vault) for path in sorted(self._users_root.glob("*/README.md"))
         )
 
     def default_owner_reference(self) -> CalendarPersonReference | None:
@@ -235,9 +234,7 @@ class PersonService:
         for candidate in sorted(candidates, key=lambda item: (item[0], -(item[1] - item[0]))):
             start, end, _, _ = candidate
             if any(
-                start >= kept_start
-                and end <= kept_end
-                and (start, end) != (kept_start, kept_end)
+                start >= kept_start and end <= kept_end and (start, end) != (kept_start, kept_end)
                 for kept_start, kept_end, *_ in retained
             ):
                 continue
@@ -276,9 +273,7 @@ class PersonService:
                 _calendar_reference(card)
                 for card, _ in sorted(unique_cards.values(), key=lambda item: item[0].person_id)
             )
-            ambiguities.append(
-                CalendarIdentityAmbiguity(identifier_value, ambiguity_candidates)
-            )
+            ambiguities.append(CalendarIdentityAmbiguity(identifier_value, ambiguity_candidates))
         return CalendarIdentityResolution(
             matches=tuple(sorted(matches.values(), key=lambda item: item.reference.person_id)),
             ambiguities=tuple(ambiguities),
@@ -894,9 +889,7 @@ def _default_korean_name_identifiers(title: str) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _is_private_history_document(
-    *, relative: str, card: PersonCard, people: list[str]
-) -> bool:
+def _is_private_history_document(*, relative: str, card: PersonCard, people: list[str]) -> bool:
     """Keep private histories focused on time records and deliberate person links."""
 
     if relative.startswith("inbox/private-person-history/"):

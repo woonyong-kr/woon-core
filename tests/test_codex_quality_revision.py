@@ -133,9 +133,7 @@ def test_collect_proposals_rejects_duplicate_page_across_retry_runs(tmp_path, mo
 
     # The loader must reject duplicate page IDs before it can promote either run.
     with pytest.raises(WoonError, match="proposal is duplicated"):
-        _collect_proposal_records(
-            (candidate,), tuple(paths), tmp_path / "plan.json", "reviews"
-        )
+        _collect_proposal_records((candidate,), tuple(paths), tmp_path / "plan.json", "reviews")
 
 
 def test_collect_proposals_keeps_first_valid_duplicate_when_requested(

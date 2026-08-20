@@ -159,9 +159,7 @@ def test_research_intake_rejects_unresolvable_notebooklm_source_ref(tmp_path: Pa
     )
 
     with pytest.raises(WoonError, match="valid doi: or arxiv: IDs"):
-        create_research_intake_plan(
-            purpose="출처 식별자를 검토한다.", notebooklm_manifest=manifest
-        )
+        create_research_intake_plan(purpose="출처 식별자를 검토한다.", notebooklm_manifest=manifest)
 
 
 def test_research_intake_rejects_notebooklm_ref_missing_from_selected_zotero_export(

@@ -58,6 +58,10 @@ class CalendarPort(Protocol):
 
     def verify_cancelled(self, event_id: str) -> None: ...
 
+    def update_category(self, event_id: str, category_id: str) -> None: ...
+
+    def verify_category(self, event_id: str, category_id: str) -> None: ...
+
 
 class ScheduleBridge:
     """Apply one authorized appointment without duplicate Apple Calendar writes."""
@@ -70,6 +74,19 @@ class ScheduleBridge:
     @property
     def receipts(self) -> dict[str, ScheduleReceipt]:
         return dict(self._receipts)
+
+    def calendar_event_id_for(self, idempotency_key: str) -> str:
+        """Return the EventKit ID only for a receipt-proven Woon appointment."""
+
+        if self._state_path is None:
+            calendar_id = self._stable_ids.get(idempotency_key)
+        else:
+            with exclusive_file_lock(self._state_path.with_suffix(".lock")):
+                self._receipts, self._stable_ids, self._pending = _load_state(self._state_path)
+                calendar_id = self._stable_ids.get(idempotency_key)
+        if not calendar_id:
+            raise WoonError("calendar category update requires a receipt-proven Woon event")
+        return calendar_id
 
     def apply(self, candidate: ScheduleCandidate) -> ScheduleReceipt:
         """Apply one candidate after validation and write a replay-safe receipt."""
@@ -159,6 +176,8 @@ class FakeCalendarPort:
         self.permission_granted = permission_granted
         self.write_count = 0
         self.cancelled: set[str] = set()
+        self.categories: dict[str, str] = {}
+        self.category_update_count = 0
 
     def ensure_permission(self) -> None:
         if not self.permission_granted:
@@ -176,6 +195,14 @@ class FakeCalendarPort:
 
     def verify_cancelled(self, event_id: str) -> None:
         return None
+
+    def update_category(self, event_id: str, category_id: str) -> None:
+        self.category_update_count += 1
+        self.categories[event_id] = category_id
+
+    def verify_category(self, event_id: str, category_id: str) -> None:
+        if self.categories.get(event_id) != category_id:
+            raise WoonError("calendar category verification mismatch")
 
 
 def _load_state(

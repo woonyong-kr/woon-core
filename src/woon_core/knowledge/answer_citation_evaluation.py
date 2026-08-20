@@ -92,9 +92,7 @@ def _load_cases(path: Path) -> dict[str, dict[str, object]]:
             raise WoonError(f"evaluation case {identifier!r} relevant must be a string list")
         expect_empty = bool(raw_case.get("expect_empty", False))
         if expect_empty == bool(relevant):
-            raise WoonError(
-                f"evaluation case {identifier!r} must define relevant or expect_empty"
-            )
+            raise WoonError(f"evaluation case {identifier!r} must define relevant or expect_empty")
         cases[identifier] = {
             "relevant": {path.strip() for path in relevant},
             "expect_empty": expect_empty,
@@ -184,8 +182,10 @@ def _evaluate_case(
             errors.append(f"claim {claim_id} must have text")
         elif not _normalized_contains(text, claim_text):
             errors.append(f"claim {claim_id} text must appear in answer")
-        if not isinstance(citation_ids, list) or not citation_ids or any(
-            not isinstance(item, str) or not item.strip() for item in citation_ids
+        if (
+            not isinstance(citation_ids, list)
+            or not citation_ids
+            or any(not isinstance(item, str) or not item.strip() for item in citation_ids)
         ):
             errors.append(f"claim {claim_id} must reference one or more citation IDs")
         else:
@@ -260,9 +260,7 @@ def _citation_map(
         if not _normalized_contains(excerpt.text, quote):
             errors.append(f"citation {citation_id} quote is not in the current excerpt")
         if excerpt.relative_path not in relevant_paths:
-            errors.append(
-                f"citation {citation_id} is outside this case's approved evidence path"
-            )
+            errors.append(f"citation {citation_id} is outside this case's approved evidence path")
         resolved[citation_id] = excerpt
     return resolved
 

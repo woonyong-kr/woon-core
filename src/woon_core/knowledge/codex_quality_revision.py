@@ -57,9 +57,7 @@ _DISABLED_TOOLS = (
     "unified_exec",
     "workspace_dependencies",
 )
-_FENCED_BLOCK = re.compile(
-    r"(?ms)^(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^(?P=fence)[ \t]*$"
-)
+_FENCED_BLOCK = re.compile(r"(?ms)^(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^(?P=fence)[ \t]*$")
 _WIKILINK = re.compile(r"\[\[[^\]\n]+]]")
 _MARKDOWN_LINK = re.compile(r"!?\[[^\]\n]*]\(([^)\n]+)\)")
 _INLINE_CODE = re.compile(r"(?<!`)`[^`\n]+`(?!`)")
@@ -304,9 +302,7 @@ def _revision_candidates(
             criterion_evidence = review.get("criterion_evidence")
             if not isinstance(rubric, dict) or not isinstance(criterion_evidence, dict):
                 raise WoonError(f"Codex quality review is malformed: {page_id}")
-            failures = tuple(
-                key for key, value in sorted(rubric.items()) if value == "fail"
-            )
+            failures = tuple(key for key, value in sorted(rubric.items()) if value == "fail")
             if not failures:
                 raise WoonError(f"Codex quality review has no failed criterion: {page_id}")
             failure_reasons = tuple(
@@ -468,9 +464,7 @@ def _propose_revision(
         )
     except WoonError as error:
         try:
-            return _propose_with_learning_scaffold(
-                candidate, binary, model, timeout_seconds, error
-            )
+            return _propose_with_learning_scaffold(candidate, binary, model, timeout_seconds, error)
         except WoonError as scaffold_error:
             raise WoonError(
                 "Codex quality revision could not produce a valid proposal after "

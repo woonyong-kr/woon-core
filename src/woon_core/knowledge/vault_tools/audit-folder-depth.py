@@ -38,7 +38,13 @@ PREFIX_MAX_PARTS = {
     # These are generated or purpose-owned collections rather than ad-hoc nesting.
     ("inbox", "calendar", "events"): 4,
     ("inbox", "tasks", "routines"): 4,
+    # A goal is the explicit stop condition for a routine, so it is a
+    # canonical task source rather than accidental nesting.
+    ("inbox", "tasks", "goals"): 4,
     ("maps", "context-graph"): 4,
+    # Interview maps deliberately keep spoken questions below one graph root.
+    # Other Context Graph documents remain limited to the shallower level.
+    ("maps", "context-graph", "ai-engineer-cto-deep", "questions"): 5,
     ("wiki", "canonical"): 4,
     # Private raw originals stay below their domain folder so they are never
     # confused with searchable or publishable Wiki material.
@@ -67,10 +73,13 @@ def main() -> int:
         if not in_scope(path):
             continue
         rel = path.relative_to(ROOT)
+        # A more specific purpose-owned prefix must win over its parent.
         maximum = next(
             (
                 value
-                for prefix, value in PREFIX_MAX_PARTS.items()
+                for prefix, value in sorted(
+                    PREFIX_MAX_PARTS.items(), key=lambda item: len(item[0]), reverse=True
+                )
                 if rel.parts[: len(prefix)] == prefix
             ),
             MAX_PARTS,

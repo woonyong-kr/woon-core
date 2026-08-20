@@ -164,6 +164,7 @@ source: apple-calendar-readonly
 calendar: Woon 일정
 Date: 2026-08-18
 Category: 기타
+Category ID: other
 Start Date: 2026-08-18T13:00:00+09:00
 End Date: 2026-08-18T14:00:00+09:00
 All Day: false
@@ -199,6 +200,7 @@ cssclasses: woon-simple-calendar-dashboard
 source: inbox/calendar/events
 date_field: Date
 category_field: Category
+category_id_field: Category ID
 ```
 """,
                 encoding="utf-8",

@@ -105,15 +105,11 @@ def _criterion_evidence() -> dict[str, dict[str, str]]:
         },
         "natural_korean": {
             "anchor": "문장은 연결 표현으로 앞뒤 관계를 드러낸다.",
-            "reason": (
-                "“문장은 연결 표현으로 앞뒤 관계를 드러낸다.”는 자연스러운 문체를 보인다."
-            ),
+            "reason": ("“문장은 연결 표현으로 앞뒤 관계를 드러낸다.”는 자연스러운 문체를 보인다."),
         },
         "evidence_boundary": {
             "anchor": "사실과 해석의 근거를 구분한다.",
-            "reason": (
-                "“사실과 해석의 근거를 구분한다.”는 확인 가능한 근거 경계를 보인다."
-            ),
+            "reason": ("“사실과 해석의 근거를 구분한다.”는 확인 가능한 근거 경계를 보인다."),
         },
         "revisitability": {
             "anchor": "찾기",

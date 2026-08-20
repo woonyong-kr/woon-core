@@ -62,9 +62,7 @@ def _plan(path: Path, relative_path: str = "wiki/os/first.md") -> dict[str, obje
                         "batch_id": "quality-001",
                         "input_file": "quality-001.input.json",
                         "result_file": "quality-001.result.json",
-                        "targets": [
-                            {key: target[key] for key in ("page_id", "output_sha256")}
-                        ],
+                        "targets": [{key: target[key] for key in ("page_id", "output_sha256")}],
                     }
                 ],
             }
@@ -85,11 +83,7 @@ def _compact(targets: dict[str, object], states: str = "pppppp") -> dict[str, ob
         indexes: list[int] = []
         for criterion in codex_quality_review.CRITERIA:
             index = next(
-                (
-                    value
-                    for value, anchor in enumerate(candidates[criterion])
-                    if anchor not in used
-                ),
+                (value for value, anchor in enumerate(candidates[criterion]) if anchor not in used),
                 0,
             )
             used.add(candidates[criterion][index])
