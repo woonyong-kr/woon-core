@@ -200,7 +200,15 @@ def docs_under(readme: Path, limit: int) -> list[Path]:
         if public_readme and not is_public(path):
             continue
         docs.append(path)
-    docs.sort(key=lambda p: (note_date(p), p.relative_to(ROOT).as_posix()), reverse=True)
+    if root.relative_to(ROOT).as_posix() == "inbox/daily":
+        # 일일 기록은 생성·커밋 시각이 아니라 파일명 날짜가 정본이다. 과거 기록을
+        # 다시 보강해도 목록의 시간 순서가 뒤섞이지 않게 한다.
+        docs.sort(key=lambda path: (path.stem, path.relative_to(ROOT).as_posix()), reverse=True)
+    else:
+        docs.sort(
+            key=lambda path: (note_date(path), path.relative_to(ROOT).as_posix()),
+            reverse=True,
+        )
     return docs[:limit]
 
 
@@ -208,16 +216,15 @@ def block_for(readme: Path) -> str:
     docs = docs_under(readme, LIMIT)
     lines = [
         START,
-        "## 최근 추가 문서",
-        "",
-        f"최근 추가된 문서 {LIMIT}개.",
+        "## 최근 문서",
         "",
     ]
     if not docs:
         lines.append("- 아직 하위 문서가 없습니다.")
     for path in docs:
-        when = note_date(path).strftime("%Y-%m-%d")
-        lines.append(f"- {wikilink(path)} — {when} · {doc_type(path)}")
+        # 이 목록은 탐색용이다. 날짜·유형은 문서 안의 metadata에서 확인할 수
+        # 있으므로, 제목 옆에 다시 노출하지 않는다.
+        lines.append(f"- {wikilink(path)}")
     lines.extend(["", END])
     return "\n".join(lines)
 
