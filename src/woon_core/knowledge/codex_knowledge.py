@@ -832,6 +832,17 @@ def _growth_path(vault: Path, entry: CodexKnowledgeEntry) -> Path:
 
 
 def _growth_relative_path(title: str) -> str:
+    return growth_relative_path(title)
+
+
+def growth_relative_path(title: str) -> str:
+    """Return the canonical local path for a generated Growth Wiki page.
+
+    Daily-history rendering uses this helper to link a learning/decision back
+    to the already-created page.  It does not create a page or accept an
+    arbitrary path from a conversation record.
+    """
+
     stem = _FILE_STEM_RE.sub("-", title.strip()).strip("-_").lower()
     if not stem:
         raise WoonError("Codex knowledge title cannot form a growth Wiki filename")

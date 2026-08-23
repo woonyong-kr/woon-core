@@ -56,7 +56,7 @@ _SECTION_ORDER = (
     ("성장·학습", {"학습", "개념", "결정", "질문"}),
     ("커리어·창작·자료", {"커리어", "창작", "자료"}),
 )
-_DIGEST_RENDER_REVISION = "4"
+_DIGEST_RENDER_REVISION = "5"
 _VISIBLE_LIMIT = 280
 _TITLE_LIMIT = 80
 _SENSITIVE_RE = re.compile(
@@ -227,9 +227,30 @@ def record_daily_digest_from_codex_ledger(vault: Path, *, day: date) -> CodexDai
     is classified exactly once.
     """
 
-    from woon_core.knowledge.codex_knowledge import load_daily_entries, load_daily_input_status
+    from woon_core.knowledge.codex_knowledge import (
+        growth_relative_path,
+        load_daily_entries,
+        load_daily_input_status,
+    )
 
     records = list(load_daily_entries(vault, day=day))
+    # Learning/decision records already have one canonical Growth Wiki page.
+    # Derive its link locally only when that exact generated page exists.  A
+    # same-day title, file timestamp, or semantic similarity is never enough
+    # to attach an arbitrary note to the daily history.
+    for record in records:
+        kind = record.get("kind")
+        title = record.get("title")
+        if kind not in {"학습", "개념", "결정"} or not isinstance(title, str):
+            continue
+        relative_path = growth_relative_path(title)
+        if not (vault.resolve() / relative_path).is_file():
+            continue
+        related = record.get("related_documents", [])
+        if not isinstance(related, list) or not all(isinstance(item, str) for item in related):
+            raise WoonError("Codex knowledge ledger related_documents is unreadable")
+        if relative_path not in related:
+            record["related_documents"] = [*related, relative_path]
     input_state = load_daily_input_status(vault, day=day)
     if input_state is None:
         input_state = "processed" if records else "unavailable"

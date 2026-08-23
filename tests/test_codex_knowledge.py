@@ -71,6 +71,10 @@ def test_projects_one_safe_batch_to_growth_wiki_and_daily_ledger(tmp_path: Path)
     rendered = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
     assert "대화 지식화는 한 번 분류하고 두 번 사용한다" in rendered
     assert "대화 후보의 승격 기준을 어떻게 좁힐까" in rendered
+    assert (
+        "[[../../brain/wiki/대화-지식화는-한-번-분류하고-두-번-사용한다|"
+        "대화 지식화는 한 번 분류하고 두 번 사용한다]]"
+    ) in rendered
     records = [
         json.loads(path.read_text(encoding="utf-8"))
         for path in (tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-18").glob("*.json")
