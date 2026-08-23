@@ -33,6 +33,7 @@ from woon_core.knowledge.codex_daily_digest import (
     entries_from_records as daily_digest_entries_from_records,
 )
 from woon_core.knowledge.codex_daily_digest import (
+    migrate_legacy_daily_digests,
     record_codex_daily_digest,
     record_daily_digest_from_codex_ledger,
 )
@@ -200,12 +201,12 @@ Usage:
     [--automation-root <path>]
   woon knowledge record-mail-schedule-candidates --run-token <mail-kst-YYYYMMDD-HHMM>
     [--candidates-json <json-array>] [--vault <path>]
-  woon knowledge record-codex-daily-digest --day <YYYY-MM-DD> --entries-json <json-array>
-    [--repair-missing-digest] [--vault <path>]
+  woon knowledge record-codex-daily-record --day <YYYY-MM-DD> --entries-json <json-array>
+    [--vault <path>]
   woon knowledge record-codex-knowledge-entries --source-range <safe-token> --day <YYYY-MM-DD>
     --entries-json <json-array> [--vault <path>]
-  woon knowledge materialize-codex-daily-digest --day <YYYY-MM-DD>
-    [--replace-empty-digest] [--vault <path>]
+  woon knowledge materialize-codex-daily-record --day <YYYY-MM-DD> [--vault <path>]
+  woon knowledge migrate-legacy-daily-digests [--vault <path>]
   woon knowledge schedule-apply --candidate <local-JSON>
     [--vault <path>]
   woon version
@@ -580,14 +581,17 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "record-mail-schedule-candidates":
         _run_mail_schedule_candidate_recording(raw_options, output)
         return
-    if command == "record-codex-daily-digest":
+    if command == "record-codex-daily-record":
         _run_codex_daily_digest_recording(raw_options, output)
         return
     if command == "record-codex-knowledge-entries":
         _run_codex_knowledge_entry_recording(raw_options, output)
         return
-    if command == "materialize-codex-daily-digest":
+    if command == "materialize-codex-daily-record":
         _run_codex_daily_digest_materialization(raw_options, output)
+        return
+    if command == "migrate-legacy-daily-digests":
+        _run_legacy_daily_digest_migration(raw_options, output)
         return
     if command == "schedule-apply":
         _run_schedule_apply(raw_options, output)
@@ -757,17 +761,11 @@ def _governance_preflight_evidence(
     policy_document: Path,
     automation_root: Path,
     verified: tuple[str, ...],
-    *,
-    repair_missing_digest_for: date | None = None,
 ) -> tuple[str, str]:
     """Return evidence digests after bounded, non-mutating governance checks.
 
-    A missing daily digest is a visible projection defect, not a reason to
-    permit unrelated automation.  The one narrow exception repairs that exact
-    projection: it may establish the current governance receipt only when the
-    health audit reports *only* missing digest fragments and the requested day
-    is one of them.  The caller immediately records that fragment through its
-    own receipt-first lane.
+    Any vault-health failure blocks the receipt. Legacy generated daily
+    fragments are migrated explicitly before automation is allowed to run.
     """
 
     audit_script = Path(__file__).parent / "knowledge" / "vault_tools" / "audit-vault-health.py"
@@ -783,10 +781,7 @@ def _governance_preflight_evidence(
         )
     except OSError as error:
         raise WoonError("second-brain governance health audit could not start") from error
-    if audit.returncode != 0 and (
-        repair_missing_digest_for is None
-        or not _is_only_missing_daily_digest_repair(audit.stdout, repair_missing_digest_for)
-    ):
+    if audit.returncode != 0:
         raise WoonError("second-brain governance health audit failed")
 
     workspace = vault.parent
@@ -821,27 +816,7 @@ def _governance_preflight_evidence(
     output = hashlib.sha256()
     output.update(audit.stdout.encode("utf-8"))
     output.update("\n".join(verified).encode("utf-8"))
-    if repair_missing_digest_for is not None:
-        output.update(f"daily-digest-repair:{repair_missing_digest_for.isoformat()}".encode())
     return digest.hexdigest(), output.hexdigest()
-
-
-def _is_only_missing_daily_digest_repair(audit_stdout: str, day: date) -> bool:
-    """Accept only a repairable missing fragment for the requested KST day."""
-
-    try:
-        payload = json.loads(audit_stdout)
-    except json.JSONDecodeError:
-        return False
-    issues = payload.get("issues")
-    if not isinstance(issues, dict):
-        return False
-    nonempty = {name: values for name, values in issues.items() if values}
-    missing = nonempty.get("daily_digest_projection_violations")
-    if set(nonempty) != {"daily_digest_projection_violations"} or not isinstance(missing, list):
-        return False
-    target = f"inbox/daily-digests/{day.isoformat()}.md"
-    return any(isinstance(issue, str) and target in issue for issue in missing)
 
 
 _VAULT_TOOL_SCRIPTS = {
@@ -1043,20 +1018,13 @@ def _run_mail_schedule_candidate_recording(arguments: list[str], output: TextIO)
 
 
 def _run_codex_daily_digest_recording(arguments: list[str], output: TextIO) -> None:
-    """Record one transcript-free daily Codex digest through the owned service."""
+    """Record one transcript-free block in the canonical daily record."""
 
     values: dict[str, str] = {}
-    repair_missing_digest = False
     raw_options: list[str] = []
     index = 0
     while index < len(arguments):
         option = arguments[index]
-        if option == "--repair-missing-digest":
-            if repair_missing_digest:
-                raise WoonError("--repair-missing-digest may be used once")
-            repair_missing_digest = True
-            index += 1
-            continue
         if option not in {"--day", "--entries-json"}:
             raw_options.append(option)
             index += 1
@@ -1067,7 +1035,7 @@ def _run_codex_daily_digest_recording(arguments: list[str], output: TextIO) -> N
         index += 2
     vault, options = _parse_knowledge_options(raw_options)
     if options or set(values) != {"--day", "--entries-json"}:
-        raise WoonError("knowledge record-codex-daily-digest requires --day and --entries-json")
+        raise WoonError("knowledge record-codex-daily-record requires --day and --entries-json")
     try:
         target_day = date.fromisoformat(values["--day"])
     except ValueError as error:
@@ -1078,23 +1046,8 @@ def _run_codex_daily_digest_recording(arguments: list[str], output: TextIO) -> N
         raise WoonError("Codex daily digest entries must be a JSON array") from error
     if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
         raise WoonError("Codex daily digest entries must be a JSON array of objects")
-    resolved_vault = vault or resolve_knowledge_vault()
-    if repair_missing_digest:
-        settings = load_orchestrator_settings(resolved_vault)
-        automation_root = Path.home() / ".codex" / "automations"
-        verified = verify_codex_automation_registry(settings, automation_root)
-        input_sha256, output_sha256 = _governance_preflight_evidence(
-            settings.vault,
-            settings.policy_document,
-            automation_root,
-            verified,
-            repair_missing_digest_for=target_day,
-        )
-        record_governance_preflight(
-            settings, input_sha256=input_sha256, output_sha256=output_sha256
-        )
     result = record_codex_daily_digest(
-        resolved_vault,
+        vault or resolve_knowledge_vault(),
         day=target_day,
         entries=daily_digest_entries_from_records(parsed),
     )
@@ -1149,20 +1102,13 @@ def _run_codex_knowledge_entry_recording(arguments: list[str], output: TextIO) -
 
 
 def _run_codex_daily_digest_materialization(arguments: list[str], output: TextIO) -> None:
-    """Materialize the daily digest from the local minimized entry ledger."""
+    """Materialize one daily record block from the local minimized ledger."""
 
     values: dict[str, str] = {}
-    replace_empty_digest = False
     raw_options: list[str] = []
     index = 0
     while index < len(arguments):
         option = arguments[index]
-        if option == "--replace-empty-digest":
-            if replace_empty_digest:
-                raise WoonError("--replace-empty-digest may be used once")
-            replace_empty_digest = True
-            index += 1
-            continue
         if option != "--day":
             raw_options.append(option)
             index += 1
@@ -1173,7 +1119,7 @@ def _run_codex_daily_digest_materialization(arguments: list[str], output: TextIO
         index += 2
     vault, options = _parse_knowledge_options(raw_options)
     if options or set(values) != {"--day"}:
-        raise WoonError("knowledge materialize-codex-daily-digest requires --day")
+        raise WoonError("knowledge materialize-codex-daily-record requires --day")
     try:
         target_day = date.fromisoformat(values["--day"])
     except ValueError as error:
@@ -1181,8 +1127,17 @@ def _run_codex_daily_digest_materialization(arguments: list[str], output: TextIO
     result = record_daily_digest_from_codex_ledger(
         vault or resolve_knowledge_vault(),
         day=target_day,
-        replace_empty_digest=replace_empty_digest,
     )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_legacy_daily_digest_migration(arguments: list[str], output: TextIO) -> None:
+    """Migrate generated digest files into their sole daily-record owner."""
+
+    vault, options = _parse_knowledge_options(arguments)
+    if options:
+        raise WoonError("knowledge migrate-legacy-daily-digests takes no positional arguments")
+    result = migrate_legacy_daily_digests(vault or resolve_knowledge_vault())
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
 
 

@@ -1,10 +1,10 @@
-"""Privacy-bounded daily projections of opted-in Codex conversation summaries.
+"""Privacy-bounded Codex-conversation blocks for one canonical daily note.
 
 This module never reads a Codex transcript.  A scheduled Codex task provides
 only short Korean conclusions that were already selected from opted-in
-user/assistant messages.  The digest is a local-only fragment embedded by the
-daily note; raw chats, tool output, system text, and opaque locators never
-enter the visible Markdown.
+user/assistant messages.  The rendered block belongs directly to the daily
+note, so one date has one human-facing historical record.  Raw chats, tool
+output, system text, and opaque locators never enter the visible Markdown.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
@@ -55,7 +56,7 @@ _SECTION_ORDER = (
     ("성장·학습", {"학습", "개념", "결정", "질문"}),
     ("커리어·창작·자료", {"커리어", "창작", "자료"}),
 )
-_DIGEST_RENDER_REVISION = "2"
+_DIGEST_RENDER_REVISION = "4"
 _VISIBLE_LIMIT = 280
 _TITLE_LIMIT = 80
 _SENSITIVE_RE = re.compile(
@@ -88,16 +89,28 @@ class CodexDailyDigestResult:
     relative_path: str
 
 
+@dataclass(frozen=True, slots=True)
+class LegacyDailyDigestMigrationResult:
+    """A one-time, reversible-by-Git migration of generated daily fragments."""
+
+    migrated_days: tuple[str, ...]
+
+
 def record_codex_daily_digest(
     vault: Path,
     *,
     day: date,
     entries: tuple[CodexDailyDigestEntry, ...],
     input_state: str = "processed",
-    replace_empty_digest: bool = False,
     replace_generated_digest: bool = False,
 ) -> CodexDailyDigestResult:
-    """Write exactly one digest fragment for a KST day through a receipt-first lane."""
+    """Write the owned conversation block into one KST daily record.
+
+    The daily record is the only user-facing history for a date.  A prior
+    ``DailyDigest`` file is deliberately not read or replaced here: one-time
+    migration owns legacy-file removal, while normal automation owns only the
+    marker block in ``inbox/daily``.
+    """
 
     settings = load_orchestrator_settings(vault)
     contract = next(
@@ -110,9 +123,8 @@ def record_codex_daily_digest(
     )
     if contract is None or contract.mode != "materialize" or contract.status != "enabled":
         raise WoonError("daily record materialization automation is not enabled")
-    required_paths = {"inbox/daily", "inbox/daily-digests"}
-    if not required_paths.issubset(contract.owned_paths):
-        raise WoonError("daily record materialization must own the daily note and digest")
+    if set(contract.owned_paths) != {"inbox/daily", "inbox/calendar", "brain/review/activity"}:
+        raise WoonError("daily record materialization has an unsafe write boundary")
     _validate_entries(settings.vault, entries, input_state=input_state)
     payload = {
         "render_revision": _DIGEST_RENDER_REVISION,
@@ -134,23 +146,20 @@ def record_codex_daily_digest(
         expected_owned_revision=snapshot_owned_paths(settings.vault, contract.owned_paths),
         cursor_after=token,
     )
-    destination = settings.vault / "inbox" / "daily-digests" / f"{day.isoformat()}.md"
-    content = _render_digest(settings.vault, day, entries, input_state=input_state)
+    destination = settings.vault / "inbox" / "daily" / f"{day.isoformat()}.md"
+    content = _render_daily_block(settings.vault, entries, input_state=input_state)
 
     def produce() -> RunOutcome:
         _ensure_daily_note(settings.vault, day)
-        existing = destination.read_text(encoding="utf-8") if destination.exists() else None
-        if existing is not None and existing != content:
-            can_replace = (
-                (replace_empty_digest and _is_empty_digest(existing))
-                or (replace_generated_digest and _is_generated_digest(existing))
-                or (replace_generated_digest and _is_legacy_generated_digest(existing, day=day))
-            )
-            if not can_replace:
-                raise WoonError("Codex daily digest already exists with different content")
-            atomic_write(destination, content.encode("utf-8"), mode=0o600)
-        if not destination.exists():
-            atomic_write(destination, content.encode("utf-8"), mode=0o600)
+        existing = destination.read_text(encoding="utf-8")
+        updated = _replace_daily_block(
+            existing,
+            block=content,
+            day=day,
+            allow_legacy_embed=replace_generated_digest,
+        )
+        if updated != existing:
+            atomic_write(destination, updated.encode("utf-8"), mode=0o600)
         return RunOutcome(
             candidate_ids=tuple(_entry_id(day, entry) for entry in entries),
             output_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
@@ -210,9 +219,7 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexDailyDi
     return tuple(entries)
 
 
-def record_daily_digest_from_codex_ledger(
-    vault: Path, *, day: date, replace_empty_digest: bool = False
-) -> CodexDailyDigestResult:
+def record_daily_digest_from_codex_ledger(vault: Path, *, day: date) -> CodexDailyDigestResult:
     """Materialize the daily view from already-sanitized conversation entries.
 
     The daily lane does not reread a Codex transcript.  It consumes the local
@@ -231,8 +238,54 @@ def record_daily_digest_from_codex_ledger(
         day=day,
         entries=entries_from_records(records),
         input_state=input_state,
-        replace_empty_digest=replace_empty_digest,
         replace_generated_digest=True,
+    )
+
+
+def migrate_legacy_daily_digests(vault: Path) -> LegacyDailyDigestMigrationResult:
+    """Move only generated ``DailyDigest`` files into their daily records.
+
+    Validation completes for every candidate before the first write.  A file
+    with human-authored or malformed content aborts the migration rather than
+    being silently removed.  The caller can recover the exact files through
+    Git because this migration operates only on Vault-tracked Markdown.
+    """
+
+    root = vault.expanduser().resolve()
+    legacy_root = root / "inbox" / "daily-digests"
+    if not legacy_root.exists():
+        return LegacyDailyDigestMigrationResult(migrated_days=())
+    if not legacy_root.is_dir() or legacy_root.is_symlink():
+        raise WoonError("legacy daily digest root is unsafe")
+
+    plans: list[tuple[date, Path, Path, str]] = []
+    for legacy in sorted(legacy_root.glob("????-??-??.md")):
+        if not legacy.is_file() or legacy.is_symlink():
+            raise WoonError("legacy daily digest path is unsafe")
+        try:
+            day = date.fromisoformat(legacy.stem)
+        except ValueError as error:
+            raise WoonError("legacy daily digest filename is invalid") from error
+        block = _legacy_digest_block(legacy.read_text(encoding="utf-8"), day=day)
+        daily = root / "inbox" / "daily" / f"{day.isoformat()}.md"
+        if not daily.is_file() or daily.is_symlink():
+            raise WoonError("legacy daily digest has no safe daily record target")
+        updated = _replace_daily_block(
+            daily.read_text(encoding="utf-8"),
+            block=block,
+            day=day,
+            allow_legacy_embed=True,
+        )
+        plans.append((day, legacy, daily, updated))
+
+    for _, _, daily, updated in plans:
+        atomic_write(daily, updated.encode("utf-8"), mode=0o600)
+    for _, legacy, _, _ in plans:
+        legacy.unlink()
+    with suppress(OSError):
+        legacy_root.rmdir()
+    return LegacyDailyDigestMigrationResult(
+        migrated_days=tuple(day.isoformat() for day, _, _, _ in plans)
     )
 
 
@@ -292,35 +345,28 @@ def _entry_id(day: date, entry: CodexDailyDigestEntry) -> str:
     return f"digest-{hashlib.sha256(stable.encode('utf-8')).hexdigest()[:24]}"
 
 
-def _render_digest(
+def _render_daily_block(
     vault: Path,
-    day: date,
     entries: tuple[CodexDailyDigestEntry, ...],
     *,
     input_state: str,
 ) -> str:
     lines = [
-        "---",
-        "type: DailyDigest",
-        f'title: "{day.isoformat()} Codex 하루 정리"',
-        "publish: false",
-        "access: local-only",
-        "status: Active",
-        "generated_by: daily-record-materialization",
-        f"date: {day.isoformat()}",
-        "record_owner: choi-woonyoung",
-        "---",
-        "",
-        f"# {day.isoformat()} Codex 하루 정리",
-        "",
         "<!-- woon-codex-digest:start -->",
         "",
         "## 대화에서 남긴 것",
-        "",
     ]
     if not entries:
-        lines.extend([f"- {_empty_message(input_state)}", "", "<!-- woon-codex-digest:end -->", ""])
+        lines.extend(
+            [
+                f"- {_empty_message(input_state)}",
+                "",
+                "<!-- woon-codex-digest:end -->",
+                "",
+            ]
+        )
         return "\n".join(lines)
+    lines.append("")
     assigned: set[int] = set()
     for heading, kinds in _SECTION_ORDER:
         grouped = [entry for entry in entries if entry.kind in kinds]
@@ -344,48 +390,78 @@ def _render_digest(
     return "\n".join(lines)
 
 
-def _is_empty_digest(content: str) -> bool:
-    return content.endswith("- 이 날에는 보관 조건을 충족한 Codex 대화 요약이 없습니다.\n")
+def _replace_daily_block(
+    note: str,
+    *,
+    block: str,
+    day: date,
+    allow_legacy_embed: bool,
+) -> str:
+    """Replace only the Core-owned block without touching personal writing."""
+
+    start = "<!-- woon-codex-digest:start -->"
+    end = "<!-- woon-codex-digest:end -->"
+    start_index = note.find(start)
+    end_index = note.find(end)
+    if start_index >= 0 or end_index >= 0:
+        if start_index < 0 or end_index < start_index or note.find(start, start_index + 1) >= 0:
+            raise WoonError("daily Codex block ownership marker is invalid")
+        tail = end_index + len(end)
+        if tail < len(note) and note[tail] == "\n":
+            tail += 1
+        return f"{note[:start_index]}{block}{note[tail:]}"
+
+    legacy_embed = f"## Codex 하루 정리\n\n![[../daily-digests/{day.isoformat()}]]\n"
+    if legacy_embed in note:
+        if not allow_legacy_embed:
+            raise WoonError("daily note still uses the retired Codex digest embed")
+        return note.replace(legacy_embed, block, 1)
+
+    anchor = "## 포착\n"
+    if anchor in note:
+        return note.replace(anchor, f"{block}\n{anchor}", 1)
+    separator = "" if note.endswith("\n\n") else "\n" if note.endswith("\n") else "\n\n"
+    return f"{note}{separator}{block}"
 
 
-def _is_generated_digest(content: str) -> bool:
-    return (
-        "generated_by: daily-record-materialization" in content
-        and "<!-- woon-codex-digest:start -->" in content
-        and "<!-- woon-codex-digest:end -->" in content
-    )
+def _legacy_digest_block(content: str, *, day: date) -> str:
+    """Convert the narrow retired generated shape into one owned block."""
 
-
-def _is_legacy_generated_digest(content: str, *, day: date) -> bool:
-    """Recognize the retired, marker-less daily digest shape conservatively.
-
-    Earlier Core versions created a fully generated ``DailyDigest`` page but
-    had no ownership marker.  Leaving it immutable makes late conversation
-    entries fail forever; replacing arbitrary human prose would be worse.  A
-    page is eligible only when its frontmatter and every body heading match
-    the narrow former projection shape.
-    """
-
-    prefix = (
+    required = (
         "---\n"
         "type: DailyDigest\n"
         f'title: "{day.isoformat()} Codex 하루 정리"\n'
         "publish: false\n"
         "access: local-only\n"
         "status: Active\n"
-        f"date: {day.isoformat()}\n"
-        "record_owner: choi-woonyoung\n"
-        "---\n\n"
-        f"# {day.isoformat()} Codex 하루 정리\n\n"
-        "## 대화에서 남긴 것\n\n"
     )
-    if not content.startswith(prefix):
-        return False
-    body = content[len(prefix) :]
-    if not body.endswith("\n"):
-        return False
-    allowed = re.compile(r"(?:- [^\n]+\n)+(?:\n## 연결 문서\n\n(?:- \[\[[^\n]+\]\]\n)+)?$")
-    return bool(allowed.fullmatch(body))
+    if not content.startswith(required) or f"date: {day.isoformat()}\n" not in content:
+        raise WoonError("legacy daily digest is not a generated Woon record")
+    marker_start = "<!-- woon-codex-digest:start -->"
+    marker_end = "<!-- woon-codex-digest:end -->"
+    start = content.find(marker_start)
+    end = content.find(marker_end)
+    if start >= 0 or end >= 0:
+        if start < 0 or end < start or content.find(marker_start, start + 1) >= 0:
+            raise WoonError("legacy daily digest ownership marker is invalid")
+        return content[start : end + len(marker_end)].strip() + "\n"
+
+    prefix = (
+        "---\n"
+        "type: DailyDigest\n"
+        f'title: "{day.isoformat()} Codex 하루 정리"\n'
+    )
+    frontmatter_end = content.find("\n---\n\n")
+    heading = f"# {day.isoformat()} Codex 하루 정리\n\n"
+    if frontmatter_end < 0 or not content.startswith(prefix):
+        raise WoonError("legacy daily digest frontmatter is invalid")
+    body_start = frontmatter_end + len("\n---\n\n")
+    if not content[body_start:].startswith(heading):
+        raise WoonError("legacy daily digest heading is invalid")
+    body = content[body_start + len(heading) :].strip()
+    if not body.startswith("## 대화에서 남긴 것\n"):
+        raise WoonError("legacy daily digest body is not generated")
+    return f"{marker_start}\n\n{body}\n\n{marker_end}\n"
 
 
 def _empty_message(input_state: str) -> str:

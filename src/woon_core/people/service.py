@@ -36,7 +36,6 @@ _FORBIDDEN_LINK_ROOTS = ("wiki/", "catalog/", "sources/private/", "projects/writ
 _PRIVATE_HISTORY_ROOTS = (
     "inbox/calendar/events/",
     "inbox/daily/",
-    "inbox/daily-digests/",
 )
 _PRIVATE_HISTORY_EXCLUDED_PATHS = frozenset(
     {
@@ -362,6 +361,9 @@ class PersonService:
         for path in _markdown_files(self._vault):
             relative = _relative(path, self._vault)
             if relative == card.relative_path or relative.startswith(_FORBIDDEN_LINK_ROOTS):
+                continue
+            if relative.startswith("inbox/daily-digests/"):
+                # A retired duplicate projection must never become person history.
                 continue
             text = path.read_text(encoding="utf-8")
             try:

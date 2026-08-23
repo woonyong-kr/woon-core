@@ -487,7 +487,7 @@ def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, .
 
 
 def _validate_daily_record_contract(contracts: tuple[AutomationContract, ...]) -> None:
-    """A daily digest must be able to materialize a missing daily shell."""
+    """A daily conversation block belongs to the canonical daily note."""
 
     matches = [item for item in contracts if item.automation_id == "daily-record-materialization"]
     if not matches:
@@ -497,9 +497,9 @@ def _validate_daily_record_contract(contracts: tuple[AutomationContract, ...]) -
             "second-brain orchestrator has duplicate daily-record-materialization lanes"
         )
     lane = matches[0]
-    required_paths = {"inbox/daily", "inbox/daily-digests"}
-    if lane.mode != "materialize" or not required_paths.issubset(lane.owned_paths):
-        raise WoonError("daily record materialization must own the daily note and digest")
+    required_paths = {"inbox/daily", "inbox/calendar", "brain/review/activity"}
+    if lane.mode != "materialize" or set(lane.owned_paths) != required_paths:
+        raise WoonError("daily record materialization has an unsafe write boundary")
 
 
 def _validate_repository_contract(value: object) -> None:

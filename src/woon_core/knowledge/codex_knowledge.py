@@ -774,7 +774,7 @@ def _review_candidates(entries: tuple[CodexKnowledgeEntry, ...]) -> tuple[Review
 
     A person mention is intentionally narrower than an ordinary projection: it
     stores only explicit facts and remains unlinked.  All other action-shaped
-    conclusions become a readable review card, never a direct Things,
+    conclusions become a readable review card, never a direct external task,
     Calendar, person-card, or source mutation.
     """
 

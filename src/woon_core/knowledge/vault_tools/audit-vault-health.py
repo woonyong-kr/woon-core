@@ -182,35 +182,29 @@ def is_noncanonical_map_archive(path: Path) -> bool:
 
 
 def daily_digest_embed_issues(vault: Path) -> list[str]:
-    """Reject daily notes that render an empty Codex-summary section.
+    """Reject the retired duplicate-DailyDigest projection shape.
 
-    A transclusion is not a valid daily record until its local-only digest file
-    exists.  This catches the exact user-visible failure that generic wikilink
-    validation misses when an embed points at a not-yet-created file.
+    Conversation conclusions now belong in the Core-owned marker block inside
+    the sole daily record.  Keeping an embed or a standalone generated digest
+    creates two user-visible histories for one date.
     """
 
     issues: list[str] = []
     daily_root = vault / "inbox/daily"
     if not daily_root.exists():
         return issues
-    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
     for note in sorted(daily_root.glob("????-??-??.md")):
         text = note.read_text(encoding="utf-8")
         for day in DAILY_DIGEST_EMBED_RE.findall(text):
-            try:
-                digest_day = datetime.fromisoformat(day).date()
-            except ValueError:
-                issues.append(
-                    f"{note.relative_to(vault).as_posix()}: invalid daily digest date {day}"
-                )
-                continue
-            if digest_day >= today:
-                continue
-            digest = vault / "inbox/daily-digests" / f"{day}.md"
-            if not digest.is_file():
-                note_path = note.relative_to(vault).as_posix()
-                digest_path = digest.relative_to(vault).as_posix()
-                issues.append(f"{note_path}: missing daily digest {digest_path}")
+            issues.append(
+                f"{note.relative_to(vault).as_posix()}: retired Codex digest embed for {day}"
+            )
+    legacy_root = vault / "inbox/daily-digests"
+    if legacy_root.is_dir():
+        for digest in sorted(legacy_root.glob("*.md")):
+            issues.append(
+                f"{digest.relative_to(vault).as_posix()}: retired duplicate daily digest file"
+            )
     return issues
 
 
@@ -792,6 +786,35 @@ def h1(text: str) -> str | None:
         if line.startswith("# "):
             return line[2:].strip()
     return None
+
+
+def is_scoped_context_tree_title_collision(
+    paths: list[Path], metadata: dict[Path, dict[str, object]]
+) -> bool:
+    """Allow distinct Context Graph cards to reuse a display title.
+
+    A Context Graph card is addressed by its scoped path and parent, not by
+    frontmatter title alone.  The generic duplicate-content audit still rejects
+    copied bodies, and a regular map index may share the title of one scoped
+    card only when it declares itself as a subject index.
+    """
+
+    if len(paths) < 2:
+        return False
+    context_paths = [
+        path
+        for path in paths
+        if rel(path).startswith("maps/context-graph/")
+        and metadata.get(path, {}).get("context_tree") is True
+        and isinstance(metadata.get(path, {}).get("context_tree_parent"), str)
+        and str(metadata[path]["context_tree_parent"]).strip()
+    ]
+    if len(context_paths) == len(paths):
+        return len({rel(path.parent) for path in context_paths}) == len(context_paths)
+    if len(context_paths) != 1 or len(paths) != 2:
+        return False
+    index_path = next(path for path in paths if path not in context_paths)
+    return metadata.get(index_path, {}).get("map_role") == "subject-index"
 
 
 def quartz_root(path: Path) -> str:
@@ -1429,24 +1452,26 @@ def main() -> int:
                     if message not in issues["book_source_link_violations"]:
                         issues["book_source_link_violations"].append(message)
 
-    title_index: dict[str, list[str]] = {}
+    title_index: dict[str, list[Path]] = {}
     for path, fm in metadata.items():
         if is_noncanonical_map_archive(path):
             continue
         r = rel(path)
         title = fm.get("title")
         if isinstance(title, str) and title.strip():
-            title_index.setdefault(title.strip(), []).append(r)
+            title_index.setdefault(title.strip(), []).append(path)
     for path in operating_files:
         text = path.read_text(encoding="utf-8")
         fm = parse_frontmatter(text)
         title = fm.get("title")
         if isinstance(title, str) and title.strip():
-            title_index.setdefault(title.strip(), []).append(rel(path))
+            title_index.setdefault(title.strip(), []).append(path)
     for title, paths in sorted(title_index.items()):
         unique_paths = sorted(set(paths))
-        if len(unique_paths) > 1:
-            issues["duplicate_titles"].append(f"{title!r}: {unique_paths}")
+        if len(unique_paths) > 1 and not is_scoped_context_tree_title_collision(
+            unique_paths, metadata
+        ):
+            issues["duplicate_titles"].append(f"{title!r}: {[rel(path) for path in unique_paths]}")
 
     content_hashes: dict[str, list[str]] = {}
     for path, text in texts.items():

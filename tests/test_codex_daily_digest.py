@@ -11,8 +11,8 @@ from woon_core.errors import WoonError
 from woon_core.knowledge.codex_daily_digest import (
     CodexDailyDigestEntry,
     entries_from_records,
+    migrate_legacy_daily_digests,
     record_codex_daily_digest,
-    record_daily_digest_from_codex_ledger,
 )
 from woon_core.knowledge.orchestration import load_orchestrator_settings
 from woon_core.knowledge.second_brain_runtime import record_governance_preflight
@@ -44,6 +44,9 @@ def test_records_transcript_free_daily_digest_once(tmp_path: Path) -> None:
     assert second.replayed is True
     assert path.is_file()
     assert "원문 대신 결정과 다음 행동만" in path.read_text(encoding="utf-8")
+    assert first.relative_path == "inbox/daily/2026-08-17.md"
+    assert "## 대화에서 남긴 것" in path.read_text(encoding="utf-8")
+    assert "## 성장·학습" in path.read_text(encoding="utf-8")
     assert "[[../../brain/wiki/herdr|Herdr]]" in path.read_text(encoding="utf-8")
     assert receipt.is_file()
     assert json.loads(receipt.read_text(encoding="utf-8"))["candidate_ids"]
@@ -77,7 +80,11 @@ def test_creates_a_missing_daily_note_from_the_canonical_template(tmp_path: Path
     _digest_settings(tmp_path)
     template = tmp_path / "templates" / "daily-note.md"
     template.parent.mkdir(parents=True)
-    template.write_text("# {{date}}\n\n![[../daily-digests/{{date}}]]\n", encoding="utf-8")
+    template.write_text(
+        "# {{date}}\n\n<!-- woon-codex-digest:start -->\n"
+        "<!-- woon-codex-digest:end -->\n",
+        encoding="utf-8",
+    )
 
     record_codex_daily_digest(tmp_path, day=date(2026, 8, 17), entries=())
 
@@ -88,28 +95,12 @@ def test_creates_a_missing_daily_note_from_the_canonical_template(tmp_path: Path
     )
 
 
-def test_replaces_only_a_markerless_legacy_generated_digest(tmp_path: Path) -> None:
+def test_migrates_only_generated_legacy_digests_into_the_daily_record(tmp_path: Path) -> None:
     _digest_settings(tmp_path)
     (tmp_path / "inbox/daily").mkdir(parents=True)
-    (tmp_path / "inbox/daily/2026-08-17.md").write_text("# 2026-08-17\n", encoding="utf-8")
-    root = tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-17"
-    root.mkdir(parents=True)
-    (root / "entry.json").write_text(
-        json.dumps(
-            {
-                "kind": "활동",
-                "title": "면접 준비",
-                "summary": "면접 준비 내용을 정리했다.",
-                "intent": None,
-                "related_documents": [],
-                "calendar_contexts": [],
-                "people": [],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    (tmp_path / "inbox/daily/2026-08-17.md").write_text(
+        "# 2026-08-17\n\n## 포착\n\n- 사용자 메모\n", encoding="utf-8"
     )
-    (root / "_input-status.json").write_text('{"input_state":"processed"}', encoding="utf-8")
     legacy = tmp_path / "inbox/daily-digests/2026-08-17.md"
     legacy.parent.mkdir(parents=True)
     legacy.write_text(
@@ -120,12 +111,14 @@ def test_replaces_only_a_markerless_legacy_generated_digest(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    result = record_daily_digest_from_codex_ledger(tmp_path, day=date(2026, 8, 17))
+    result = migrate_legacy_daily_digests(tmp_path)
 
-    assert result.entry_count == 1
-    content = legacy.read_text(encoding="utf-8")
-    assert "면접 준비" in content
+    assert result.migrated_days == ("2026-08-17",)
+    content = (tmp_path / "inbox/daily/2026-08-17.md").read_text(encoding="utf-8")
+    assert "이전 자동 요약" in content
     assert "<!-- woon-codex-digest:start -->" in content
+    assert "사용자 메모" in content
+    assert not legacy.exists()
 
 
 def _digest_settings(vault: Path):
@@ -150,7 +143,7 @@ def _digest_settings(vault: Path):
       rrule: FREQ=DAILY;BYHOUR=23;BYMINUTE=55;BYSECOND=0
       notification_policy: failed_runs_only
       prompt_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-      owned_paths: [inbox/daily, inbox/daily-digests]
+      owned_paths: [inbox/daily, inbox/calendar, brain/review/activity]
 """
     runnable = original.replace(
         """mode: proposal-only

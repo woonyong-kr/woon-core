@@ -179,12 +179,6 @@ def test_can_repair_only_a_previously_empty_daily_digest(tmp_path: Path) -> None
     (tmp_path / "brain/wiki/herdr.md").write_text("# Herdr\n", encoding="utf-8")
     (tmp_path / "inbox/daily").mkdir(parents=True)
     (tmp_path / "inbox/daily/2026-08-17.md").write_text("# 일일 기록\n", encoding="utf-8")
-    digest = tmp_path / "inbox/daily-digests/2026-08-17.md"
-    digest.parent.mkdir(parents=True)
-    digest.write_text(
-        "---\nstatus: Active\n---\n\n- 이 날에는 보관 조건을 충족한 Codex 대화 요약이 없습니다.\n",
-        encoding="utf-8",
-    )
     entries = entries_from_records(
         [
             {
@@ -205,11 +199,12 @@ def test_can_repair_only_a_previously_empty_daily_digest(tmp_path: Path) -> None
     result = record_daily_digest_from_codex_ledger(
         tmp_path,
         day=date(2026, 8, 17),
-        replace_empty_digest=True,
     )
 
     assert result.entry_count == 1
-    assert "성장 Wiki 승격 경로를 만든다" in digest.read_text(encoding="utf-8")
+    assert "성장 Wiki 승격 경로를 만든다" in (
+        tmp_path / "inbox/daily/2026-08-17.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_projects_daily_activity_and_explicit_person_facts_without_identity_link(
@@ -266,7 +261,7 @@ def test_projects_daily_activity_and_explicit_person_facts_without_identity_link
         if "일정 검토" in candidate.read_text(encoding="utf-8")
     )
     assert "people:" not in person_candidate.read_text(encoding="utf-8")
-    assert "Things, Calendar, 인물 카드" in schedule_candidate.read_text(encoding="utf-8")
+    assert "외부 일정, 인물 카드" in schedule_candidate.read_text(encoding="utf-8")
 
 
 def _settings(vault: Path):
@@ -322,7 +317,7 @@ def _settings(vault: Path):
       rrule: FREQ=DAILY;BYHOUR=0;BYMINUTE=5
       notification_policy: failed_runs_only
       prompt_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-      owned_paths: [inbox/daily, inbox/daily-digests]
+      owned_paths: [inbox/daily, inbox/calendar, brain/review/activity]
 """
     policy.write_text(
         original.replace(

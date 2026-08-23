@@ -324,7 +324,7 @@ def _render_candidate(candidate: ReviewCandidate) -> str:
             [
                 "## 반영 경계",
                 "",
-                "- 이 카드는 사람의 검토를 위한 파생 후보이며 Things, Calendar, "
+                "- 이 카드는 사람의 검토를 위한 파생 후보이며 외부 일정, "
                 "인물 카드, 원본 자료를 직접 바꾸지 않는다.",
                 "- 원문 대화·system/tool/reasoning·비밀값은 이 파일에 복사하지 않는다.",
                 "",

@@ -150,10 +150,21 @@ def test_private_history_limits_owner_records(tmp_path: Path) -> None:
         '---\ntype: Daily\ntitle: "2026-08-18"\nrecord_owner: choi-woonyoung\npeople: []\n---\n',
         encoding="utf-8",
     )
+    digest = tmp_path / "inbox/daily-digests/2026-08-18.md"
+    digest.parent.mkdir(parents=True)
+    digest.write_text(
+        '---\ntype: DailyDigest\ntitle: "2026-08-18 Codex 하루 정리"\n'
+        "record_owner: choi-woonyoung\npeople: []\n---\n",
+        encoding="utf-8",
+    )
 
     documents = service.private_history_documents("choi-woonyoung")
 
     assert [document.relative_path for document in documents] == ["inbox/daily/2026-08-18.md"]
+    assert all(
+        "daily-digests" not in document.relative_path
+        for document in service.documents_for("choi-woonyoung")
+    )
 
 
 def test_default_owner_does_not_turn_unrelated_person_into_document_link(

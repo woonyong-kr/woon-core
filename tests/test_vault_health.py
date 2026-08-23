@@ -6,7 +6,7 @@ from __future__ import annotations
 import importlib.util
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -33,6 +33,42 @@ class RetiredExternalVideoBoundaryTests(unittest.TestCase):
 
             self.assertEqual(len(issues), 1)
             self.assertIn("retired", issues[0])
+
+
+class ScopedContextTreeTitleTests(unittest.TestCase):
+    def test_allows_distinct_context_graph_cards_with_the_same_display_title(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            basic = root / "maps/context-graph/basic/PintOS.md"
+            interview = root / "maps/context-graph/interview/PintOS.md"
+            for path in (basic, interview):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            metadata = {
+                basic: {"context_tree": True, "context_tree_parent": "[[기본]]"},
+                interview: {"context_tree": True, "context_tree_parent": "[[면접]]"},
+            }
+
+            with mock.patch.object(AUDIT, "VAULT", root):
+                self.assertTrue(
+                    AUDIT.is_scoped_context_tree_title_collision([basic, interview], metadata)
+                )
+
+    def test_rejects_same_title_when_a_non_index_document_is_mixed_in(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scoped = root / "maps/context-graph/basic/PintOS.md"
+            unrelated = root / "maps/pintos-note.md"
+            for path in (scoped, unrelated):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            metadata = {
+                scoped: {"context_tree": True, "context_tree_parent": "[[기본]]"},
+                unrelated: {},
+            }
+
+            with mock.patch.object(AUDIT, "VAULT", root):
+                self.assertFalse(
+                    AUDIT.is_scoped_context_tree_title_collision([scoped, unrelated], metadata)
+                )
 
 
 class VaultExecutionOwnershipTests(unittest.TestCase):
@@ -116,24 +152,24 @@ class ManagedNonMarkdownFileTests(unittest.TestCase):
 
 
 class DailyDigestProjectionTests(unittest.TestCase):
-    def test_rejects_missing_past_digest_and_allows_today_embed(self) -> None:
+    def test_rejects_retired_embeds_and_duplicate_digest_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             daily = root / "inbox/daily"
             daily.mkdir(parents=True)
-            today = datetime.now(AUDIT.ZoneInfo("Asia/Seoul")).date()
-            yesterday = (today - timedelta(days=1)).isoformat()
-            (daily / f"{yesterday}.md").write_text(
-                f"![[../daily-digests/{yesterday}]]\n", encoding="utf-8"
+            today = datetime.now(AUDIT.ZoneInfo("Asia/Seoul")).date().isoformat()
+            (daily / f"{today}.md").write_text(
+                f"![[../daily-digests/{today}]]\n", encoding="utf-8"
             )
-            (daily / f"{today.isoformat()}.md").write_text(
-                f"![[../daily-digests/{today.isoformat()}]]\n", encoding="utf-8"
-            )
+            legacy = root / "inbox/daily-digests" / f"{today}.md"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("# retired\n", encoding="utf-8")
 
             issues = AUDIT.daily_digest_embed_issues(root)
 
-            self.assertEqual(len(issues), 1)
-            self.assertIn(yesterday, issues[0])
+            self.assertEqual(len(issues), 2)
+            self.assertTrue(any("retired Codex digest embed" in issue for issue in issues))
+            self.assertTrue(any("retired duplicate daily digest file" in issue for issue in issues))
 
 
 class CalendarProjectionHealthTests(unittest.TestCase):

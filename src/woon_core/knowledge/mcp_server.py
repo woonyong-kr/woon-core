@@ -250,7 +250,7 @@ def record_mail_schedule_candidates_run(
 
 
 @mcp.tool(
-    name="woon_automation_record_codex_daily_digest",
+    name="woon_automation_record_codex_daily_record",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
@@ -262,7 +262,7 @@ def record_codex_daily_digest_run(
     day: str,
     entries: list[dict[str, object]],
 ) -> dict[str, object]:
-    """Record one Korean daily digest from opted-in Codex conclusions only.
+    """Record one Korean block in the canonical daily record from opted-in Codex conclusions.
 
     ``entries`` may contain only a short ``kind``, ``title``, ``summary``, and
     optional links to existing local Wiki or map documents.  Do not pass a raw
@@ -324,7 +324,7 @@ def record_codex_knowledge_entries_run(
 
 
 @mcp.tool(
-    name="woon_automation_materialize_codex_daily_digest",
+    name="woon_automation_materialize_codex_daily_record",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
@@ -334,9 +334,8 @@ def record_codex_knowledge_entries_run(
 )
 def materialize_codex_daily_digest_run(
     day: str,
-    replace_empty_digest: bool = False,
 ) -> dict[str, object]:
-    """Create one daily digest from the minimized local Codex ledger only."""
+    """Update one daily record block from the minimized local Codex ledger only."""
 
     try:
         target_day = date.fromisoformat(day)
@@ -345,7 +344,6 @@ def materialize_codex_daily_digest_run(
     result = record_daily_digest_from_codex_ledger(
         build_knowledge_service()[0].vault,
         day=target_day,
-        replace_empty_digest=replace_empty_digest,
     )
     return asdict(result)
 

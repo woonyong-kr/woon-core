@@ -1,5 +1,4 @@
-import json
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +13,6 @@ from woon_core.calendar.migration import LegacyCalendarMigrationResult
 from woon_core.calendar.projection import CalendarProjectionResult
 from woon_core.cli import run
 from woon_core.errors import WoonError
-from woon_core.knowledge.codex_daily_digest import CodexDailyDigestResult
 from woon_core.knowledge.compiled_wiki import RevisionReconciliationReport
 from woon_core.knowledge.mail_schedule_automation import MailScheduleRecordResult
 from woon_core.knowledge.orchestration import OrchestratorSettings
@@ -28,78 +26,16 @@ def test_version() -> None:
     assert output.getvalue().strip() == "0.5.4"
 
 
-def test_daily_digest_repair_gate_accepts_only_the_requested_missing_fragment() -> None:
-    payload = {
-        "issues": {
-            "daily_digest_projection_violations": [
-                "inbox/daily/2026-08-17.md: missing daily digest inbox/daily-digests/2026-08-17.md"
-            ],
-            "broken_links": [],
-        }
-    }
-
-    assert cli._is_only_missing_daily_digest_repair(json.dumps(payload), date(2026, 8, 17))
-    assert not cli._is_only_missing_daily_digest_repair(json.dumps(payload), date(2026, 8, 16))
-    payload["issues"]["broken_links"] = ["brain/home.md: missing target"]
-    assert not cli._is_only_missing_daily_digest_repair(json.dumps(payload), date(2026, 8, 17))
-
-
-def test_daily_digest_repair_records_governance_before_digest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    settings = SimpleNamespace(vault=tmp_path, policy_document=tmp_path / "policy.md")
-    calls: list[str] = []
-    monkeypatch.setattr(cli, "resolve_knowledge_vault", lambda: tmp_path)
-    monkeypatch.setattr(cli, "load_orchestrator_settings", lambda vault: settings)
-    monkeypatch.setattr(cli, "verify_codex_automation_registry", lambda *_: ("daily",))
-    monkeypatch.setattr(
-        cli,
-        "_governance_preflight_evidence",
-        lambda *args, **kwargs: ("a" * 64, "b" * 64),
-    )
-    monkeypatch.setattr(
-        cli,
-        "record_governance_preflight",
-        lambda *_args, **_kwargs: calls.append("governance"),
-    )
-    monkeypatch.setattr(
-        cli,
-        "record_codex_daily_digest",
-        lambda *_args, **_kwargs: (
-            calls.append("digest")
-            or CodexDailyDigestResult(
-                day="2026-08-17",
-                entry_count=0,
-                receipt_id="receipt",
-                replayed=False,
-                relative_path="inbox/daily-digests/2026-08-17.md",
-            )
-        ),
-    )
-    output = StringIO()
-
-    run(
-        [
-            "knowledge",
-            "record-codex-daily-digest",
-            "--vault",
-            str(tmp_path),
-            "--day",
-            "2026-08-17",
-            "--entries-json",
-            "[]",
-            "--repair-missing-digest",
-        ],
-        output,
-    )
-
-    assert calls == ["governance", "digest"]
-    assert '"entry_count": 0' in output.getvalue()
-
-
 def test_unknown_command_fails() -> None:
     with pytest.raises(WoonError, match="unknown command"):
         run(["unknown"], StringIO())
+
+
+def test_retired_daily_digest_commands_are_not_cli_entrypoints() -> None:
+    with pytest.raises(WoonError, match="unknown knowledge command"):
+        run(["knowledge", "materialize-codex-daily-digest"], StringIO())
+    with pytest.raises(WoonError, match="unknown knowledge command"):
+        run(["knowledge", "record-codex-daily-digest"], StringIO())
 
 
 def test_calendar_migrate_legacy_uses_the_native_calendar_adapter(
