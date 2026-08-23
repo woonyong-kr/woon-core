@@ -175,6 +175,7 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
     vault = _vault(tmp_path)
     releases: dict[str, bytes] = {}
     for plugin_id, version, repository in (
+        (CONTEXT_GRAPH_ID, "0.5.6", "woonyong-kr/context-tree"),
         ("light-mindmap", "1.5.0", "ninglg/light-mindmap"),
         ("markdown-mindmap", "1.4.2", "kikocastro/markdown-mindmap"),
         (PRISMA_CALENDAR_ID, "2.22.0", "Real1tyy/Prisma-Calendar"),
@@ -193,6 +194,7 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
 
     receipt = ObsidianPluginService(vault, download=releases.__getitem__).install(
         [
+            CONTEXT_GRAPH_ID,
             "light-mindmap",
             "markdown-mindmap",
             PRISMA_CALENDAR_ID,
@@ -201,6 +203,7 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
     )
 
     assert [item["id"] for item in receipt["plugins"]] == [
+        CONTEXT_GRAPH_ID,
         "light-mindmap",
         "markdown-mindmap",
         PRISMA_CALENDAR_ID,
@@ -208,6 +211,7 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
     ]
     status = ObsidianPluginService(vault, download=releases.__getitem__).status()
     assert {item["id"] for item in status["plugins"]} == {
+        CONTEXT_GRAPH_ID,
         "light-mindmap",
         "markdown-mindmap",
         PRISMA_CALENDAR_ID,

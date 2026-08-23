@@ -75,6 +75,9 @@ class GitSourceProvenance:
 
 
 OFFICIAL_PLUGINS = {
+    CONTEXT_GRAPH_ID: OfficialPlugin(
+        plugin_id=CONTEXT_GRAPH_ID, repository="woonyong-kr/context-tree"
+    ),
     "light-mindmap": OfficialPlugin(plugin_id="light-mindmap", repository="ninglg/light-mindmap"),
     "markdown-mindmap": OfficialPlugin(
         plugin_id="markdown-mindmap", repository="kikocastro/markdown-mindmap"
