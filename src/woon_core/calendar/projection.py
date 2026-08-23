@@ -16,7 +16,12 @@ from woon_core.calendar.categories import (
     UNCATEGORIZED_CALENDAR_CATEGORY_ID,
     calendar_category_title,
 )
-from woon_core.calendar.constants import OWNED_CALENDAR_NAME
+from woon_core.calendar.constants import (
+    CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS,
+    CONTEXT_CALENDAR_PLUGIN_ID,
+    CONTEXT_CALENDAR_PROFILE_ID,
+    OWNED_CALENDAR_NAME,
+)
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
 from woon_core.knowledge.codex_knowledge import (
@@ -486,7 +491,7 @@ def _render_markdown(
 
 
 def _render_dashboard() -> str:
-    """Render the month-only Simple Calendar entrypoint without document chrome."""
+    """Render the Context Calendar entrypoint for the managed read-only profile."""
 
     return (
         "\n".join(
@@ -499,14 +504,11 @@ def _render_dashboard() -> str:
                 "status: Generated",
                 "source: apple-calendar-readonly",
                 "woon_projection: apple-calendar-dashboard",
-                "cssclasses: woon-simple-calendar-dashboard",
+                f"cssclasses: {CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS}",
                 "---",
                 "",
-                "```woon-simple-calendar",
-                f"source: {APPLE_CALENDAR_EVENTS_RELATIVE_PATH}",
-                "date_field: Date",
-                "category_field: Category",
-                "category_id_field: Category ID",
+                f"```{CONTEXT_CALENDAR_PLUGIN_ID}",
+                f"profile: {CONTEXT_CALENDAR_PROFILE_ID}",
                 "```",
             )
         )

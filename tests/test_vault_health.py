@@ -193,14 +193,11 @@ access: local-only
 status: Generated
 source: apple-calendar-readonly
 woon_projection: apple-calendar-dashboard
-cssclasses: woon-simple-calendar-dashboard
+cssclasses: context-calendar-dashboard
 ---
 
-```woon-simple-calendar
-source: inbox/calendar/events
-date_field: Date
-category_field: Category
-category_id_field: Category ID
+```context-calendar
+profile: woon-apple-calendar
 ```
 """,
                 encoding="utf-8",
@@ -208,6 +205,70 @@ category_id_field: Category ID
             dashboard.chmod(0o400)
 
             self.assertEqual(AUDIT.calendar_projection_issues(root), [])
+
+    def test_rejects_calendar_projection_symlinks_outside_the_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "vault"
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            events = root / "inbox/calendar/events"
+            events.parent.mkdir(parents=True)
+            events.symlink_to(outside, target_is_directory=True)
+            dashboard_target = Path(directory) / "outside-dashboard.md"
+            dashboard_target.write_text(
+                "---\nwoon_projection: apple-calendar-dashboard\n---\n", encoding="utf-8"
+            )
+            dashboard = root / AUDIT.CALENDAR_DASHBOARD_PROJECTION_PATH
+            dashboard.symlink_to(dashboard_target)
+
+            issues = AUDIT.calendar_projection_issues(root)
+
+            self.assertTrue(any("directory must be Vault-local" in issue for issue in issues))
+            self.assertTrue(
+                any("dashboard must be a Vault-local file" in issue for issue in issues)
+            )
+
+    def test_reports_dashboard_directory_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dashboard = root / AUDIT.CALENDAR_DASHBOARD_PROJECTION_PATH
+            dashboard.mkdir(parents=True)
+
+            issues = AUDIT.calendar_projection_issues(root)
+
+            self.assertTrue(
+                any("dashboard must be a Vault-local file" in issue for issue in issues)
+            )
+
+    def test_reports_unreadable_dashboard_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dashboard = root / AUDIT.CALENDAR_DASHBOARD_PROJECTION_PATH
+            dashboard.parent.mkdir(parents=True)
+            dashboard.write_text("---\nwoon_projection: apple-calendar-dashboard\n---\n")
+
+            with mock.patch.object(Path, "read_text", side_effect=OSError("unreadable")):
+                issues = AUDIT.calendar_projection_issues(root)
+
+            self.assertTrue(any("dashboard must be readable" in issue for issue in issues))
+
+    def test_rejects_calendar_event_symlink_outside_the_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "vault"
+            events = root / "inbox/calendar/events"
+            events.mkdir(parents=True)
+            outside_event = Path(directory) / "outside-event.md"
+            outside_event.write_text(
+                "---\nwoon_projection: apple-calendar\n---\n", encoding="utf-8"
+            )
+            (events / "linked.md").symlink_to(outside_event)
+            events.chmod(0o500)
+
+            issues = AUDIT.calendar_projection_issues(root)
+
+            self.assertTrue(
+                any("calendar projection must be a Vault-local file" in issue for issue in issues)
+            )
 
     def test_rejects_writable_or_retired_prisma_calendar_projection_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

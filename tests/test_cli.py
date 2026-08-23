@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 from woon_core import cli
+from woon_core.calendar.constants import CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS
 from woon_core.calendar.manual_schedule import UserScheduleRequest
 from woon_core.calendar.migration import LegacyCalendarMigrationResult
 from woon_core.calendar.projection import CalendarProjectionResult
@@ -205,7 +206,7 @@ def test_knowledge_configure_notion_bases_uses_the_receipt_adapter(
     assert '"action": "configure-notion-bases-calendar"' in output.getvalue()
 
 
-def test_knowledge_configure_simple_calendar_uses_the_receipt_adapter(
+def test_knowledge_configure_context_calendar_uses_the_receipt_adapter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Path] = {}
@@ -214,8 +215,8 @@ def test_knowledge_configure_simple_calendar_uses_the_receipt_adapter(
         def __init__(self, vault: Path) -> None:
             captured["vault"] = vault
 
-        def configure_simple_calendar(self) -> dict[str, str]:
-            return {"action": "configure-simple-calendar"}
+        def configure_context_calendar(self) -> dict[str, str]:
+            return {"action": "configure-context-calendar"}
 
     monkeypatch.setattr(cli, "ObsidianPluginService", PluginService)
     output = StringIO()
@@ -224,7 +225,7 @@ def test_knowledge_configure_simple_calendar_uses_the_receipt_adapter(
         [
             "knowledge",
             "obsidian-plugin",
-            "configure-simple-calendar",
+            "configure-context-calendar",
             "--vault",
             str(tmp_path),
         ],
@@ -232,7 +233,36 @@ def test_knowledge_configure_simple_calendar_uses_the_receipt_adapter(
     )
 
     assert captured == {"vault": tmp_path}
-    assert '"action": "configure-simple-calendar"' in output.getvalue()
+    assert '"action": "configure-context-calendar"' in output.getvalue()
+
+
+def test_knowledge_attest_context_calendar_runtime_records_manual_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class PluginService:
+        def __init__(self, vault: Path) -> None:
+            captured["vault"] = vault
+
+        def attest_context_calendar_runtime(self, checks: list[str]) -> dict[str, str]:
+            captured["checks"] = checks
+            return {"action": "attest-context-calendar-runtime"}
+
+    monkeypatch.setattr(cli, "ObsidianPluginService", PluginService)
+    output = StringIO()
+    arguments = ["knowledge", "obsidian-plugin", "attest-context-calendar-runtime"]
+    for check in CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS:
+        arguments.extend(("--attested-check", check))
+    arguments.extend(("--vault", str(tmp_path)))
+
+    run(arguments, output)
+
+    assert captured == {
+        "vault": tmp_path,
+        "checks": list(CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS),
+    }
+    assert '"action": "attest-context-calendar-runtime"' in output.getvalue()
 
 
 def test_knowledge_install_local_build_uses_the_receipt_adapter(

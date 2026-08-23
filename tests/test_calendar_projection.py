@@ -123,10 +123,9 @@ def test_refresh_writes_only_approved_event_summary_fields(tmp_path: Path) -> No
     assert (ics_path.stat().st_mode & 0o777) == 0o400
     assert not (tmp_path / "inbox/calendar/events/_database.md").exists()
     dashboard = (tmp_path / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH).read_text(encoding="utf-8")
-    assert "cssclasses: woon-simple-calendar-dashboard" in dashboard
-    assert "```woon-simple-calendar" in dashboard
-    assert "source: inbox/calendar/events" in dashboard
-    assert "category_id_field: Category ID" in dashboard
+    assert "cssclasses: context-calendar-dashboard" in dashboard
+    assert "```context-calendar" in dashboard
+    assert "profile: woon-apple-calendar" in dashboard
     assert (tmp_path / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH).stat().st_mode & 0o777 == 0o400
 
 

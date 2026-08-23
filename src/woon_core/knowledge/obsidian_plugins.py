@@ -6,15 +6,23 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from woon_core.calendar.constants import (
+    CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS,
+    CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS,
+    CONTEXT_CALENDAR_PLUGIN_ID,
+    CONTEXT_CALENDAR_PROFILE_ID,
+    CONTEXT_CALENDAR_VERSION,
+)
 from woon_core.calendar.projection import (
     APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH,
     APPLE_CALENDAR_EVENTS_RELATIVE_PATH,
@@ -26,6 +34,7 @@ from woon_core.calendar.projection import (
     is_core_calendar_notion_database,
 )
 from woon_core.errors import WoonError
+from woon_core.io import exclusive_file_lock
 
 REQUIRED_ASSETS = ("main.js", "manifest.json", "styles.css")
 PRISMA_CALENDAR_ID = "prisma-calendar"
@@ -36,16 +45,33 @@ PRISMA_READONLY_CONTEXT_MENU = ("preview", "goToSource", "openFile")
 FULL_CALENDAR_REMASTERED_ID = "full-calendar-remastered"
 FULL_CALENDAR_SOURCE_COLOR = "#687B86"
 NOTION_BASES_ID = "notion-bases"
-SIMPLE_CALENDAR_ID = "woon-simple-calendar"
-SIMPLE_CALENDAR_SOURCE = "inbox/calendar/events"
+CONTEXT_CALENDAR_ID = CONTEXT_CALENDAR_PLUGIN_ID
+CONTEXT_CALENDAR_SOURCE = APPLE_CALENDAR_EVENTS_RELATIVE_PATH
+CONTEXT_CALENDAR_PROPERTY_FIELDS = (
+    ("title", "title"),
+    ("start", "Date"),
+    ("end", "End Date"),
+    ("category", "Category"),
+    ("people", "people"),
+    ("project", "projects"),
+    ("related", "related"),
+)
+LEGACY_SIMPLE_CALENDAR_ID = "woon-simple-calendar"
 CONTEXT_GRAPH_ID = "context-graph"
-LOCAL_DEVELOPMENT_PLUGINS = frozenset({CONTEXT_GRAPH_ID})
+LOCAL_DEVELOPMENT_PLUGINS = frozenset({CONTEXT_CALENDAR_ID, CONTEXT_GRAPH_ID})
+CONTEXT_CALENDAR_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/simple-calendar.git"
 
 
 @dataclass(frozen=True)
 class OfficialPlugin:
     plugin_id: str
     repository: str
+
+
+@dataclass(frozen=True)
+class GitSourceProvenance:
+    repository: str
+    head_commit: str
 
 
 OFFICIAL_PLUGINS = {
@@ -60,14 +86,16 @@ OFFICIAL_PLUGINS = {
         plugin_id=NOTION_BASES_ID,
         repository="bgarciamoura/obsidian-notion-bases-plugin",
     ),
-    SIMPLE_CALENDAR_ID: OfficialPlugin(
-        plugin_id=SIMPLE_CALENDAR_ID, repository="woonyong-kr/simple-calendar"
-    ),
 }
 
-# This is deliberately not a generic uninstall API. Full Calendar Remastered may leave only
-# after the Core-owned Notion Bases month view is installed and its source contract validates.
-RETIRABLE_PLUGINS = {PRISMA_CALENDAR_ID, FULL_CALENDAR_REMASTERED_ID, NOTION_BASES_ID}
+# This is deliberately not a generic uninstall API. Each legacy renderer has a named
+# replacement guard and is moved to a local rollback backup only after that guard passes.
+RETIRABLE_PLUGINS = {
+    PRISMA_CALENDAR_ID,
+    FULL_CALENDAR_REMASTERED_ID,
+    NOTION_BASES_ID,
+    LEGACY_SIMPLE_CALENDAR_ID,
+}
 
 
 def _download(url: str) -> bytes:
@@ -94,6 +122,113 @@ def _atomic_write(path: Path, content: bytes) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
+def _current_file_bytes(path: Path) -> bytes | None:
+    return path.read_bytes() if path.is_file() else None
+
+
+def _require_unchanged_file(path: Path, expected: bytes | None, label: str) -> None:
+    if _current_file_bytes(path) != expected:
+        raise WoonError(f"{label} changed concurrently; refresh before retry")
+
+
+def _restore_file_if_owned(
+    path: Path,
+    *,
+    expected_current: bytes,
+    previous: bytes | None,
+    label: str,
+    cause: Exception,
+) -> None:
+    current = _current_file_bytes(path)
+    if current not in {expected_current, previous}:
+        raise WoonError(f"{label} changed concurrently; rollback refused") from cause
+    if current == previous:
+        return
+    if previous is None:
+        path.unlink(missing_ok=True)
+    else:
+        _atomic_write(path, previous)
+
+
+def _enabled_ids_content(enabled: set[str]) -> bytes:
+    return (json.dumps(sorted(enabled), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _regular_tree_fingerprint(path: Path) -> str:
+    """Hash one regular directory tree without following links or nested directories."""
+
+    if path.is_symlink() or not path.is_dir():
+        raise WoonError(f"plugin tree must be a regular directory: {path.name}")
+    entries: list[tuple[str, str]] = []
+    for item in sorted(path.iterdir(), key=lambda candidate: candidate.name):
+        if item.is_symlink() or not item.is_file():
+            raise WoonError(f"plugin tree contains an unsupported entry: {item.name}")
+        entries.append((item.name, _sha256(item.read_bytes())))
+    payload = json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return _sha256(payload)
+
+
+def _normalize_github_repository(value: str) -> str:
+    normalized = value.strip().rstrip("/")
+    if normalized.endswith(".git"):
+        normalized = normalized[:-4]
+    return normalized
+
+
+def _git_output(source: Path, *arguments: str) -> str:
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(source), *arguments),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise WoonError("Context Calendar Git provenance could not be inspected") from error
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "Git command failed"
+        raise WoonError(f"Context Calendar Git provenance is invalid: {detail}")
+    return result.stdout.strip()
+
+
+def _context_calendar_git_provenance(source: Path) -> GitSourceProvenance:
+    repository_root = Path(_git_output(source, "rev-parse", "--show-toplevel")).resolve()
+    if repository_root != source:
+        raise WoonError("Context Calendar build source must be the Git repository root")
+    if _git_output(source, "status", "--porcelain", "--untracked-files=all"):
+        raise WoonError("Context Calendar build source Git repository must be clean")
+    remote = _git_output(source, "remote", "get-url", "origin")
+    if _normalize_github_repository(remote) != _normalize_github_repository(
+        CONTEXT_CALENDAR_SOURCE_REPOSITORY
+    ):
+        raise WoonError("Context Calendar build source origin is not approved")
+    head_commit = _git_output(source, "rev-parse", "--verify", "HEAD^{commit}")
+    return GitSourceProvenance(
+        repository=_normalize_github_repository(remote) + ".git",
+        head_commit=head_commit,
+    )
+
+
+def _require_vault_local_directory(vault: Path, path: Path, label: str) -> None:
+    if path.is_symlink() or not path.is_dir():
+        raise WoonError(f"{label} must be a regular Vault directory")
+    _require_within_vault(vault, path, label)
+
+
+def _require_vault_local_file(vault: Path, path: Path, label: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise WoonError(f"{label} must be a regular Vault file")
+    _require_within_vault(vault, path, label)
+
+
+def _require_within_vault(vault: Path, path: Path, label: str) -> None:
+    try:
+        path.resolve().relative_to(vault.resolve())
+    except ValueError as error:
+        raise WoonError(f"{label} resolves outside the Vault") from error
+
+
 class ObsidianPluginService:
     """Install verified Obsidian plugin releases and configure their Woon boundaries."""
 
@@ -104,6 +239,7 @@ class ObsidianPluginService:
         self._plugins = self._obsidian / "plugins"
         self._enabled_path = self._obsidian / "community-plugins.json"
         self._local = self._vault / ".local" / "woon-knowledge" / "obsidian-plugins"
+        self._mutation_lock = self._local / "mutation.lock"
 
     def status(self) -> dict[str, Any]:
         self._require_vault()
@@ -146,6 +282,11 @@ class ObsidianPluginService:
         }
 
     def install(self, plugin_ids: list[str]) -> dict[str, Any]:
+        """Serialize installation of approved official releases."""
+
+        return self._mutate(lambda: self._install_locked(plugin_ids))
+
+    def _install_locked(self, plugin_ids: list[str]) -> dict[str, Any]:
         self._require_vault()
         requested = self._approved_ids(plugin_ids)
         receipt_id = self._receipt_id()
@@ -178,6 +319,22 @@ class ObsidianPluginService:
         return receipt
 
     def install_local_build(
+        self,
+        plugin_id: str,
+        source_directory: Path,
+        expected_version: str,
+    ) -> dict[str, Any]:
+        """Serialize and install one explicitly approved local development build."""
+
+        return self._mutate(
+            lambda: self._install_local_build_locked(
+                plugin_id,
+                source_directory,
+                expected_version,
+            )
+        )
+
+    def _install_local_build_locked(
         self,
         plugin_id: str,
         source_directory: Path,
@@ -220,6 +377,9 @@ class ObsidianPluginService:
             raise WoonError(
                 f"local manifest version does not match expected version: {expected_version}"
             )
+        provenance = (
+            _context_calendar_git_provenance(source) if plugin_id == CONTEXT_CALENDAR_ID else None
+        )
 
         receipt_id = self._receipt_id()
         receipt_root = self._local / "receipts"
@@ -227,15 +387,32 @@ class ObsidianPluginService:
         destination = self._plugins / plugin_id
         backup = backup_root / plugin_id
         stage = self._plugins / f".{plugin_id}.staging-{uuid.uuid4().hex}"
-        enabled_before = self._enabled_path.read_bytes() if self._enabled_path.is_file() else None
+        enabled_before = _current_file_bytes(self._enabled_path)
+        enabled = self._enabled_ids()
+        _require_unchanged_file(
+            self._enabled_path,
+            enabled_before,
+            "Obsidian enabled plugin configuration",
+        )
         self._plugins.mkdir(parents=True, exist_ok=True)
         stage.mkdir()
         preserved: list[str] = []
         replaced_existing = False
+        installed_stage = False
+        enabled_written = False
+        destination_before_fingerprint: str | None = None
+        installed_fingerprint: str | None = None
+        enabled_after: bytes | None = None
+        receipt_path = receipt_root / f"{receipt_id}.json"
         try:
             for asset_name, content in assets.items():
                 _atomic_write(stage / asset_name, content)
-            if destination.exists():
+            if destination.exists() or destination.is_symlink():
+                if destination.is_symlink() or not destination.is_dir():
+                    raise WoonError(
+                        f"local Obsidian plugin destination is not a regular directory: {plugin_id}"
+                    )
+                _require_within_vault(self._vault, destination, "Obsidian plugin destination")
                 for item in destination.iterdir():
                     if item.name in REQUIRED_ASSETS:
                         continue
@@ -245,13 +422,34 @@ class ObsidianPluginService:
                         )
                     _atomic_write(stage / item.name, item.read_bytes())
                     preserved.append(item.name)
+                destination_before_fingerprint = _regular_tree_fingerprint(destination)
+            installed_fingerprint = _regular_tree_fingerprint(stage)
+            if destination_before_fingerprint is not None:
+                if _regular_tree_fingerprint(destination) != destination_before_fingerprint:
+                    raise WoonError("local Obsidian plugin changed concurrently before install")
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(destination, backup)
                 replaced_existing = True
+            elif destination.exists() or destination.is_symlink():
+                raise WoonError("local Obsidian plugin appeared concurrently before install")
             os.replace(stage, destination)
-            enabled = self._enabled_ids()
+            installed_stage = True
             enabled.add(plugin_id)
+            enabled_after = _enabled_ids_content(enabled)
+            _require_unchanged_file(
+                self._enabled_path,
+                enabled_before,
+                "Obsidian enabled plugin configuration",
+            )
+            enabled_written = True
             self._write_enabled_ids(enabled, backup_root)
+            _require_unchanged_file(
+                self._enabled_path,
+                enabled_after,
+                "Obsidian enabled plugin configuration",
+            )
+            if _regular_tree_fingerprint(destination) != installed_fingerprint:
+                raise WoonError("local Obsidian plugin changed concurrently after install")
             installed = next(
                 (item for item in self.status()["plugins"] if item["id"] == plugin_id),
                 None,
@@ -263,37 +461,84 @@ class ObsidianPluginService:
             ):
                 raise WoonError("local Obsidian plugin install could not be verified")
 
+            plugin_receipt: dict[str, Any] = {
+                "id": plugin_id,
+                "version": expected_version,
+                "assets_sha256": asset_hashes,
+                "preserved_settings": sorted(preserved),
+            }
+            if provenance is not None:
+                plugin_receipt["source"] = {
+                    "repository": provenance.repository,
+                    "head_commit": provenance.head_commit,
+                    "clean": True,
+                }
             receipt = {
                 "receipt_id": receipt_id,
                 "action": "install-local-build",
                 "created_at": datetime.now(UTC).isoformat(),
-                "plugin": {
-                    "id": plugin_id,
-                    "version": expected_version,
-                    "assets_sha256": asset_hashes,
-                    "preserved_settings": sorted(preserved),
-                },
+                "plugin": plugin_receipt,
                 "backup": backup.relative_to(self._vault).as_posix() if replaced_existing else None,
                 "runtime_loaded": "unknown-until-Obsidian-reloads",
             }
             _atomic_write(
-                receipt_root / f"{receipt_id}.json",
+                receipt_path,
                 (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
             )
-        except Exception:
+        except Exception as error:
+            rollback_errors: list[str] = []
             shutil.rmtree(stage, ignore_errors=True)
-            if destination.exists():
-                shutil.rmtree(destination)
+            if enabled_written and enabled_after is not None:
+                try:
+                    _restore_file_if_owned(
+                        self._enabled_path,
+                        expected_current=enabled_after,
+                        previous=enabled_before,
+                        label="Obsidian enabled plugin configuration",
+                        cause=error,
+                    )
+                except Exception as rollback_error:
+                    rollback_errors.append(str(rollback_error))
+            if installed_stage and (destination.exists() or destination.is_symlink()):
+                try:
+                    if (
+                        installed_fingerprint is None
+                        or _regular_tree_fingerprint(destination) != installed_fingerprint
+                    ):
+                        raise WoonError(
+                            "installed plugin changed concurrently; destructive rollback refused"
+                        )
+                    shutil.rmtree(destination)
+                except Exception as rollback_error:
+                    rollback_errors.append(str(rollback_error))
             if replaced_existing and backup.exists():
-                os.replace(backup, destination)
-            if enabled_before is None:
-                self._enabled_path.unlink(missing_ok=True)
-            else:
-                _atomic_write(self._enabled_path, enabled_before)
-            raise
+                try:
+                    if destination.exists() or destination.is_symlink():
+                        raise WoonError("plugin rollback destination already exists")
+                    if (
+                        destination_before_fingerprint is None
+                        or _regular_tree_fingerprint(backup) != destination_before_fingerprint
+                    ):
+                        raise WoonError("plugin backup changed concurrently; restore refused")
+                    os.replace(backup, destination)
+                except Exception as rollback_error:
+                    rollback_errors.append(str(rollback_error))
+            receipt_path.unlink(missing_ok=True)
+            if not rollback_errors:
+                shutil.rmtree(backup_root, ignore_errors=True)
+                raise
+            raise WoonError(
+                "local Obsidian plugin install failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from error
         return receipt
 
     def remove_detected_mindmaps(self) -> dict[str, Any]:
+        """Serialize removal of manifest-confirmed mindmap plugins."""
+
+        return self._mutate(self._remove_detected_mindmaps_locked)
+
+    def _remove_detected_mindmaps_locked(self) -> dict[str, Any]:
         """Remove only plugin folders whose installed manifest identifies a mindmap."""
 
         before = self.status()
@@ -329,6 +574,11 @@ class ObsidianPluginService:
         return receipt
 
     def configure_prisma_calendar(self) -> dict[str, Any]:
+        """Serialize the legacy Prisma configuration migration."""
+
+        return self._mutate(self._configure_prisma_calendar_locked)
+
+    def _configure_prisma_calendar_locked(self) -> dict[str, Any]:
         """Point Prisma at the Core-owned, read-only Apple Calendar projection."""
 
         self._require_vault()
@@ -385,6 +635,11 @@ class ObsidianPluginService:
         return receipt
 
     def configure_full_calendar_remastered(self) -> dict[str, Any]:
+        """Serialize the legacy Full Calendar configuration migration."""
+
+        return self._mutate(self._configure_full_calendar_remastered_locked)
+
+    def _configure_full_calendar_remastered_locked(self) -> dict[str, Any]:
         """Configure FCR as a month-only, renderer-only view of the Core ICS output."""
 
         self._require_vault()
@@ -426,6 +681,11 @@ class ObsidianPluginService:
         return receipt
 
     def configure_notion_bases_calendar(self) -> dict[str, Any]:
+        """Serialize verification and receipt creation for the Notion Bases view."""
+
+        return self._mutate(self._configure_notion_bases_calendar_locked)
+
+    def _configure_notion_bases_calendar_locked(self) -> dict[str, Any]:
         """Verify the Core-owned Markdown month view consumed by Notion Bases.
 
         Notion Bases keeps its schema and view metadata in Markdown, so there is no
@@ -461,42 +721,123 @@ class ObsidianPluginService:
         )
         return receipt
 
-    def configure_simple_calendar(self) -> dict[str, Any]:
-        """Install the verified Simple Calendar release after its Markdown-only source validates."""
+    def configure_context_calendar(self) -> dict[str, Any]:
+        """Serialize Context Calendar settings changes for this Vault."""
+
+        return self._mutate(self._configure_context_calendar_locked)
+
+    def _configure_context_calendar_locked(self) -> dict[str, Any]:
+        """Upsert Woon's read-only source profile into an installed local build.
+
+        The plugin remains independently configurable: unrelated settings and source
+        profiles are retained.  A failed write, semantic verification, or receipt write
+        restores the exact previous ``data.json`` state.
+        """
 
         self._require_vault()
-        self._require_simple_calendar_projection()
+        self._require_context_calendar_projection()
+        manifest = self._installed_manifest(CONTEXT_CALENDAR_ID)
+        if manifest["version"] != CONTEXT_CALENDAR_VERSION:
+            raise WoonError(
+                "Context Calendar version must match the approved local development version"
+            )
+        if CONTEXT_CALENDAR_ID not in self._enabled_ids():
+            raise WoonError("Context Calendar must be enabled before configuration")
+        self._require_verified_local_build(CONTEXT_CALENDAR_ID, CONTEXT_CALENDAR_VERSION)
+
         receipt_id = self._receipt_id()
         backup_root = self._local / "backups" / receipt_id
-        plugin = self._install_one(SIMPLE_CALENDAR_ID, backup_root)
-        enabled = self._enabled_ids()
-        enabled.add(SIMPLE_CALENDAR_ID)
-        self._write_enabled_ids(enabled, backup_root)
-        after = self.status()
-        installed = next(
-            (item for item in after["plugins"] if item["id"] == SIMPLE_CALENDAR_ID), None
-        )
-        if not isinstance(installed, dict) or installed.get("enabled_in_config") is not True:
-            raise WoonError("Simple Calendar configuration could not be verified after install")
+        settings_path = self._plugins / CONTEXT_CALENDAR_ID / "data.json"
+        settings_before = settings_path.read_bytes() if settings_path.is_file() else None
+        existing = self._read_json_object(settings_path) if settings_before is not None else {}
+        configuration = _context_calendar_configuration(existing)
+        content = (json.dumps(configuration, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        backup_path = backup_root / CONTEXT_CALENDAR_ID / "data.json"
+        if settings_before is not None:
+            _atomic_write(backup_path, settings_before)
+        _require_unchanged_file(settings_path, settings_before, "Context Calendar settings")
+
+        receipt_path = self._local / "receipts" / f"{receipt_id}.json"
+        try:
+            _atomic_write(settings_path, content)
+            loaded = self._read_json_object(settings_path)
+            profile = _validate_context_calendar_configuration(loaded)
+            receipt = {
+                "receipt_id": receipt_id,
+                "action": "configure-context-calendar",
+                "created_at": datetime.now(UTC).isoformat(),
+                "plugin": {
+                    "id": CONTEXT_CALENDAR_ID,
+                    "version": manifest["version"],
+                },
+                "settings": {
+                    "path": settings_path.relative_to(self._vault).as_posix(),
+                    "sha256": _sha256(content),
+                    "backup": (
+                        backup_path.relative_to(self._vault).as_posix()
+                        if settings_before is not None
+                        else None
+                    ),
+                },
+                "source_profile": profile,
+                "dashboard": APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH,
+                "external_sync": "disabled",
+                "projection_write": "core-only",
+            }
+            _atomic_write(
+                receipt_path,
+                (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+            )
+        except Exception as error:
+            _restore_file_if_owned(
+                settings_path,
+                expected_current=content,
+                previous=settings_before,
+                label="Context Calendar settings",
+                cause=error,
+            )
+            receipt_path.unlink(missing_ok=True)
+            raise
+        return receipt
+
+    def attest_context_calendar_runtime(self, checks: list[str]) -> dict[str, Any]:
+        """Record a manual operator attestation bound to the current static evidence."""
+
+        return self._mutate(lambda: self._attest_context_calendar_runtime_locked(checks))
+
+    def _attest_context_calendar_runtime_locked(self, checks: list[str]) -> dict[str, Any]:
+        required = set(CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS)
+        provided = set(checks)
+        if len(checks) != len(provided) or provided != required:
+            missing = sorted(required.difference(provided))
+            unexpected = sorted(provided.difference(required))
+            detail = []
+            if missing:
+                detail.append("missing=" + ",".join(missing))
+            if unexpected:
+                detail.append("unexpected=" + ",".join(unexpected))
+            if len(checks) != len(provided):
+                detail.append("duplicate-check")
+            raise WoonError(
+                "Context Calendar manual runtime attestation requires the complete UI checklist"
+                + (": " + "; ".join(detail) if detail else "")
+            )
+
+        asset_hashes, settings_hash, dashboard_hash = self._context_calendar_static_evidence()
+        receipt_id = self._receipt_id()
         receipt = {
             "receipt_id": receipt_id,
-            "action": "configure-simple-calendar",
+            "action": "attest-context-calendar-runtime",
             "created_at": datetime.now(UTC).isoformat(),
-            "plugin": plugin,
-            "dashboard": APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH,
-            "source": SIMPLE_CALENDAR_SOURCE,
-            "view_mode": "month-only",
-            "entrypoints": {
-                "ribbon_icon": "calendar-days",
-                "command": "open-simple-calendar",
+            "plugin": {
+                "id": CONTEXT_CALENDAR_ID,
+                "version": CONTEXT_CALENDAR_VERSION,
+                "assets_sha256": asset_hashes,
             },
-            "card_behavior": {
-                "time": "hidden",
-                "category_color": "Core-projected-category-fill",
-                "title": "two-lines-with-tooltip-and-readonly-markdown-detail",
-            },
-            "external_sync": "disabled",
-            "projection_write": "core-only",
+            "settings": {"sha256": settings_hash},
+            "dashboard": {"sha256": dashboard_hash},
+            "operator_attested_checks": list(CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS),
+            "attestation": "manual-operator-confirmation-after-Obsidian-reload",
         }
         _atomic_write(
             self._local / "receipts" / f"{receipt_id}.json",
@@ -505,6 +846,11 @@ class ObsidianPluginService:
         return receipt
 
     def retire(self, plugin_ids: list[str]) -> dict[str, Any]:
+        """Serialize one guarded legacy-renderer retirement."""
+
+        return self._mutate(lambda: self._retire_locked(plugin_ids))
+
+    def _retire_locked(self, plugin_ids: list[str]) -> dict[str, Any]:
         """Move an explicitly approved legacy renderer to a local rollback backup."""
 
         self._require_vault()
@@ -512,36 +858,82 @@ class ObsidianPluginService:
         if FULL_CALENDAR_REMASTERED_ID in requested:
             self._require_notion_bases_calendar_projection()
         if NOTION_BASES_ID in requested:
-            self._require_simple_calendar_projection()
-            if SIMPLE_CALENDAR_ID not in self._enabled_ids():
-                raise WoonError("Simple Calendar must be enabled before retiring Notion Bases")
+            self._require_context_calendar_ready()
+        if LEGACY_SIMPLE_CALENDAR_ID in requested:
+            self._require_context_calendar_ready()
         before = self.status()
         receipt_id = self._receipt_id()
         backup_root = self._local / "backups" / receipt_id
+        receipt_path = self._local / "receipts" / f"{receipt_id}.json"
+        enabled_before = self._enabled_path.read_bytes() if self._enabled_path.is_file() else None
         enabled = self._enabled_ids()
         retired: list[str] = []
+        enabled_written = False
         for plugin_id in requested:
             source = self._plugins / plugin_id
-            if source.is_dir():
-                destination = backup_root / plugin_id
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(source, destination)
-                retired.append(plugin_id)
-            enabled.discard(plugin_id)
-        self._write_enabled_ids(enabled, backup_root)
-        after = self.status()
-        receipt = {
-            "receipt_id": receipt_id,
-            "action": "retire",
-            "created_at": datetime.now(UTC).isoformat(),
-            "before": before,
-            "retired": retired,
-            "after": after,
-        }
-        _atomic_write(
-            self._local / "receipts" / f"{receipt_id}.json",
-            (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-        )
+            if source.exists():
+                if not source.is_dir() or source.is_symlink():
+                    raise WoonError(f"retire target is not a regular plugin directory: {plugin_id}")
+                self._installed_manifest(plugin_id)
+        try:
+            for plugin_id in requested:
+                source = self._plugins / plugin_id
+                if source.is_dir():
+                    destination = backup_root / plugin_id
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(source, destination)
+                    retired.append(plugin_id)
+                enabled.discard(plugin_id)
+            _require_unchanged_file(
+                self._enabled_path,
+                enabled_before,
+                "Obsidian enabled plugin configuration",
+            )
+            self._write_enabled_ids(enabled, backup_root)
+            enabled_written = True
+            after = self.status()
+            receipt = {
+                "receipt_id": receipt_id,
+                "action": "retire",
+                "created_at": datetime.now(UTC).isoformat(),
+                "before": before,
+                "retired": retired,
+                "after": after,
+            }
+            _atomic_write(
+                receipt_path,
+                (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+            )
+        except Exception as error:
+            rollback_errors: list[str] = []
+            if enabled_written:
+                try:
+                    _restore_file_if_owned(
+                        self._enabled_path,
+                        expected_current=_enabled_ids_content(enabled),
+                        previous=enabled_before,
+                        label="Obsidian enabled plugin configuration",
+                        cause=error,
+                    )
+                except Exception as rollback_error:  # pragma: no cover - defensive aggregation
+                    rollback_errors.append(str(rollback_error))
+            for plugin_id in reversed(retired):
+                source = backup_root / plugin_id
+                destination = self._plugins / plugin_id
+                try:
+                    if destination.exists():
+                        raise WoonError(f"retire rollback destination already exists: {plugin_id}")
+                    os.replace(source, destination)
+                except Exception as rollback_error:  # pragma: no cover - defensive aggregation
+                    rollback_errors.append(str(rollback_error))
+            receipt_path.unlink(missing_ok=True)
+            if not rollback_errors:
+                shutil.rmtree(backup_root, ignore_errors=True)
+                raise
+            raise WoonError(
+                "Obsidian plugin retirement failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from error
         return receipt
 
     def _install_one(self, plugin_id: str, backup_root: Path) -> dict[str, Any]:
@@ -628,7 +1020,7 @@ class ObsidianPluginService:
             shutil.copy2(self._enabled_path, backup_root / "community-plugins.json")
         _atomic_write(
             self._enabled_path,
-            (json.dumps(sorted(enabled), ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+            _enabled_ids_content(enabled),
         )
 
     def _enabled_ids(self) -> set[str]:
@@ -708,31 +1100,31 @@ class ObsidianPluginService:
             if "woon_projection: apple-calendar\n" not in content or "Date: " not in content:
                 raise WoonError("Notion Bases calendar rows must be Core-generated date-only notes")
 
-    def _require_simple_calendar_projection(self) -> None:
-        """Require the exact read-only Markdown projection Simple Calendar is allowed to read."""
+    def _require_context_calendar_projection(self) -> None:
+        """Require the exact read-only Markdown projection Context Calendar may read."""
 
-        directory = self._vault / SIMPLE_CALENDAR_SOURCE
+        directory = self._vault / CONTEXT_CALENDAR_SOURCE
         dashboard_path = self._vault / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH
-        if not directory.is_dir() or directory.stat().st_mode & 0o777 != 0o500:
-            raise WoonError("Simple Calendar source directory must be Core-owned and read-only")
+        _require_vault_local_directory(self._vault, directory, "Context Calendar source directory")
+        if directory.stat().st_mode & 0o777 != 0o500:
+            raise WoonError("Context Calendar source directory must be Core-owned and read-only")
+        _require_vault_local_file(self._vault, dashboard_path, "Context Calendar dashboard")
         if not is_core_calendar_dashboard(dashboard_path):
-            raise WoonError("Simple Calendar dashboard must be generated by the Core projection")
+            raise WoonError("Context Calendar dashboard must be generated by the Core projection")
         if dashboard_path.stat().st_mode & 0o777 != 0o400:
-            raise WoonError("Simple Calendar dashboard must be read-only")
+            raise WoonError("Context Calendar dashboard must be read-only")
         dashboard = dashboard_path.read_text(encoding="utf-8")
         required_dashboard = (
-            "cssclasses: woon-simple-calendar-dashboard\n"
+            f"cssclasses: {CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS}\n"
             "---\n\n"
-            "```woon-simple-calendar\n"
-            f"source: {SIMPLE_CALENDAR_SOURCE}\n"
-            "date_field: Date\n"
-            "category_field: Category\n"
-            "category_id_field: Category ID\n"
+            f"```{CONTEXT_CALENDAR_ID}\n"
+            f"profile: {CONTEXT_CALENDAR_PROFILE_ID}\n"
             "```\n"
         )
         if required_dashboard not in dashboard:
-            raise WoonError("Simple Calendar dashboard must use the Core month-only block")
+            raise WoonError("Context Calendar dashboard must use the Core source profile")
         for path in directory.glob("*.md"):
+            _require_vault_local_file(self._vault, path, "Context Calendar event")
             content = path.read_text(encoding="utf-8")
             if (
                 "woon_projection: apple-calendar\n" not in content
@@ -740,13 +1132,196 @@ class ObsidianPluginService:
                 or "Category: " not in content
                 or "Category ID: " not in content
             ):
-                raise WoonError("Simple Calendar rows must be Core-generated categorized notes")
+                raise WoonError("Context Calendar rows must be Core-generated categorized notes")
             if path.stat().st_mode & 0o777 != 0o400:
-                raise WoonError("Simple Calendar rows must be read-only")
+                raise WoonError("Context Calendar rows must be read-only")
+
+    def _require_context_calendar_ready(self) -> None:
+        """Fail closed unless static evidence and a matching manual attestation exist."""
+
+        asset_hashes, settings_hash, dashboard_hash = self._context_calendar_static_evidence()
+        if not self._matching_receipt(
+            "attest-context-calendar-runtime",
+            CONTEXT_CALENDAR_ID,
+            CONTEXT_CALENDAR_VERSION,
+            asset_hashes=asset_hashes,
+            settings_hash=settings_hash,
+            dashboard_hash=dashboard_hash,
+            attestation_checks=CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS,
+        ):
+            raise WoonError(
+                "Context Calendar runtime must have a manual operator attestation after reload"
+            )
+
+    def _context_calendar_static_evidence(self) -> tuple[dict[str, str], str, str]:
+        """Return hashes only after install, activation, settings, and projection verify."""
+
+        self._require_context_calendar_projection()
+        manifest = self._installed_manifest(CONTEXT_CALENDAR_ID)
+        if manifest["version"] != CONTEXT_CALENDAR_VERSION:
+            raise WoonError("Context Calendar version is not approved for legacy retirement")
+        if CONTEXT_CALENDAR_ID not in self._enabled_ids():
+            raise WoonError("Context Calendar must be enabled before retiring the legacy plugin")
+        asset_hashes = self._require_verified_local_build(
+            CONTEXT_CALENDAR_ID, CONTEXT_CALENDAR_VERSION
+        )
+        settings_path = self._plugins / CONTEXT_CALENDAR_ID / "data.json"
+        _require_vault_local_file(self._vault, settings_path, "Context Calendar settings")
+        configuration = self._read_json_object(settings_path)
+        _validate_context_calendar_configuration(configuration)
+        settings_hash = _sha256(settings_path.read_bytes())
+        if not self._matching_receipt(
+            "configure-context-calendar",
+            CONTEXT_CALENDAR_ID,
+            CONTEXT_CALENDAR_VERSION,
+            settings_hash=settings_hash,
+        ):
+            raise WoonError(
+                "Context Calendar configuration receipt does not match the installed settings"
+            )
+        dashboard_hash = _sha256(
+            (self._vault / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH).read_bytes()
+        )
+        return asset_hashes, settings_hash, dashboard_hash
+
+    def _require_verified_local_build(self, plugin_id: str, version: str) -> dict[str, str]:
+        try:
+            asset_hashes: dict[str, str] = {}
+            for name in REQUIRED_ASSETS:
+                path = self._plugins / plugin_id / name
+                _require_vault_local_file(self._vault, path, "Context Calendar runtime asset")
+                asset_hashes[name] = _sha256(path.read_bytes())
+        except OSError as error:
+            raise WoonError("Context Calendar runtime assets are incomplete") from error
+        if not self._matching_receipt(
+            "install-local-build",
+            plugin_id,
+            version,
+            asset_hashes=asset_hashes,
+            require_context_git_provenance=plugin_id == CONTEXT_CALENDAR_ID,
+        ):
+            raise WoonError(
+                "Context Calendar must be installed by the verified local-build adapter"
+            )
+        return asset_hashes
+
+    def _matching_receipt(
+        self,
+        action: str,
+        plugin_id: str,
+        version: str,
+        *,
+        asset_hashes: Mapping[str, str] | None = None,
+        settings_hash: str | None = None,
+        dashboard_hash: str | None = None,
+        attestation_checks: tuple[str, ...] | None = None,
+        require_context_git_provenance: bool = False,
+    ) -> bool:
+        receipt_root = self._local / "receipts"
+        for path in sorted(receipt_root.glob("*.json"), reverse=True):
+            try:
+                receipt = self._read_json_object(path)
+            except WoonError:
+                continue
+            plugin = receipt.get("plugin")
+            if (
+                receipt.get("action") != action
+                or not isinstance(plugin, dict)
+                or plugin.get("id") != plugin_id
+                or plugin.get("version") != version
+            ):
+                continue
+            if asset_hashes is not None and plugin.get("assets_sha256") != dict(asset_hashes):
+                continue
+            if require_context_git_provenance:
+                source = plugin.get("source")
+                head_commit = source.get("head_commit") if isinstance(source, dict) else None
+                if (
+                    not isinstance(source, dict)
+                    or source.get("repository") != CONTEXT_CALENDAR_SOURCE_REPOSITORY
+                    or source.get("clean") is not True
+                    or not isinstance(head_commit, str)
+                    or len(head_commit) not in {40, 64}
+                    or any(character not in "0123456789abcdef" for character in head_commit)
+                ):
+                    continue
+            settings = receipt.get("settings")
+            if settings_hash is not None and (
+                not isinstance(settings, dict) or settings.get("sha256") != settings_hash
+            ):
+                continue
+            dashboard = receipt.get("dashboard")
+            if dashboard_hash is not None and (
+                not isinstance(dashboard, dict) or dashboard.get("sha256") != dashboard_hash
+            ):
+                continue
+            if attestation_checks is not None and receipt.get("operator_attested_checks") != list(
+                attestation_checks
+            ):
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _read_json_object(path: Path) -> dict[str, Any]:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise WoonError(f"JSON object is unreadable: {path.name}") from error
+        if not isinstance(value, dict):
+            raise WoonError(f"JSON object is invalid: {path.name}")
+        return value
 
     def _require_vault(self) -> None:
         if not self._obsidian.is_dir():
             raise WoonError("target does not contain an Obsidian vault")
+
+    def _mutate(self, operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Apply one mutation only while all control paths remain Vault-local."""
+
+        self._require_mutation_boundary()
+        with exclusive_file_lock(self._mutation_lock):
+            self._require_mutation_boundary()
+            return operation()
+
+    def _require_mutation_boundary(self) -> None:
+        _require_vault_local_directory(self._vault, self._obsidian, "Obsidian config directory")
+        if self._plugins.exists() or self._plugins.is_symlink():
+            _require_vault_local_directory(
+                self._vault,
+                self._plugins,
+                "Obsidian plugins directory",
+            )
+        if self._enabled_path.exists() or self._enabled_path.is_symlink():
+            _require_vault_local_file(
+                self._vault,
+                self._enabled_path,
+                "Obsidian enabled plugin configuration",
+            )
+        local_ancestor = self._vault
+        for part in (".local", "woon-knowledge", "obsidian-plugins"):
+            local_ancestor /= part
+            if not local_ancestor.exists() and not local_ancestor.is_symlink():
+                continue
+            _require_vault_local_directory(
+                self._vault,
+                local_ancestor,
+                "Obsidian plugin local state directory",
+            )
+        for directory in (self._local / "backups", self._local / "receipts"):
+            if not directory.exists() and not directory.is_symlink():
+                continue
+            _require_vault_local_directory(
+                self._vault,
+                directory,
+                "Obsidian plugin local state directory",
+            )
+        if self._mutation_lock.exists() or self._mutation_lock.is_symlink():
+            _require_vault_local_file(
+                self._vault,
+                self._mutation_lock,
+                "Obsidian plugin mutation lock",
+            )
 
     def _prepare_prisma_virtual_events_store(self, backup_root: Path) -> None:
         """Keep Prisma's empty internal store hidden and out of the event-note contract."""
@@ -806,6 +1381,63 @@ class ObsidianPluginService:
     @staticmethod
     def _receipt_id() -> str:
         return datetime.now(UTC).strftime("obsidian-plugin-%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
+
+
+def _context_calendar_source_profile() -> dict[str, Any]:
+    """Return the single Woon-managed profile understood by Context Calendar 2.0."""
+
+    return {
+        "id": CONTEXT_CALENDAR_PROFILE_ID,
+        "name": "Apple Calendar",
+        "enabled": True,
+        "source": {
+            "type": "folder",
+            "path": CONTEXT_CALENDAR_SOURCE,
+            "recursive": False,
+            "tag": "",
+        },
+        "editable": False,
+        "properties": dict(CONTEXT_CALENDAR_PROPERTY_FIELDS),
+    }
+
+
+def _context_calendar_configuration(existing: Mapping[str, Any]) -> dict[str, Any]:
+    """Preserve user settings while deterministically upserting Woon's source profile."""
+
+    configuration = dict(existing)
+    raw_profiles = configuration.get("sourceProfiles", [])
+    if not isinstance(raw_profiles, list) or not all(
+        isinstance(profile, dict) for profile in raw_profiles
+    ):
+        raise WoonError("Context Calendar sourceProfiles must be a list of objects")
+    profile_ids = [profile.get("id") for profile in raw_profiles]
+    if any(not isinstance(profile_id, str) or not profile_id for profile_id in profile_ids):
+        raise WoonError("Context Calendar source profile IDs must be non-empty strings")
+    if len(profile_ids) != len(set(profile_ids)):
+        raise WoonError("Context Calendar source profile IDs must be unique")
+
+    managed_profile = _context_calendar_source_profile()
+    configuration["schemaVersion"] = 1
+    configuration["sourceProfiles"] = [
+        *(profile for profile in raw_profiles if profile["id"] != CONTEXT_CALENDAR_PROFILE_ID),
+        managed_profile,
+    ]
+    return configuration
+
+
+def _validate_context_calendar_configuration(configuration: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the verified Woon profile or fail closed on a writable/drifted source."""
+
+    profiles = configuration.get("sourceProfiles")
+    matching = (
+        [profile for profile in profiles if profile.get("id") == CONTEXT_CALENDAR_PROFILE_ID]
+        if isinstance(profiles, list) and all(isinstance(profile, dict) for profile in profiles)
+        else []
+    )
+    expected = _context_calendar_source_profile()
+    if configuration.get("schemaVersion") != 1 or matching != [expected]:
+        raise WoonError("Context Calendar read-only source profile could not be verified")
+    return expected
 
 
 def _prisma_calendar_configuration(version: str) -> dict[str, Any]:

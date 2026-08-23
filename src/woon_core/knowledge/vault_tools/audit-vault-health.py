@@ -10,6 +10,12 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from woon_core.calendar.constants import (
+    CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS,
+    CONTEXT_CALENDAR_PLUGIN_ID,
+    CONTEXT_CALENDAR_PROFILE_ID,
+)
+
 VAULT = Path.cwd().resolve()
 
 CONTENT_ROOTS = [
@@ -366,86 +372,129 @@ def calendar_projection_issues(vault: Path) -> list[str]:
     directory = vault / CALENDAR_PROJECTION_ROOT
     ics_path = vault / CALENDAR_ICS_PROJECTION_PATH
     dashboard_path = vault / CALENDAR_DASHBOARD_PROJECTION_PATH
-    if not directory.exists() and not ics_path.exists() and not dashboard_path.exists():
+    directory_present = directory.exists() or directory.is_symlink()
+    ics_present = ics_path.exists() or ics_path.is_symlink()
+    dashboard_present = dashboard_path.exists() or dashboard_path.is_symlink()
+    if not directory_present and not ics_present and not dashboard_present:
         return []
 
     issues: list[str] = []
-    if directory.exists():
+    if directory_present:
         relative_directory = directory.relative_to(vault).as_posix()
-        if directory.stat().st_mode & 0o777 != CALENDAR_PROJECTION_DIRECTORY_MODE:
-            issues.append(f"{relative_directory}: Core projection directory must be read-only")
+        scan_directory = True
+        if directory.is_symlink() or not _resolves_within(vault, directory):
+            issues.append(f"{relative_directory}: Core projection directory must be Vault-local")
+            scan_directory = False
+        elif not directory.is_dir():
+            issues.append(f"{relative_directory}: Core projection path must be a directory")
+            scan_directory = False
+        if scan_directory:
+            if directory.stat().st_mode & 0o777 != CALENDAR_PROJECTION_DIRECTORY_MODE:
+                issues.append(f"{relative_directory}: Core projection directory must be read-only")
 
-        for path in sorted(directory.glob("*.md")):
-            relative = path.relative_to(vault).as_posix()
-            if path.name == ".prisma-virtual-events.md" or path.name == "Virtual Events.md":
-                issues.append(f"{relative}: retired Prisma support file must be removed")
-                continue
-            metadata = parse_frontmatter(path.read_text(encoding="utf-8"))
-            if path.name == CALENDAR_NOTION_DATABASE_FILENAME:
-                issues.append(f"{relative}: retired Notion Bases calendar database must be removed")
-                continue
-            if metadata.get("woon_projection") != "apple-calendar":
-                issues.append(f"{relative}: calendar projection marker is required")
-            if metadata.get("source") != "apple-calendar-readonly":
-                issues.append(f"{relative}: calendar projection source must be read-only")
-            if metadata.get("type") != "calendar-event":
-                issues.append(f"{relative}: calendar projection type must be calendar-event")
-            if not isinstance(metadata.get("title"), str) or not str(metadata["title"]).strip():
-                issues.append(f"{relative}: calendar projection title is required")
-            if (
-                not isinstance(metadata.get("calendar"), str)
-                or not str(metadata["calendar"]).strip()
-            ):
-                issues.append(f"{relative}: calendar projection calendar is required")
-            if not isinstance(metadata.get("Date"), str) or not str(metadata["Date"]).strip():
-                issues.append(f"{relative}: calendar projection requires Date")
-            if (
-                not isinstance(metadata.get("Category"), str)
-                or not str(metadata["Category"]).strip()
-            ):
-                issues.append(f"{relative}: calendar projection requires Category")
-            all_day = metadata.get("All Day")
-            if all_day is False:
-                for field in ("Start Date", "End Date"):
-                    if not isinstance(metadata.get(field), str) or not str(metadata[field]).strip():
-                        issues.append(f"{relative}: timed calendar projection requires {field}")
-            elif all_day is not True:
-                issues.append(f"{relative}: calendar projection All Day must be boolean")
-            if path.stat().st_mode & 0o777 != CALENDAR_PROJECTION_FILE_MODE:
-                issues.append(f"{relative}: calendar projection must be read-only")
+            for path in sorted(directory.glob("*.md")):
+                relative = path.relative_to(vault).as_posix()
+                if path.is_symlink() or not path.is_file() or not _resolves_within(vault, path):
+                    issues.append(f"{relative}: calendar projection must be a Vault-local file")
+                    continue
+                if path.name == ".prisma-virtual-events.md" or path.name == "Virtual Events.md":
+                    issues.append(f"{relative}: retired Prisma support file must be removed")
+                    continue
+                metadata = parse_frontmatter(path.read_text(encoding="utf-8"))
+                if path.name == CALENDAR_NOTION_DATABASE_FILENAME:
+                    issues.append(
+                        f"{relative}: retired Notion Bases calendar database must be removed"
+                    )
+                    continue
+                if metadata.get("woon_projection") != "apple-calendar":
+                    issues.append(f"{relative}: calendar projection marker is required")
+                if metadata.get("source") != "apple-calendar-readonly":
+                    issues.append(f"{relative}: calendar projection source must be read-only")
+                if metadata.get("type") != "calendar-event":
+                    issues.append(f"{relative}: calendar projection type must be calendar-event")
+                if not isinstance(metadata.get("title"), str) or not str(metadata["title"]).strip():
+                    issues.append(f"{relative}: calendar projection title is required")
+                if (
+                    not isinstance(metadata.get("calendar"), str)
+                    or not str(metadata["calendar"]).strip()
+                ):
+                    issues.append(f"{relative}: calendar projection calendar is required")
+                if not isinstance(metadata.get("Date"), str) or not str(metadata["Date"]).strip():
+                    issues.append(f"{relative}: calendar projection requires Date")
+                if (
+                    not isinstance(metadata.get("Category"), str)
+                    or not str(metadata["Category"]).strip()
+                ):
+                    issues.append(f"{relative}: calendar projection requires Category")
+                all_day = metadata.get("All Day")
+                if all_day is False:
+                    for field in ("Start Date", "End Date"):
+                        if (
+                            not isinstance(metadata.get(field), str)
+                            or not str(metadata[field]).strip()
+                        ):
+                            issues.append(f"{relative}: timed calendar projection requires {field}")
+                elif all_day is not True:
+                    issues.append(f"{relative}: calendar projection All Day must be boolean")
+                if path.stat().st_mode & 0o777 != CALENDAR_PROJECTION_FILE_MODE:
+                    issues.append(f"{relative}: calendar projection must be read-only")
 
-    if ics_path.exists() and not is_core_calendar_ics_projection(ics_path):
-        issues.append(f"{CALENDAR_ICS_PROJECTION_PATH}: Core ICS projection must be read-only")
-    if dashboard_path.exists():
-        dashboard = parse_frontmatter(dashboard_path.read_text(encoding="utf-8"))
-        if dashboard.get("woon_projection") != "apple-calendar-dashboard":
-            issues.append(
-                f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: Core dashboard marker is required"
-            )
-        if dashboard.get("source") != "apple-calendar-readonly":
-            issues.append(
-                f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard source must be read-only"
-            )
-        if dashboard_path.stat().st_mode & 0o777 != CALENDAR_PROJECTION_FILE_MODE:
-            issues.append(f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must be read-only")
-        dashboard_content = dashboard_path.read_text(encoding="utf-8")
-        required_dashboard = (
-            "cssclasses: woon-simple-calendar-dashboard\n"
-            "---\n\n"
-            "```woon-simple-calendar\n"
-            "source: inbox/calendar/events\n"
-            "date_field: Date\n"
-            "category_field: Category\n"
-            "category_id_field: Category ID\n"
-            "```"
+    if ics_present and (
+        ics_path.is_symlink()
+        or not _resolves_within(vault, ics_path)
+        or not is_core_calendar_ics_projection(ics_path)
+    ):
+        issues.append(
+            f"{CALENDAR_ICS_PROJECTION_PATH}: Core ICS projection must be Vault-local and read-only"
         )
-        if required_dashboard not in dashboard_content:
+    if dashboard_present:
+        if (
+            dashboard_path.is_symlink()
+            or not dashboard_path.is_file()
+            or not _resolves_within(vault, dashboard_path)
+        ):
             issues.append(
-                f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must embed Simple Calendar"
+                f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must be a Vault-local file"
             )
-    elif directory.exists() or ics_path.exists():
+        else:
+            try:
+                dashboard_content = dashboard_path.read_text(encoding="utf-8")
+            except OSError:
+                issues.append(f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must be readable")
+                return issues
+            dashboard = parse_frontmatter(dashboard_content)
+            if dashboard.get("woon_projection") != "apple-calendar-dashboard":
+                issues.append(
+                    f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: Core dashboard marker is required"
+                )
+            if dashboard.get("source") != "apple-calendar-readonly":
+                issues.append(
+                    f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard source must be read-only"
+                )
+            if dashboard_path.stat().st_mode & 0o777 != CALENDAR_PROJECTION_FILE_MODE:
+                issues.append(f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must be read-only")
+            required_dashboard = (
+                f"cssclasses: {CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS}\n"
+                "---\n\n"
+                f"```{CONTEXT_CALENDAR_PLUGIN_ID}\n"
+                f"profile: {CONTEXT_CALENDAR_PROFILE_ID}\n"
+                "```"
+            )
+            if required_dashboard not in dashboard_content:
+                issues.append(
+                    f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must embed Context Calendar"
+                )
+    elif directory_present or ics_present:
         issues.append(f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: Core dashboard is required")
     return issues
+
+
+def _resolves_within(vault: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(vault.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def is_valid_markdown_canvas(path: Path) -> bool:
