@@ -21,7 +21,6 @@ CONTENT_ROOTS = [
     "README.md",
     "index.md",
     "head-quarter.md",
-    "brain/index.md",
     "brain/home.md",
     "brain/log.md",
     "brain/review",
@@ -102,6 +101,14 @@ MERMAID_PLACEHOLDER_LABELS = {
     "sleep5",
     "softmmu",
 }
+MERMAID_LEGACY_MARKERS = (
+    "B&gt;",
+    "&lt;/B",
+    "&lt;/FONT",
+    "&lt;/TABLE",
+    "TABLE BORDER=",
+    "FONT POINT-SIZE=",
+)
 OBSIDIAN_HIDDEN_EXPLORER_PATHS = (
     "assets",
     "catalog",
@@ -133,6 +140,7 @@ RETIRED_WORKSPACE_ROOTS = (
     ".local/woon-brain",
     ".local/codex-write-vault",
     ".legacy-backup",
+    "wiki/canonical",
     "brain/wiki",
     "projects",
     "content",
@@ -216,18 +224,18 @@ def is_noncanonical_map_archive(path: Path) -> bool:
     return rel(path).startswith(NONCANONICAL_MAP_ROOTS)
 
 
-def growth_and_entity_policy_issues(
+def wiki_and_entity_policy_issues(
     relative: str, text: str, frontmatter: dict[str, object]
 ) -> tuple[list[str], list[str]]:
-    growth: list[str] = []
+    wiki: list[str] = []
     entities: list[str] = []
     if relative.startswith(("brain/wiki/", "projects/", "content/", "users/")):
         entities.append(f"{relative}: retired parallel knowledge root must not exist")
-        return growth, entities
+        return wiki, entities
     if not relative.startswith("wiki/"):
-        return growth, entities
+        return wiki, entities
     if frontmatter.get("type") != "Wiki":
-        growth.append(f"{relative}: Wiki document type must be Wiki")
+        wiki.append(f"{relative}: Wiki document type must be Wiki")
     canonical_id = frontmatter.get("canonical_id")
     if (
         not isinstance(canonical_id, str)
@@ -237,48 +245,71 @@ def growth_and_entity_policy_issues(
         or ".." in Path(canonical_id).parts
         or any(char.isspace() for char in canonical_id)
     ):
-        growth.append(f"{relative}: canonical_id must be a stable path-independent identity")
+        wiki.append(f"{relative}: canonical_id must be a stable path-independent identity")
     facets = frontmatter.get("facets")
     if not isinstance(facets, list) or not facets:
-        growth.append(f"{relative}: facets must be a non-empty list")
+        wiki.append(f"{relative}: facets must be a non-empty list")
         facets = []
     elif (
-        len(facets) != len(set(str(value) for value in facets))
-        or set(facets) - ALLOWED_WIKI_FACETS
+        len(facets) != len(set(str(value) for value in facets)) or set(facets) - ALLOWED_WIKI_FACETS
     ):
-        growth.append(f"{relative}: facets must be unique values from the Wiki contract")
+        wiki.append(f"{relative}: facets must be unique values from the Wiki contract")
     if frontmatter.get("knowledge_state") not in {
-        "생각 중", "확인 필요", "근거 확인됨", "오래됨", "폐기됨"
+        "생각 중",
+        "확인 필요",
+        "근거 확인됨",
+        "오래됨",
+        "폐기됨",
     }:
-        growth.append(f"{relative}: knowledge_state is invalid")
+        wiki.append(f"{relative}: knowledge_state is invalid")
     parents = frontmatter.get("parent_topics")
     if not isinstance(parents, list):
-        growth.append(f"{relative}: parent_topics must be a list")
+        wiki.append(f"{relative}: parent_topics must be a list")
     elif relative == "wiki/README.md" and parents:
-        growth.append(f"{relative}: Wiki root must not have a parent topic")
+        wiki.append(f"{relative}: Wiki root must not have a parent topic")
     elif relative != "wiki/README.md" and not parents:
-        growth.append(f"{relative}: visible Wiki must have a parent topic")
+        wiki.append(f"{relative}: visible Wiki must have a parent topic")
     elif relative != "wiki/README.md" and len(parents) != 1:
-        growth.append(f"{relative}: visible Wiki must have exactly one primary parent topic")
+        wiki.append(f"{relative}: visible Wiki must have exactly one primary parent topic")
+    if frontmatter.get("question_kind") == "interview":
+        title = frontmatter.get("title")
+        filename = Path(relative).stem
+        interview_tracks = frontmatter.get("interview_tracks")
+        question_topic = frontmatter.get("question_topic")
+        if re.match(r"(?i)^(?:q\d{1,3}[-_. ]|archive-)", filename) or (
+            isinstance(canonical_id, str)
+            and re.search(r"(?i)/(?:q\d{1,3}[-_.]|archive-)", canonical_id)
+        ):
+            wiki.append(f"{relative}: interview identity must not use sequence or archive prefixes")
+        if isinstance(title, str) and re.match(r"(?i)^q\d{1,3}[. ]", title):
+            wiki.append(f"{relative}: interview title must be a natural question without numbering")
+        if not isinstance(interview_tracks, list) or not interview_tracks:
+            wiki.append(f"{relative}: interview_tracks must be a non-empty list")
+        if not isinstance(question_topic, str) or not question_topic.strip():
+            wiki.append(f"{relative}: question_topic must name a reusable semantic topic")
+        if parents == ["[[wiki/README|Wiki]]"]:
+            wiki.append(
+                f"{relative}: interview question must use a semantic parent below Wiki root"
+            )
     if "프로젝트" in facets and (
         not isinstance(frontmatter.get("project_id"), str)
         or not isinstance(frontmatter.get("objective"), str)
     ):
         entities.append(f"{relative}: project facet requires project_id and objective")
     if "콘텐츠" in facets and frontmatter.get("content_kind") not in {
-            "book",
-            "film",
-            "series",
-            "lecture",
-            "course",
-            "podcast",
-            "game",
-            "article",
-            "exhibition",
-            "learning-material-bundle",
-        }:
+        "book",
+        "film",
+        "series",
+        "lecture",
+        "course",
+        "podcast",
+        "game",
+        "article",
+        "exhibition",
+        "learning-material-bundle",
+    }:
         entities.append(f"{relative}: content facet requires a valid content_kind")
-    return growth, entities
+    return wiki, entities
 
 
 def runtime_permission_issues(vault: Path) -> list[str]:
@@ -522,7 +553,7 @@ def is_allowed_non_markdown_file(path: Path) -> bool:
         return True
     if path.suffix != ".drawio":
         return False
-    return r.startswith(("wiki/ai/transformer/diagrams/", "wiki/canonical/"))
+    return r.startswith("wiki/ai/transformer/diagrams/")
 
 
 def is_valid_linked_canvas_state(path: Path) -> bool:
@@ -1232,6 +1263,61 @@ def global_graph_root_issues(
     return issues
 
 
+def mermaid_quality_issues(relative: str, text: str) -> tuple[list[str], list[str]]:
+    """Report converter debris and duplicate stand-in nodes inside Mermaid blocks."""
+
+    shape_issues: list[str] = []
+    placeholder_issues: list[str] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        if not lines[index].strip().startswith("```mermaid"):
+            index += 1
+            continue
+        block_start = index + 1
+        index += 1
+        block: list[tuple[int, str]] = []
+        while index < len(lines) and not lines[index].strip().startswith("```"):
+            block.append((index + 1, lines[index]))
+            index += 1
+
+        block_text = "\n".join(line for _, line in block)
+        for no, line in block:
+            unsafe_edge_label = any(
+                not match.group("label").lstrip().startswith('"')
+                and re.search(r"[()\[\]]", match.group("label"))
+                for match in re.finditer(
+                    r"(?:-->|<-->|-.->|==>)\|(?P<label>[^|\n]+)\|", line
+                )
+            )
+            unsafe_node = bool(re.search(r"\b(?:call|end)\[", line))
+            if (
+                re.search(r'\["[^"\]]*<br/>\([^"\)]*"\]', line)
+                or any(marker in line for marker in MERMAID_LEGACY_MARKERS)
+                or unsafe_edge_label
+                or unsafe_node
+            ):
+                shape_issues.append(f"{relative}: line {no}")
+            for label in re.findall(r'\["([^"\]]+)"\]', line):
+                if label.strip() in MERMAID_PLACEHOLDER_LABELS:
+                    placeholder_issues.append(f"{relative}: line {no}: {label.strip()}")
+
+            duplicate = re.match(
+                r'^\s*([A-Za-z][A-Za-z0-9_-]*)_2\["([A-Za-z][A-Za-z0-9_-]*)"\]\s*$',
+                line,
+            )
+            if duplicate is None or duplicate.group(1) != duplicate.group(2):
+                continue
+            base = duplicate.group(1)
+            if re.search(rf"^\s*{re.escape(base)}(?:\[|\(|\{{)", block_text, re.MULTILINE):
+                placeholder_issues.append(f"{relative}: line {no}: {base}_2")
+
+        if index >= len(lines):
+            shape_issues.append(f"{relative}: line {block_start}: unclosed Mermaid block")
+        index += 1
+    return shape_issues, placeholder_issues
+
+
 def main() -> int:
     files = [path for path in iter_markdown() if not is_calendar_projection_markdown(path)]
     index = target_index(files)
@@ -1273,7 +1359,7 @@ def main() -> int:
         "retired_ai_instruction_boundary_violations": [],
         "retired_legacy_view_violations": [],
         "brain_activity_log_violations": [],
-        "growth_wiki_policy_violations": [],
+        "wiki_pipeline_policy_violations": [],
         "entity_policy_violations": [],
         "person_schema_violations": [],
         "user_visible_review_violations": [],
@@ -1316,8 +1402,7 @@ def main() -> int:
     retired_facet_pages = sorted(wiki_view_root.glob("*.md")) if wiki_view_root.is_dir() else []
     if retired_facet_pages:
         issues["wiki_display_contract_violations"].extend(
-            f"duplicate Wiki dashboard must be removed: {rel(path)}"
-            for path in retired_facet_pages
+            f"duplicate Wiki dashboard must be removed: {rel(path)}" for path in retired_facet_pages
         )
     if not wiki_base.is_file():
         issues["wiki_display_contract_violations"].append("inbox/wiki/wiki.base is missing")
@@ -1671,24 +1756,13 @@ def main() -> int:
                 if candidate.suffix == "":
                     candidates.extend((candidate.with_suffix(".md"), candidate / "README.md"))
                 if not any(item.is_file() for item in candidates):
-                    issues["strict_relative_link_violations"].append(
-                        f"{r} -> {target}"
-                    )
-        in_mermaid = False
+                    issues["strict_relative_link_violations"].append(f"{r} -> {target}")
+        mermaid_shapes, mermaid_placeholders = mermaid_quality_issues(r, text)
+        issues["mermaid_shape_violations"].extend(mermaid_shapes)
+        issues["mermaid_placeholder_nodes"].extend(mermaid_placeholders)
         for no, line in enumerate(text.splitlines(), start=1):
-            if line.strip().startswith("```mermaid"):
-                in_mermaid = True
-                continue
-            if in_mermaid and line.strip().startswith("```"):
-                in_mermaid = False
-                continue
             if ABSOLUTE_LOCAL_RE.search(line):
                 issues["absolute_local_paths"].append(f"{r}: line {no}")
-            if in_mermaid and re.search(r'\["[^"\]]*<br/>\([^"\)]*"\]', line):
-                issues["mermaid_shape_violations"].append(f"{r}: line {no}")
-            for label in re.findall(r'\["([^"\]]+)"\]', line):
-                if label.strip() in MERMAID_PLACEHOLDER_LABELS:
-                    issues["mermaid_placeholder_nodes"].append(f"{r}: line {no}: {label.strip()}")
         if is_noncanonical_map_archive(path):
             # Preserved exports remain resolvable targets but are deliberately
             # outside the canonical metadata/title corpus.
@@ -1709,11 +1783,7 @@ def main() -> int:
                     f"{r}: migration bookkeeping must not appear as growth history"
                 )
 
-        if (
-            r.startswith("maps/")
-            and fm.get("type") == "키워드"
-            and fm.get("status") != "Archived"
-        ):
+        if r.startswith("maps/") and fm.get("type") == "키워드" and fm.get("status") != "Archived":
             summary = fm.get("summary")
             if not isinstance(summary, str) or not summary.strip():
                 issues["wiki_display_contract_violations"].append(
@@ -1740,8 +1810,8 @@ def main() -> int:
                     f"{r}: review title must not expose an internal identifier"
                 )
 
-        growth_issues, entity_issues = growth_and_entity_policy_issues(r, text, fm)
-        issues["growth_wiki_policy_violations"].extend(growth_issues)
+        wiki_issues, entity_issues = wiki_and_entity_policy_issues(r, text, fm)
+        issues["wiki_pipeline_policy_violations"].extend(wiki_issues)
         issues["entity_policy_violations"].extend(entity_issues)
 
         if r.startswith("maps/"):
@@ -1753,11 +1823,7 @@ def main() -> int:
             if table_lines:
                 issues["table_in_map_docs"].append(f"{r}: lines={', '.join(table_lines[:10])}")
 
-        if (
-            r.startswith("wiki/")
-            and fm.get("type") == "Wiki"
-            and fm.get("content_kind") == "book"
-        ):
+        if r.startswith("wiki/") and fm.get("type") == "Wiki" and fm.get("content_kind") == "book":
             wikilink_targets = set(WIKILINK_RE.findall(text))
             for book_map, labels in book_sources:
                 if not any(label in text for label in labels):
@@ -1926,7 +1992,7 @@ def main() -> int:
             canonical_id_index.setdefault(canonical_id.casefold(), []).append(path)
     for canonical_id, paths in sorted(canonical_id_index.items()):
         if len(paths) > 1:
-            issues["growth_wiki_policy_violations"].append(
+            issues["wiki_pipeline_policy_violations"].append(
                 f"canonical_id {canonical_id!r} is duplicated: {[rel(path) for path in paths]}"
             )
 

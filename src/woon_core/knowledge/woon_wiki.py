@@ -113,6 +113,8 @@ class WikiDelta:
     objective: str | None = None
     materials: tuple[str, ...] = ()
     parent_topics: tuple[str, ...] = ()
+    interview_tracks: tuple[str, ...] = ()
+    question_topic: str | None = None
     interview_answer: InterviewAnswerRevision | None = None
     state_authority: str = "conversation"
 
@@ -454,7 +456,7 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
     if existing_identity is not None and not _frontmatter_raw(merged, "canonical_id"):
         merged = _set_frontmatter_object(merged, "canonical_id", existing_identity)
     existing_parent = _frontmatter_value(existing, "parent_topics") if existing else None
-    if existing_parent is not None and not _frontmatter_raw(merged, "parent_topics"):
+    if existing_parent is not None and _frontmatter_value(merged, "parent_topics") is None:
         merged = _set_frontmatter_object(merged, "parent_topics", existing_parent)
     for key in (
         "facets",
@@ -471,7 +473,7 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
         "identifiers",
     ):
         value = _frontmatter_value(existing, key) if existing else None
-        if value is not None:
+        if value is not None and _frontmatter_value(merged, key) is None:
             merged = _set_frontmatter_object(merged, key, value)
     merged = _upsert_frontmatter_value(
         merged, "knowledge_state", json.dumps("근거 확인됨", ensure_ascii=False)
@@ -642,26 +644,23 @@ def _infer_facets(relative: Path, text: str) -> tuple[str, ...]:
     enough to recover the corresponding Facet after an interrupted migration.
     """
 
-    lower_parts = {part.casefold() for part in relative.parts}
     raw_tags = _yaml_block_list(text, "tags")
     facets = [item for item in _frontmatter_list(text, "facets") if item in ALLOWED_FACETS]
     is_person = (
-        "people" in lower_parts
-        or "person" in lower_parts
+        "인물" in facets
         or _frontmatter_text(text, "entity_type").casefold() == "person"
         or bool(_frontmatter_text(text, "person_id"))
         or bool(_frontmatter_text(text, "person_kind"))
     )
     is_project = (
-        "projects" in lower_parts
-        or "project" in lower_parts
+        "프로젝트" in facets
         or bool(_frontmatter_text(text, "project_id"))
         or bool(_frontmatter_text(text, "objective"))
         or bool(_frontmatter_text(text, "project_status"))
         or any(tag == "topic:project" or tag.startswith("topic:project-") for tag in raw_tags)
     )
     content_kind = _frontmatter_text(text, "content_kind")
-    is_content = "content" in lower_parts or bool(content_kind)
+    is_content = "콘텐츠" in facets or bool(content_kind)
 
     # The first unified migration temporarily gave every page the generic
     # concept/learning pair.  Strong entity properties are authoritative and
@@ -671,7 +670,7 @@ def _infer_facets(relative: Path, text: str) -> tuple[str, ...]:
     elif is_project or is_content:
         facets = [item for item in facets if item != "개념"]
 
-    if "career" in lower_parts or any(tag == "domain:career" for tag in raw_tags):
+    if any(tag == "domain:career" for tag in raw_tags):
         facets.append("커리어")
     if is_person:
         facets.append("인물")
@@ -713,8 +712,15 @@ def compiled_wiki_contract(relative: Path, text: str) -> dict[str, object]:
     vault_relative = Path(WIKI_ROOT) / relative
     path_identity = relative.with_suffix("").as_posix()
     canonical_id = _frontmatter_text(text, "canonical_id") or path_identity
-    if path_identity == "README":
-        parent_topics: tuple[str, ...] = ()
+    explicit_parent_topics = _frontmatter_value(text, "parent_topics")
+    if explicit_parent_topics is not None:
+        if not isinstance(explicit_parent_topics, list) or not all(
+            isinstance(item, str) and item.strip() for item in explicit_parent_topics
+        ):
+            raise WoonError("compiled Wiki parent_topics must be a non-empty string list")
+        parent_topics = tuple(item.strip() for item in explicit_parent_topics)
+    elif path_identity == "README":
+        parent_topics = ()
     elif (
         len(relative.parts) > 1
         and relative.name != "README.md"
@@ -798,6 +804,18 @@ def _merge_delta(text: str, delta: WikiDelta) -> str:
             "parent_topics",
             json.dumps(("[[wiki/README|Wiki]]",), ensure_ascii=False),
         )
+    if delta.interview_answer is not None:
+        updated = _upsert_frontmatter_value(updated, "question_kind", "interview")
+        updated = _upsert_frontmatter_value(
+            updated,
+            "interview_tracks",
+            json.dumps(delta.interview_tracks, ensure_ascii=False),
+        )
+        updated = _upsert_frontmatter_value(
+            updated,
+            "question_topic",
+            json.dumps(delta.question_topic, ensure_ascii=False),
+        )
     updated = _upsert_frontmatter_value(
         updated, "knowledge_state", json.dumps(next_state, ensure_ascii=False)
     )
@@ -862,6 +880,15 @@ def _render_new(delta: WikiDelta) -> str:
                 delta.parent_topics or ("[[wiki/README|Wiki]]",),
                 ensure_ascii=False,
             )
+        ),
+        *(
+            (
+                "question_kind: interview",
+                f"interview_tracks: {json.dumps(delta.interview_tracks, ensure_ascii=False)}",
+                f"question_topic: {json.dumps(delta.question_topic, ensure_ascii=False)}",
+            )
+            if delta.interview_answer is not None
+            else ()
         ),
         f"knowledge_state: {json.dumps(delta.knowledge_state, ensure_ascii=False)}",
         f"state_reason: {delta.state_authority}",
@@ -958,6 +985,15 @@ def _validate_delta(vault: Path, delta: WikiDelta, *, planned_paths: set[str]) -
         ):
             raise WoonError("Wiki parent topic must point to an existing Wiki")
     if delta.interview_answer is not None:
+        if not delta.interview_tracks or len(set(delta.interview_tracks)) != len(
+            delta.interview_tracks
+        ):
+            raise WoonError("Wiki interview_tracks must be a unique non-empty list")
+        for track in delta.interview_tracks:
+            _bounded_line(track, "interview track", 120)
+        if delta.question_topic is None:
+            raise WoonError("Wiki interview question_topic is required")
+        _bounded_line(delta.question_topic, "interview question_topic", 120)
         _validate_interview_answer(delta.interview_answer)
 
 
@@ -1218,7 +1254,9 @@ def _slug(title: str) -> str:
 
 
 def _frontmatter_raw(text: str, key: str) -> str:
-    match = re.search(rf"(?m)^{re.escape(key)}:\s*(.+?)\s*$", text)
+    # Horizontal whitespace only: ``\s`` crosses the newline and used to
+    # misread the first item of a block YAML list as the scalar value.
+    match = re.search(rf"(?m)^{re.escape(key)}:[ \t]*(.*?)[ \t]*$", text)
     return match.group(1).strip() if match else ""
 
 
@@ -1256,13 +1294,9 @@ def _frontmatter_text(text: str, key: str) -> str:
 
 
 def _frontmatter_list(text: str, key: str) -> tuple[str, ...]:
-    raw = _frontmatter_raw(text, key)
-    if not raw:
+    value = _frontmatter_value(text, key)
+    if value is None:
         return ()
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise WoonError(f"Wiki {key} must be an inline list") from error
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise WoonError(f"Wiki {key} must be a string list")
     return tuple(value)

@@ -510,7 +510,10 @@ def test_interview_exchange_updates_one_question_under_one_project(
     project.parent.mkdir(parents=True)
     project.write_text(
         "---\ntype: Wiki\ntitle: AI Engineer 면접 준비\n"
-        'facets: ["프로젝트", "커리어"]\nknowledge_state: "확인 필요"\n---\n',
+        'facets: ["프로젝트", "커리어"]\n'
+        'interview_tracks: ["KRAFTON AI Engineer"]\n'
+        'interview_default_topic: "AI 자동화 설계"\n'
+        'knowledge_state: "확인 필요"\n---\n',
         encoding="utf-8",
     )
     entries = entries_from_records(
@@ -526,6 +529,8 @@ def test_interview_exchange_updates_one_question_under_one_project(
                     "question": "Kyro에서 본인이 직접 한 일은 무엇입니까?",
                     "answer": "관리 서버의 장애 판정 흐름을 설계하고 구현했다.",
                     "project_path": "wiki/personal/interview/ai-engineer.md",
+                    "interview_tracks": ["KRAFTON AI Engineer"],
+                    "question_topic": "Kubernetes 장애 복구 서비스",
                     "evidence": ["관리 서버 코드와 계약 테스트"],
                     "limitations": ["실환경 정확도 평가는 수행하지 않았다."],
                     "change_reason": "개인 기여와 검증 한계를 분리했다.",
@@ -549,6 +554,9 @@ def test_interview_exchange_updates_one_question_under_one_project(
     assert (
         'parent_topics: ["[[wiki/personal/interview/ai-engineer|AI Engineer 면접 준비]]"]' in text
     )
+    assert "question_kind: interview" in text
+    assert 'interview_tracks: ["KRAFTON AI Engineer"]' in text
+    assert 'question_topic: "Kubernetes 장애 복구 서비스"' in text
     ledger = load_daily_entries(tmp_path, day=date(2026, 8, 24))
     assert ledger[0]["interview_answer"]["promote_current"] is True
     assert "wiki/personal/interview/ai-engineer.md" in ledger[0]["related_documents"]

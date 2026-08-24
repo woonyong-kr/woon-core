@@ -250,6 +250,31 @@ def test_compile_preserves_single_wiki_context_and_audits_it(tmp_path: Path) -> 
     assert compiler.audit().complete
 
 
+def test_compile_prunes_retired_page_receipt_without_rewriting_current_page(
+    tmp_path: Path,
+) -> None:
+    write_page(tmp_path, "os/queue.md", "큐", "근거로 확인한 설명이다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    receipts_path = tmp_path / "catalog/llm-wiki/receipts.yaml"
+    payload = yaml.safe_load(receipts_path.read_text(encoding="utf-8"))
+    retired = dict(payload["receipts"][0])
+    retired["page_id"] = "retired/second-wiki"
+    payload["receipts"].append(retired)
+    receipts_path.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    page = tmp_path / "wiki/os/queue.md"
+    before = page.read_bytes()
+
+    report = compiler.compile()
+    current = yaml.safe_load(receipts_path.read_text(encoding="utf-8"))
+
+    assert report.compiled == 0
+    assert page.read_bytes() == before
+    assert [item["page_id"] for item in current["receipts"]] == ["os/queue"]
+
+
 def test_managed_conversation_context_does_not_stale_compiler_receipt(tmp_path: Path) -> None:
     write_page(tmp_path, "os/queue.md", "큐", "근거로 확인한 설명이다.")
     compiler = CompiledWiki(compiled_settings(tmp_path))
@@ -817,7 +842,7 @@ def test_compiled_wiki_restores_confirmed_git_revision(tmp_path: Path) -> None:
     compiler = CompiledWiki(compiled_settings(tmp_path))
     compiler.migrate()
     service = KnowledgeService(
-        MarkdownDocumentRepository(tmp_path, tmp_path / "wiki/canonical"),
+        MarkdownDocumentRepository(tmp_path, tmp_path / "wiki"),
         SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
         GitKnowledgeHistory(tmp_path),
         compiled_wiki=compiler,
@@ -872,7 +897,7 @@ def test_reconcile_marks_unreferenced_conversation_revision_without_deleting_it(
 ) -> None:
     write_page(
         tmp_path,
-        "canonical/backend/ports-and-adapters.md",
+        "backend/ports-and-adapters.md",
         "포트와 어댑터",
         "의존성을 분리한다.",
     )
@@ -997,7 +1022,7 @@ def test_compiled_archive_restores_inputs_and_output_when_reindex_fails(tmp_path
     )
     compiler = CompiledWiki(compiled_settings(tmp_path))
     compiler.migrate()
-    canonical_root = tmp_path / "wiki/canonical"
+    canonical_root = tmp_path / "wiki"
     index = FailOnceIndex(tmp_path / ".local/search.sqlite3")
     service = KnowledgeService(
         MarkdownDocumentRepository(tmp_path, canonical_root),
@@ -1032,13 +1057,13 @@ def test_compiled_archive_preserves_session_ownership_and_rejects_duplicates(
 ) -> None:
     write_page(
         tmp_path,
-        "canonical/backend/ports-and-adapters.md",
+        "backend/ports-and-adapters.md",
         "포트와 어댑터",
         "외부 기술의 의존 방향을 분리한다.",
     )
     compiler = CompiledWiki(compiled_settings(tmp_path))
     compiler.migrate()
-    canonical_root = tmp_path / "wiki/canonical"
+    canonical_root = tmp_path / "wiki"
     service = KnowledgeService(
         MarkdownDocumentRepository(tmp_path, canonical_root),
         SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),

@@ -66,6 +66,112 @@ def test_compiled_page_without_section_index_links_to_wiki_root() -> None:
     assert contract["parent_topics"] == ["[[wiki/README|Wiki]]"]
 
 
+def test_compiled_contract_preserves_explicit_semantic_parent() -> None:
+    contract = compiled_wiki_contract(
+        Path("personal/projects/kubernetes-runtime.md"),
+        """---
+type: Wiki
+title: Kubernetes 장애 복구 서비스 런타임
+parent_topics:
+- '[[wiki/personal/projects/kubernetes-장애-복구-서비스|Kubernetes 장애 복구 서비스]]'
+---
+
+# Kubernetes 장애 복구 서비스 런타임
+
+이벤트 처리 런타임을 설명한다.
+""",
+    )
+
+    assert contract["parent_topics"] == [
+        "[[wiki/personal/projects/kubernetes-장애-복구-서비스|Kubernetes 장애 복구 서비스]]"
+    ]
+
+
+def test_compiled_contract_does_not_treat_a_project_folder_as_entity_metadata() -> None:
+    contract = compiled_wiki_contract(
+        Path("personal/projects/kubernetes-runtime.md"),
+        """---
+type: Wiki
+title: Kubernetes 런타임
+facets:
+- 개념
+- 학습
+---
+
+# Kubernetes 런타임
+
+프로젝트에서 배운 런타임 개념이다.
+""",
+    )
+
+    assert contract["facets"] == ["개념", "학습"]
+
+
+def test_compiler_context_does_not_restore_stale_derived_metadata() -> None:
+    existing = """---
+type: Wiki
+title: 이전 제목
+summary: 이전 요약
+facets:
+- 개념
+parent_topics:
+- '[[wiki/README|Wiki]]'
+people:
+- '[[wiki/personal/people/최우녕|최우녕]]'
+knowledge_state: 근거 확인됨
+---
+
+# 이전 제목
+
+이전 본문이다.
+"""
+    rendered = """---
+type: Wiki
+title: Kubernetes 장애 복구 서비스
+summary: 새 compiler 요약
+facets:
+- 프로젝트
+- 학습
+parent_topics:
+- '[[wiki/personal/projects/README|프로젝트]]'
+knowledge_state: 근거 확인됨
+---
+
+# Kubernetes 장애 복구 서비스
+
+새 본문이다.
+"""
+
+    merged = preserve_managed_context(existing, rendered)
+
+    assert "summary: 새 compiler 요약" in merged
+    assert "- 프로젝트" in merged
+    assert "- 학습" in merged
+    assert "[[wiki/personal/projects/README|프로젝트]]" in merged
+    assert "[[wiki/README|Wiki]]" not in merged
+    assert "[[wiki/personal/people/최우녕|최우녕]]" in merged
+
+
+def test_compiled_contract_accepts_standard_yaml_block_facets() -> None:
+    contract = compiled_wiki_contract(
+        Path("personal/interview/README.md"),
+        """---
+type: Wiki
+title: 면접 답변 운영 원칙
+facets:
+- 커리어
+- 학습
+---
+
+# 면접 답변 운영 원칙
+
+질문별 답변을 관리한다.
+""",
+    )
+
+    assert contract["facets"] == ["커리어", "학습"]
+
+
 def test_new_conversation_delta_creates_one_wiki_subject(tmp_path: Path) -> None:
     pages = prepare_wiki_pages(
         tmp_path,
@@ -518,6 +624,8 @@ def test_interview_answer_keeps_current_and_archives_the_previous_revision(
         knowledge_state="확인 필요",
         day=date(2026, 8, 18),
         parent_topics=(parent,),
+        interview_tracks=("AI Engineer",),
+        question_topic="Kubernetes 장애 복구 서비스",
         interview_answer=InterviewAnswerRevision(
             question="Kyro에서 본인이 직접 한 일은 무엇입니까?",
             context="개인 기여와 팀 결과를 구분하는 질문이다.",
@@ -538,6 +646,8 @@ def test_interview_answer_keeps_current_and_archives_the_previous_revision(
         knowledge_state="확인 필요",
         day=date(2026, 8, 24),
         parent_topics=(parent,),
+        interview_tracks=first.interview_tracks,
+        question_topic=first.question_topic,
         interview_answer=InterviewAnswerRevision(
             question=first.title,
             context="개인 기여와 팀 결과를 구분하는 질문이다.",
@@ -596,6 +706,8 @@ def test_weaker_interview_attempt_is_archived_without_replacing_current(
         knowledge_state="확인 필요",
         day=date(2026, 8, 23),
         parent_topics=(parent,),
+        interview_tracks=("공통 면접",),
+        question_topic="개인 기여",
         interview_answer=InterviewAnswerRevision(
             question="개인 기여는 무엇입니까?",
             answer="계약 검증 흐름을 구현했다.",
@@ -613,6 +725,8 @@ def test_weaker_interview_attempt_is_archived_without_replacing_current(
         knowledge_state="확인 필요",
         day=date(2026, 8, 24),
         parent_topics=(parent,),
+        interview_tracks=initial.interview_tracks,
+        question_topic=initial.question_topic,
         interview_answer=InterviewAnswerRevision(
             question=initial.title,
             answer="그냥 전체를 만들었다.",

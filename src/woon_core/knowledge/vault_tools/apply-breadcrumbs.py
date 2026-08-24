@@ -166,7 +166,7 @@ def domain_hub(path: Path) -> Path | None:
     domain_index = ROOT / "wiki" / domain / "README.md"
     if domain_index.exists():
         return domain_index.relative_to(ROOT)
-    return Path("maps/developer-wiki-map.md")
+    return Path("wiki/README.md")
 
 
 def folder_indexes(path: Path) -> list[Path]:

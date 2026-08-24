@@ -85,6 +85,11 @@ class KnowledgeSettings:
             if version == 2
             else None
         )
+        if compiled_wiki is not None and canonical_root != compiled_wiki.output_root:
+            raise WoonError(
+                "knowledge configuration canonical.root and compiled_wiki.output_root "
+                "must be the same Wiki root"
+            )
         return cls(
             vault=resolved_vault,
             canonical_root=canonical_root,

@@ -174,10 +174,14 @@ class MarkdownDocumentRepository:
         raw = yaml.safe_load(frontmatter) or {}
         if not isinstance(raw, dict):
             raise WoonError("canonical document frontmatter must be a mapping")
+        canonical_id = _required(raw, "canonical_id")
         metadata = DocumentMetadata(
-            canonical_id=_required(raw, "canonical_id"),
+            canonical_id=canonical_id,
             title=_required(raw, "title"),
-            domain=_required(raw, "domain"),
+            # Older unified Wiki pages did not persist this redundant field.
+            # Derive it from the path identity so the whole ``wiki/`` tree is
+            # one repository without rewriting valid human-authored notes.
+            domain=str(raw.get("domain") or canonical_id.split("/", 1)[0]),
             summary=_required(raw, "summary"),
             purpose=str(raw.get("purpose", "")),
             difficulty=str(raw.get("difficulty", "foundation")),

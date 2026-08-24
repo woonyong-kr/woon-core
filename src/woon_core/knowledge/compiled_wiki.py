@@ -224,7 +224,12 @@ class CompiledWiki:
         compiled = 0
         unchanged = 0
         changed_ids: list[str] = []
-        updated_receipts = dict(receipts)
+        # A page identity or output path may be migrated, but an old receipt
+        # must never keep the retired page alive as a second canonical branch.
+        updated_receipts = {
+            page_id: receipt for page_id, receipt in receipts.items() if page_id in pages
+        }
+        receipt_changed = updated_receipts != receipts
         writes: list[tuple[Path, str]] = []
 
         for page_id in sorted(pages):
@@ -280,7 +285,7 @@ class CompiledWiki:
             relation_changed = current_relations != relation_records
         except WoonError:
             relation_changed = True
-        if not writes and not relation_changed:
+        if not writes and not relation_changed and not receipt_changed:
             self._last_input_state = None
             return CompileReport(compiled, unchanged, tuple(changed_ids))
 
@@ -303,7 +308,7 @@ class CompiledWiki:
                     self._settings.relations_path,
                     {"version": SCHEMA_VERSION, "relations": relation_records},
                 )
-            if writes:
+            if writes or receipt_changed:
                 _write_yaml(
                     self._settings.receipts_path,
                     {
@@ -397,7 +402,10 @@ class CompiledWiki:
         approved_review_id: str | None,
     ) -> CompileReport:
         sources, claims, pages, curations, _ = self._load_inputs()
-        page_id = f"wiki/canonical/{metadata.canonical_id}"
+        # The compiler and the conversation archive share the same Wiki
+        # identity.  A verification state is metadata, never a second output
+        # root below or beside ``wiki/``.
+        page_id = metadata.canonical_id
         body_hash = _sha256_text(_normalize(body))
         if archive_origin in MANUAL_ARCHIVE_ORIGINS:
             self._require_approved_archive_review(approved_review_id, body_hash)
@@ -449,7 +457,7 @@ class CompiledWiki:
         frontmatter["source_ids"] = list(source_session_ids) or [source_id]
         pages[page_id] = {
             "page_id": page_id,
-            "output_path": f"canonical/{metadata.canonical_id}.md",
+            "output_path": f"{metadata.canonical_id}.md",
             "title": metadata.title,
             "frontmatter": frontmatter,
             "source_ids": [source_id],

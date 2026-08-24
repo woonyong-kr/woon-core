@@ -91,6 +91,41 @@ style:
     )
 
 
+def test_version_2_rejects_split_canonical_and_compiled_wiki_roots(tmp_path: Path) -> None:
+    config = tmp_path / "config"
+    config.mkdir(parents=True)
+    (config / "document.md").write_text("# 문서 기준\n", encoding="utf-8")
+    (config / "diagram.md").write_text("# 다이어그램 기준\n", encoding="utf-8")
+    (config / "canonical-knowledge.yaml").write_text(
+        """
+version: 2
+runtime_root: .local/knowledge
+canonical:
+  root: wiki/canonical
+search:
+  adapter: sqlite-fts
+  database: .local/knowledge/search.sqlite3
+  roots: []
+style:
+  document_guide: config/document.md
+  diagram_guide: config/diagram.md
+compiled_wiki:
+  output_root: wiki
+  sources: catalog/llm-wiki/sources.yaml
+  claims: catalog/llm-wiki/claims.yaml
+  pages: catalog/llm-wiki/pages.yaml
+  curation: catalog/llm-wiki/curation.yaml
+  relations: catalog/llm-wiki/relations.yaml
+  receipts: catalog/llm-wiki/receipts.yaml
+  review_queue: catalog/llm-wiki/review-queue.yaml
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WoonError, match="must be the same Wiki root"):
+        KnowledgeSettings.load(tmp_path)
+
+
 def test_archive_is_optimistic_and_reindexes(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     first = service.archive(

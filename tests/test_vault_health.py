@@ -20,6 +20,56 @@ AUDIT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIT)
 
 
+class MermaidQualityTests(unittest.TestCase):
+    def test_rejects_legacy_converter_markup_and_duplicate_stand_in_node(self) -> None:
+        shapes, placeholders = AUDIT.mermaid_quality_issues(
+            "wiki/example.md",
+            """```mermaid
+flowchart TD
+  input["사용자 입력"]
+  input_2["input"]
+  output["B&gt;결과&lt;/FONT"]
+  input_2 --> output
+```
+""",
+        )
+
+        self.assertEqual(shapes, ["wiki/example.md: line 5"])
+        self.assertEqual(placeholders, ["wiki/example.md: line 4: input_2"])
+
+    def test_accepts_clean_mermaid(self) -> None:
+        shapes, placeholders = AUDIT.mermaid_quality_issues(
+            "wiki/example.md",
+            """```mermaid
+flowchart TD
+  input["사용자 입력"]
+  output["결과"]
+  input --> output
+```
+""",
+        )
+
+        self.assertEqual(shapes, [])
+        self.assertEqual(placeholders, [])
+
+    def test_rejects_unquoted_syntax_in_edge_labels_and_reserved_node_ids(self) -> None:
+        shapes, _ = AUDIT.mermaid_quality_issues(
+            "wiki/example.md",
+            """```mermaid
+flowchart TD
+  start["시작"]
+  end["종료"]
+  start -->|do_work()| end
+```
+""",
+        )
+
+        self.assertEqual(
+            shapes,
+            ["wiki/example.md: line 4", "wiki/example.md: line 5"],
+        )
+
+
 class VaultRootDirectoryTests(unittest.TestCase):
     def test_allows_only_canonical_visible_root_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -118,24 +168,24 @@ class GlobalGraphRootTests(unittest.TestCase):
             self.assertEqual(issues, [])
 
 
-class GrowthAndEntityPolicyTests(unittest.TestCase):
+class WikiAndEntityPolicyTests(unittest.TestCase):
     def test_reports_single_wiki_contract_violations_directly(self) -> None:
-        growth, entities = AUDIT.growth_and_entity_policy_issues(
+        wiki, entities = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/깨진-지식.md",
             "---\ntype: Project\naccess: local-only\n---\n# 깨진 성장\n",
             {"type": "Project", "access": "local-only"},
         )
 
-        self.assertTrue(growth)
+        self.assertTrue(wiki)
         self.assertEqual(entities, [])
 
     def test_reports_retired_parallel_roots_directly(self) -> None:
-        _, project_entities = AUDIT.growth_and_entity_policy_issues(
+        _, project_entities = AUDIT.wiki_and_entity_policy_issues(
             "projects/깨진-프로젝트.md",
             "# 깨진 프로젝트\n",
             {"type": "Wiki", "access": "local-only"},
         )
-        _, content_entities = AUDIT.growth_and_entity_policy_issues(
+        _, content_entities = AUDIT.wiki_and_entity_policy_issues(
             "content/깨진-콘텐츠.md",
             "# 깨진 콘텐츠\n",
             {"type": "Content", "access": "local-only", "content_kind": "unknown"},
@@ -145,7 +195,7 @@ class GrowthAndEntityPolicyTests(unittest.TestCase):
         self.assertTrue(content_entities)
 
     def test_accepts_project_and_content_facets_in_the_same_wiki_contract(self) -> None:
-        project = AUDIT.growth_and_entity_policy_issues(
+        project = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/자격-준비.md",
             "# 자격 준비\n",
             {
@@ -159,7 +209,7 @@ class GrowthAndEntityPolicyTests(unittest.TestCase):
                 "objective": "자격 취득",
             },
         )
-        content = AUDIT.growth_and_entity_policy_issues(
+        content = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/학습-자료.md",
             "# 학습 자료\n",
             {
@@ -177,7 +227,7 @@ class GrowthAndEntityPolicyTests(unittest.TestCase):
         self.assertEqual(content, ([], []))
 
     def test_rejects_an_invalid_canonical_identity_and_facet(self) -> None:
-        growth, _ = AUDIT.growth_and_entity_policy_issues(
+        wiki, _ = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/깨진-정체성.md",
             "# 깨진 정체성\n",
             {
@@ -189,11 +239,11 @@ class GrowthAndEntityPolicyTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(any("canonical_id" in issue for issue in growth))
-        self.assertTrue(any("facets" in issue for issue in growth))
+        self.assertTrue(any("canonical_id" in issue for issue in wiki))
+        self.assertTrue(any("facets" in issue for issue in wiki))
 
     def test_rejects_multiple_primary_parent_topics(self) -> None:
-        growth, _ = AUDIT.growth_and_entity_policy_issues(
+        wiki, _ = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/여러-부모.md",
             "# 여러 부모\n",
             {
@@ -205,7 +255,50 @@ class GrowthAndEntityPolicyTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(any("exactly one primary" in issue for issue in growth))
+        self.assertTrue(any("exactly one primary" in issue for issue in wiki))
+
+    def test_rejects_numbered_interview_identity_and_wiki_root_parent(self) -> None:
+        wiki, _ = AUDIT.wiki_and_entity_policy_issues(
+            "wiki/personal/interview/Q06-Kyro-문제와-역할.md",
+            "# Q06. Kyro 문제와 역할\n",
+            {
+                "type": "Wiki",
+                "title": "Q06. Kyro 문제와 역할",
+                "canonical_id": "personal/interview/Q06-Kyro-문제와-역할",
+                "facets": ["커리어", "학습"],
+                "knowledge_state": "확인 필요",
+                "parent_topics": ["[[wiki/README|Wiki]]"],
+                "question_kind": "interview",
+                "interview_tracks": ["KRAFTON AI Engineer"],
+                "question_topic": "Kubernetes 장애 복구 서비스",
+            },
+        )
+
+        self.assertTrue(any("sequence or archive" in issue for issue in wiki))
+        self.assertTrue(any("without numbering" in issue for issue in wiki))
+        self.assertTrue(any("semantic parent" in issue for issue in wiki))
+
+    def test_accepts_semantic_interview_identity(self) -> None:
+        wiki, entities = AUDIT.wiki_and_entity_policy_issues(
+            "wiki/personal/interview/kubernetes-장애-원인을-어떻게-판정했습니까.md",
+            "# Kubernetes 장애 원인을 어떻게 판정했습니까?\n",
+            {
+                "type": "Wiki",
+                "title": "Kubernetes 장애 원인을 어떻게 판정했습니까?",
+                "canonical_id": "personal/interview/kubernetes-장애-원인을-어떻게-판정했습니까",
+                "facets": ["커리어", "학습"],
+                "knowledge_state": "확인 필요",
+                "parent_topics": [
+                    "[[wiki/personal/projects/kubernetes-장애-복구-서비스|"
+                    "Kubernetes 장애 복구 서비스]]"
+                ],
+                "question_kind": "interview",
+                "interview_tracks": ["KRAFTON AI Engineer"],
+                "question_topic": "Kubernetes 장애 복구 서비스",
+            },
+        )
+
+        self.assertEqual((wiki, entities), ([], []))
 
 
 class RuntimePermissionTests(unittest.TestCase):
@@ -696,13 +789,15 @@ class RetiredAiInstructionBoundaryTests(unittest.TestCase):
             root = Path(directory)
             (root / "ai-reference").mkdir()
             (root / ".legacy-backup").mkdir()
+            (root / "wiki/canonical").mkdir(parents=True)
             (root / "brain/.git").mkdir(parents=True)
 
             issues = AUDIT.retired_ai_instruction_boundary_issues(root)
 
-            self.assertEqual(len(issues), 3)
+            self.assertEqual(len(issues), 4)
             self.assertTrue(any("ai-reference" in issue for issue in issues))
             self.assertTrue(any(".legacy-backup" in issue for issue in issues))
+            self.assertTrue(any("wiki/canonical" in issue for issue in issues))
             self.assertTrue(any("nested Git" in issue for issue in issues))
 
     def test_rejects_retired_visualization_copy_and_sample_roots(self) -> None:
