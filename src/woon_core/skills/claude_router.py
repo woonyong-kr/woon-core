@@ -19,7 +19,7 @@ from woon_core.skills.service import CatalogSkill
 class ClaudeRoutingSelector:
     """Select skill names with tools, project rules, plugins and MCP disabled."""
 
-    timeout_seconds: int = 120
+    timeout_seconds: int = 300
 
     def __call__(
         self,

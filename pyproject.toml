@@ -20,6 +20,8 @@ dependencies = [
 woon = "woon_core.cli:main"
 woon-global-instructions = "woon_core.context.global_instructions:main"
 woon-knowledge-mcp = "woon_core.knowledge.mcp_server:main"
+woon-tasks-mcp = "woon_core.tasks.mcp_server:main"
+woon-people-mcp = "woon_core.people.mcp_server:main"
 woon-reference-audit = "woon_core.knowledge.reference_audit:main"
 
 [dependency-groups]
@@ -33,6 +35,10 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/woon_core"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/woon-calendar-bridge.swift" = "woon_core/calendar/native/woon-calendar-bridge.swift"
+"scripts/woon-calendar-export.swift" = "woon_core/calendar/native/woon-calendar-export.swift"
+
 [tool.pytest.ini_options]
 addopts = "-q"
 pythonpath = ["src"]
@@ -41,6 +47,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = ["src/woon_core/knowledge/vault_tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -50,3 +57,4 @@ python_version = "3.12"
 strict = true
 packages = ["woon_core"]
 mypy_path = "src"
+exclude = "^src/woon_core/knowledge/vault_tools/"

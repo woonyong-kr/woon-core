@@ -12,7 +12,10 @@ from woon_core.knowledge.compiled_wiki import (
     CompilationAudit,
     CompiledWiki,
     CompileReport,
+    CuratedRevision,
+    CuratedRevisionReport,
     MigrationReport,
+    RevisionReconciliationReport,
 )
 from woon_core.knowledge.domain import (
     CanonicalDocument,
@@ -68,6 +71,9 @@ class KnowledgeService:
         metadata: DocumentMetadata,
         body: str,
         expected_revision: str | None = None,
+        *,
+        archive_origin: str = "manual-reviewed",
+        approved_review_id: str | None = None,
     ) -> SaveResult:
         validated = self._validate_metadata(metadata)
         normalized_body = self._validate_body(body)
@@ -85,7 +91,13 @@ class KnowledgeService:
             if self._compiled_wiki is None:
                 result = self._repository.save(validated, normalized_body, expected_revision)
             else:
-                self._compiled_wiki.archive(validated, normalized_body, metadata.source_ids)
+                self._compiled_wiki.archive(
+                    validated,
+                    normalized_body,
+                    metadata.source_ids,
+                    archive_origin=archive_origin,
+                    approved_review_id=approved_review_id,
+                )
                 saved = self._repository.get(validated.canonical_id)
                 if saved is None:
                     raise WoonError("compiled archive did not create its canonical output")
@@ -122,6 +134,59 @@ class KnowledgeService:
         with self._repository.exclusive():
             report = self._compiled_wiki.migrate()
             self._reindex_unlocked()
+            return report
+
+    def initialize_compiled_wiki_curation(self) -> int:
+        """Create provisional present-use records for an already migrated Wiki."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            count = self._compiled_wiki.initialize_curation()
+            return count
+
+    def refresh_provisional_compiled_wiki_curation(self) -> int:
+        """Refresh generated current-use text without touching reviewed records."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            return self._compiled_wiki.refresh_provisional_curation()
+
+    def reconcile_superseded_compiled_wiki_revisions(self) -> RevisionReconciliationReport:
+        """Preserve unreferenced conversation revisions as explicit inactive history."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            return self._compiled_wiki.reconcile_superseded_revisions()
+
+    def curate_compiled_wiki_revisions(
+        self, revisions: tuple[CuratedRevision, ...]
+    ) -> CuratedRevisionReport:
+        """Apply reviewed prose, compile it, and keep the search index in sync."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        if not revisions:
+            raise WoonError("curated revision requires at least one page")
+        page_ids = tuple(revision.page_id for revision in revisions)
+        with self._repository.exclusive():
+            snapshot = self._compiled_wiki.snapshot_inputs()
+            try:
+                report = self._compiled_wiki.curate_revisions(revisions)
+                self._reindex_unlocked()
+            except Exception as revision_error:
+                try:
+                    self._compiled_wiki.restore_inputs(snapshot)
+                    self._compiled_wiki.compile(page_ids=page_ids)
+                    self._reindex_unlocked()
+                except Exception as recovery_error:
+                    raise WoonError(
+                        "curated revision failed and the previous compiler/index state could not "
+                        f"be fully restored: revision={revision_error}; recovery={recovery_error}"
+                    ) from recovery_error
+                raise
             return report
 
     def compilation_audit(self) -> CompilationAudit:
@@ -226,8 +291,14 @@ class KnowledgeService:
                     replace(historical.metadata), historical.body, expected_revision
                 )
             else:
-                self._compiled_wiki.archive(
-                    replace(historical.metadata), historical.body, (f"git:{git_revision}",)
+                historical_body_hash = hashlib.sha256(
+                    historical.body.replace("\r\n", "\n").rstrip().encode("utf-8") + b"\n"
+                ).hexdigest()
+                self._compiled_wiki.restore_from_git(
+                    replace(historical.metadata),
+                    historical.body,
+                    git_revision,
+                    historical_body_hash,
                 )
                 saved = self._repository.get(canonical_id)
                 if saved is None:

@@ -25,6 +25,9 @@ FRONTMATTER = re.compile(r"\A---\n(?P<yaml>[\s\S]*?)\n---\n?(?P<body>[\s\S]*)\Z"
 H1 = re.compile(r"\A(?:\n)*#\s+(?P<title>.+?)\s*\n(?:\n)?")
 COMPILED_KEY = "llm_wiki"
 SCHEMA_VERSION = 1
+MAX_COMPOSED_CLAIM_MARKDOWN_CHARS = 1_800
+MANUAL_ARCHIVE_ORIGINS = {"manual-reviewed", "verified-source"}
+GIT_RESTORE_ARCHIVE_ORIGIN = "git-restore"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,7 @@ class CompiledWikiSettings:
     sources_path: Path
     claims_path: Path
     pages_path: Path
+    curation_path: Path
     relations_path: Path
     receipts_path: Path
     review_queue_path: Path
@@ -73,6 +77,34 @@ class CompilationAudit:
         return not self.errors
 
 
+@dataclass(frozen=True, slots=True)
+class RevisionReconciliationReport:
+    """Non-destructive normalization result for repeated conversation archives."""
+
+    archived_sources: int
+    superseded_claims: int
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedRevision:
+    """One verified reader-facing rewrite derived from an existing Wiki page."""
+
+    page_id: str
+    body: str
+    statement: str
+    current_use: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedRevisionReport:
+    """Result of preserving raw inputs while promoting curated revisions."""
+
+    curated: int
+    compiled: int
+    unchanged: int
+    page_ids: tuple[str, ...]
+
+
 class CompiledWiki:
     """Compile and audit one private source-schema Wiki without model calls."""
 
@@ -98,6 +130,7 @@ class CompiledWiki:
         source_records: list[dict[str, Any]] = []
         claims: list[dict[str, Any]] = []
         specs: list[dict[str, Any]] = []
+        curations: list[dict[str, Any]] = []
         relations: list[dict[str, Any]] = []
         for relative, text in pages:
             frontmatter, title, body = _parse_markdown(text, relative)
@@ -138,6 +171,7 @@ class CompiledWiki:
                     "render": {"kind": "source-body", "source_id": source_id},
                 }
             )
+            curations.append(_initial_curation(page_id, title, frontmatter, source_records[-1:]))
             relations.extend(_relations_for(page_id, frontmatter))
 
         snapshot = self.snapshot_inputs()
@@ -148,6 +182,10 @@ class CompiledWiki:
             )
             _write_yaml(self._settings.claims_path, {"version": SCHEMA_VERSION, "claims": claims})
             _write_yaml(self._settings.pages_path, {"version": SCHEMA_VERSION, "pages": specs})
+            _write_yaml(
+                self._settings.curation_path,
+                {"version": SCHEMA_VERSION, "curations": curations},
+            )
             _write_yaml(
                 self._settings.relations_path,
                 {"version": SCHEMA_VERSION, "relations": relations},
@@ -171,7 +209,10 @@ class CompiledWiki:
     def compile(self, *, force: bool = False, page_ids: tuple[str, ...] = ()) -> CompileReport:
         """Compile stale or requested pages only after validating every input relation."""
 
-        sources, claims, pages, receipts = self._load_inputs()
+        sources, claims, pages, curations, receipts = self._load_inputs()
+        review_items = _load_yaml_list(self._settings.review_queue_path, "items")
+        for source in sources.values():
+            _validate_archive_review_binding(source, review_items)
         selected = set(page_ids)
         unknown = selected.difference(pages)
         if unknown:
@@ -186,11 +227,12 @@ class CompiledWiki:
             if selected and page_id not in selected:
                 continue
             page = pages[page_id]
+            curation = self._page_curation(page, curations)
             source_records = self._page_sources(page, sources)
             claim_records = self._page_claims(page, claims)
-            _validate_page(page, source_records, claim_records)
-            input_sha256 = _input_hash(page, source_records, claim_records)
-            output = _render_page(page, source_records, claim_records, input_sha256)
+            _validate_page(page, source_records, claim_records, curation)
+            input_sha256 = _input_hash(page, source_records, claim_records, curation)
+            output = _render_page(page, source_records, claim_records, curation, input_sha256)
             output_path = _inside(
                 self._settings.output_root, page["output_path"], "page output_path"
             )
@@ -287,14 +329,81 @@ class CompiledWiki:
         metadata: DocumentMetadata,
         body: str,
         source_session_ids: tuple[str, ...],
+        *,
+        archive_origin: str = "manual-reviewed",
+        approved_review_id: str | None = None,
     ) -> CompileReport:
-        """Turn a conversation body into source and accepted claim compiler inputs."""
+        """Turn a manually reviewed body into compiler inputs.
 
-        sources, claims, pages, _ = self._load_inputs()
+        This is deliberately not an automation ingestion endpoint. Mail, chat,
+        Novel, system, tool, and reasoning payloads require a separate
+        privacy-minimizing projector and cannot be written through this method.
+        """
+
+        if archive_origin not in MANUAL_ARCHIVE_ORIGINS:
+            raise WoonError(
+                "compiled archive only accepts manual-reviewed or verified-source inputs"
+            )
+
+        return self._archive_compiled_input(
+            metadata,
+            body,
+            source_session_ids,
+            archive_origin=archive_origin,
+            approved_review_id=approved_review_id,
+        )
+
+    def restore_from_git(
+        self,
+        metadata: DocumentMetadata,
+        body: str,
+        git_revision: str,
+        expected_body_sha256: str,
+    ) -> CompileReport:
+        """Restore a human-confirmed Git revision without a mutable review-queue entry.
+
+        This narrow path is intentionally separate from :meth:`archive`: the
+        caller must already have read the body from the requested Git revision
+        and bind that exact body hash to it.  It is for recovery only, never
+        for mail/chat ingestion or normal archival.
+        """
+
+        revision = git_revision.strip()
+        if not revision:
+            raise WoonError("compiled Git restore requires a Git revision")
+        body_hash = _sha256_text(_normalize(body))
+        if body_hash != expected_body_sha256:
+            raise WoonError("compiled Git restore body hash does not match the requested revision")
+        return self._archive_compiled_input(
+            metadata,
+            body,
+            (f"git:{revision}",),
+            archive_origin=GIT_RESTORE_ARCHIVE_ORIGIN,
+            approved_review_id=None,
+        )
+
+    def _archive_compiled_input(
+        self,
+        metadata: DocumentMetadata,
+        body: str,
+        source_session_ids: tuple[str, ...],
+        *,
+        archive_origin: str,
+        approved_review_id: str | None,
+    ) -> CompileReport:
+        sources, claims, pages, curations, _ = self._load_inputs()
         page_id = f"wiki/canonical/{metadata.canonical_id}"
         body_hash = _sha256_text(_normalize(body))
+        if archive_origin in MANUAL_ARCHIVE_ORIGINS:
+            self._require_approved_archive_review(approved_review_id, body_hash)
+        elif archive_origin == GIT_RESTORE_ARCHIVE_ORIGIN:
+            if approved_review_id is not None:
+                raise WoonError("compiled Git restore must not accept a review approval")
+        else:
+            raise WoonError("compiled archive_origin is invalid")
         source_id = f"source://conversation/{metadata.canonical_id}/{body_hash[:24]}"
         claim_id = f"claim://conversation/{metadata.canonical_id}/{body_hash[:24]}"
+        previous_page = pages.get(page_id)
         sources[source_id] = {
             "source_id": source_id,
             "kind": "conversation",
@@ -305,6 +414,8 @@ class CompiledWiki:
             "lifecycle": "compiled",
             "title": metadata.title,
             "purpose": metadata.purpose,
+            "archive_origin": archive_origin,
+            "approved_review_id": approved_review_id,
             "body": body.rstrip() + "\n",
             "source_session_ids": list(source_session_ids),
         }
@@ -316,6 +427,17 @@ class CompiledWiki:
             "source_ids": [source_id],
             "markdown": body.rstrip() + "\n",
         }
+        if previous_page is not None:
+            _supersede_replaced_conversation_revision(
+                previous_page,
+                pages,
+                page_id,
+                sources,
+                claims,
+                metadata.canonical_id,
+                source_id,
+                claim_id,
+            )
         frontmatter = _canonical_frontmatter(metadata)
         # Preserve external session ownership in the rendered canonical document.
         # The compiler source id remains in the page spec and receipt provenance.
@@ -329,8 +451,358 @@ class CompiledWiki:
             "claim_ids": [claim_id],
             "render": {"kind": "claims"},
         }
-        self._write_inputs(sources, claims, pages)
+        curations[page_id] = {
+            "page_id": page_id,
+            "current_use": metadata.purpose,
+            "basis": "archive-request",
+            "status": "confirmed",
+        }
+        self._write_inputs(sources, claims, pages, curations)
         return self.compile(page_ids=(page_id,))
+
+    def _require_approved_archive_review(self, review_id: str | None, body_hash: str) -> None:
+        """Require an immutable human approval bound to the exact archived body."""
+
+        if not isinstance(review_id, str) or not review_id.strip():
+            raise WoonError("compiled archive requires approved_review_id")
+        for item in _load_yaml_list(self._settings.review_queue_path, "items"):
+            if item.get("candidate_id") != review_id:
+                continue
+            if (
+                item.get("status") == "approved"
+                and item.get("kind") == "manual-archive"
+                and item.get("input_sha256") == body_hash
+                and isinstance(item.get("approved_by"), str)
+                and item["approved_by"].strip()
+            ):
+                return
+            break
+        raise WoonError("compiled archive requires an approved review bound to the input hash")
+
+    def curate_revisions(self, revisions: tuple[CuratedRevision, ...]) -> CuratedRevisionReport:
+        """Promote reviewed prose without overwriting the legacy source it came from.
+
+        A reader-facing revision is a new ``curated-wiki`` source.  The prior
+        source and claim remain in the catalog for provenance, while the page
+        renders the new source body.  Repeating the operation archives only a
+        previous curated revision that is no longer referenced by another page.
+        """
+
+        if not revisions:
+            raise WoonError("curated revision requires at least one page")
+        sources, claims, pages, curations, _ = self._load_inputs()
+        snapshot = self.snapshot_inputs()
+        requested_ids = [revision.page_id for revision in revisions]
+        if len(set(requested_ids)) != len(requested_ids):
+            raise WoonError("curated revision contains a duplicate page_id")
+
+        changed: list[str] = []
+        try:
+            for revision in sorted(revisions, key=lambda item: item.page_id):
+                page_id = _required_string({"page_id": revision.page_id}, "page_id")
+                page = pages.get(page_id)
+                if page is None:
+                    raise WoonError(f"compiled Wiki page spec not found: {page_id}")
+                body = _curated_body(revision.body)
+                statement = _required_string({"statement": revision.statement}, "statement")
+                curation = self._page_curation(page, curations)
+                current_use = (
+                    _required_string({"current_use": revision.current_use}, "current_use")
+                    if revision.current_use is not None
+                    else curation["current_use"]
+                )
+                render = page.get("render")
+                if not isinstance(render, dict):
+                    raise WoonError("page render must be a mapping")
+                render_kind = render.get("kind")
+                if render_kind not in {"source-body", "claims"}:
+                    raise WoonError("curated revision requires a supported page render")
+
+                current_source_id = (
+                    _required_string(render, "source_id") if render_kind == "source-body" else None
+                )
+                if current_source_id is not None and current_source_id not in sources:
+                    raise WoonError("curated revision render source does not exist")
+
+                normalized_hash = _sha256_text(_normalize(body))
+                source_id = (
+                    f"source://curated-wiki/{quote(page_id, safe='/._-')}/{normalized_hash[:24]}"
+                )
+                claim_id = (
+                    f"claim://curated-wiki/{quote(page_id, safe='/._-')}/{normalized_hash[:24]}"
+                )
+                if source_id in sources or claim_id in claims:
+                    raise WoonError("curated revision already exists in the compiler catalog")
+
+                frontmatter = page.get("frontmatter")
+                if not isinstance(frontmatter, dict):
+                    raise WoonError("page frontmatter must be a mapping")
+                title = _required_string(page, "title")
+                privacy = "public" if frontmatter.get("access") == "public" else "local-only"
+                sources[source_id] = {
+                    "source_id": source_id,
+                    "kind": "curated-wiki",
+                    "locator": f"curation/{page_id}/{normalized_hash[:24]}",
+                    "original_sha256": _sha256_text(body),
+                    "normalized_sha256": normalized_hash,
+                    "privacy": privacy,
+                    "lifecycle": "compiled",
+                    "title": title,
+                    "purpose": current_use,
+                    "body": body,
+                }
+                claims[claim_id] = {
+                    "claim_id": claim_id,
+                    "kind": "curated-document",
+                    "status": "accepted",
+                    "statement": statement,
+                    "source_ids": [source_id],
+                    "markdown": statement + "\n",
+                }
+
+                source_ids = _string_list(page.get("source_ids"), "page source_ids")
+                claim_ids = _string_list(page.get("claim_ids"), "page claim_ids")
+                if (
+                    current_source_id is not None
+                    and sources[current_source_id].get("kind") == "curated-wiki"
+                ):
+                    self._supersede_unshared_curated_source(
+                        current_source_id, source_id, page_id, pages, sources
+                    )
+                    source_ids = [value for value in source_ids if value != current_source_id]
+                    claim_ids = self._supersede_unshared_curated_claims(
+                        claim_ids, current_source_id, claim_id, page_id, pages, claims
+                    )
+                page["source_ids"] = list(dict.fromkeys([*source_ids, source_id]))
+                page["claim_ids"] = list(dict.fromkeys([*claim_ids, claim_id]))
+                page["render"] = {"kind": "source-body", "source_id": source_id}
+                curation.update(
+                    {
+                        "current_use": current_use,
+                        "basis": "curated-revision",
+                        "status": "confirmed",
+                    }
+                )
+                changed.append(page_id)
+
+            self._write_inputs(sources, claims, pages, curations)
+            compile_report = self.compile(page_ids=tuple(changed))
+        except Exception:
+            self.restore_inputs(snapshot)
+            raise
+        return CuratedRevisionReport(
+            curated=len(changed),
+            compiled=compile_report.compiled,
+            unchanged=compile_report.unchanged,
+            page_ids=tuple(changed),
+        )
+
+    @staticmethod
+    def _supersede_unshared_curated_source(
+        prior_source_id: str,
+        successor_source_id: str,
+        page_id: str,
+        pages: dict[str, dict[str, Any]],
+        sources: dict[str, dict[str, Any]],
+    ) -> None:
+        used_elsewhere = any(
+            other_page_id != page_id
+            and prior_source_id in _string_list(other_page.get("source_ids"), "page source_ids")
+            for other_page_id, other_page in pages.items()
+        )
+        if not used_elsewhere:
+            sources[prior_source_id].update(
+                {"lifecycle": "archived", "superseded_by": successor_source_id}
+            )
+
+    @staticmethod
+    def _supersede_unshared_curated_claims(
+        claim_ids: list[str],
+        prior_source_id: str,
+        successor_claim_id: str,
+        page_id: str,
+        pages: dict[str, dict[str, Any]],
+        claims: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        retained: list[str] = []
+        for prior_claim_id in claim_ids:
+            claim = claims[prior_claim_id]
+            is_prior_curated_claim = claim.get("kind") == "curated-document" and claim.get(
+                "source_ids"
+            ) == [prior_source_id]
+            used_elsewhere = any(
+                other_page_id != page_id
+                and prior_claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
+                for other_page_id, other_page in pages.items()
+            )
+            if not is_prior_curated_claim or used_elsewhere:
+                retained.append(prior_claim_id)
+                continue
+            claim.update({"status": "superseded", "superseded_by": successor_claim_id})
+        return retained
+
+    def reconcile_superseded_revisions(self) -> RevisionReconciliationReport:
+        """Classify safe, unreferenced conversation revisions without discarding them.
+
+        Repeated archive calls historically replaced a page spec but kept its prior
+        generated source and claim as an orphan.  A record is reconciled only when
+        the current page spec identifies one unambiguous successor with the same
+        conversation locator; unrelated or ambiguous orphan records remain errors.
+        """
+
+        sources, claims, pages, curations, _ = self._load_inputs()
+        referenced_sources = {
+            source_id
+            for page in pages.values()
+            for source_id in _string_list(page.get("source_ids"), "page source_ids")
+        }
+        referenced_claims = {
+            claim_id
+            for page in pages.values()
+            for claim_id in _string_list(page.get("claim_ids"), "page claim_ids")
+        }
+        active_sources_by_locator: dict[str, set[str]] = {}
+        for source_id in referenced_sources:
+            source = sources.get(source_id)
+            if source is None or source.get("lifecycle") != "compiled":
+                continue
+            locator = source.get("locator")
+            if isinstance(locator, str) and locator:
+                active_sources_by_locator.setdefault(locator, set()).add(source_id)
+
+        source_successors: dict[str, str] = {}
+        for source_id, source in sources.items():
+            if source_id in referenced_sources or source.get("lifecycle") != "compiled":
+                continue
+            if source.get("kind") != "conversation":
+                continue
+            locator = source.get("locator")
+            successors = (
+                active_sources_by_locator.get(locator, set()) if isinstance(locator, str) else set()
+            )
+            if len(successors) != 1:
+                continue
+            successor = next(iter(successors))
+            if successor == source_id:
+                continue
+            source["lifecycle"] = "archived"
+            source["superseded_by"] = successor
+            source_successors[source_id] = successor
+
+        active_claims_by_sources: dict[tuple[str, ...], set[str]] = {}
+        for claim_id in referenced_claims:
+            claim = claims.get(claim_id)
+            if claim is None or claim.get("status") != "accepted":
+                continue
+            source_ids = tuple(_string_list(claim.get("source_ids"), "claim source_ids"))
+            active_claims_by_sources.setdefault(source_ids, set()).add(claim_id)
+
+        superseded_claims = 0
+        for claim_id, claim in claims.items():
+            if claim_id in referenced_claims or claim.get("status") != "accepted":
+                continue
+            source_ids = tuple(_string_list(claim.get("source_ids"), "claim source_ids"))
+            successor_sources = tuple(
+                source_successors.get(source_id, source_id) for source_id in source_ids
+            )
+            successors = active_claims_by_sources.get(successor_sources, set())
+            if len(successors) != 1:
+                continue
+            successor = next(iter(successors))
+            if successor == claim_id:
+                continue
+            claim["status"] = "superseded"
+            claim["superseded_by"] = successor
+            superseded_claims += 1
+
+        if source_successors or superseded_claims:
+            self._write_inputs(sources, claims, pages, curations)
+            self._last_input_state = None
+        return RevisionReconciliationReport(
+            archived_sources=len(source_successors),
+            superseded_claims=superseded_claims,
+        )
+
+    def initialize_curation(self) -> int:
+        """Create one present-use record for every existing page spec.
+
+        This deliberately derives only a *current* operating purpose.  It does
+        not populate ``source.purpose`` for legacy material because that field
+        represents historical collection intent, which cannot be reconstructed
+        reliably from the rendered document.
+        """
+
+        if self._settings.curation_path.exists():
+            raise WoonError(
+                "compiled Wiki curation catalog already exists; "
+                "edit its records instead of replacing them"
+            )
+        sources = _indexed(
+            _load_yaml_list(self._settings.sources_path, "sources"), "source_id", "source"
+        )
+        pages = _indexed(_load_yaml_list(self._settings.pages_path, "pages"), "page_id", "page")
+        curations = []
+        for page_id, page in sorted(pages.items()):
+            title = _required_string(page, "title")
+            frontmatter = page.get("frontmatter")
+            if not isinstance(frontmatter, dict):
+                raise WoonError("page frontmatter must be a mapping")
+            curations.append(
+                _initial_curation(
+                    page_id,
+                    title,
+                    frontmatter,
+                    self._page_sources(page, sources),
+                )
+            )
+        _write_yaml(
+            self._settings.curation_path,
+            {"version": SCHEMA_VERSION, "curations": curations},
+        )
+        self._last_input_state = None
+        return len(curations)
+
+    def refresh_provisional_curation(self) -> int:
+        """Refresh generated legacy curation without overwriting manual records.
+
+        A provisional record may predate a curated or newly archived page that
+        was later added to its provenance.  Its source kinds are therefore
+        rechecked so that an explicit current-use purpose is not mislabeled as
+        inferred legacy metadata.
+        """
+
+        sources, _, pages, curations, _ = self._load_inputs()
+        refreshed = 0
+        for page_id, page in sorted(pages.items()):
+            curation = self._page_curation(page, curations)
+            if curation["basis"] != "legacy-page-metadata" or curation["status"] != "provisional":
+                continue
+            title = _required_string(page, "title")
+            frontmatter = page.get("frontmatter")
+            if not isinstance(frontmatter, dict):
+                raise WoonError("page frontmatter must be a mapping")
+            replacement = _initial_curation(
+                page_id,
+                title,
+                frontmatter,
+                self._page_sources(page, sources),
+            )
+            if any(
+                curation[field] != replacement[field]
+                for field in ("current_use", "basis", "status")
+            ):
+                curation.update(replacement)
+                refreshed += 1
+        if refreshed:
+            _write_yaml(
+                self._settings.curation_path,
+                {
+                    "version": SCHEMA_VERSION,
+                    "curations": [curations[key] for key in sorted(curations)],
+                },
+            )
+            self._last_input_state = None
+        return refreshed
 
     def snapshot_inputs(self) -> dict[Path, bytes | None]:
         """Capture small compiler catalogs before a transactional canonical mutation."""
@@ -355,15 +827,32 @@ class CompiledWiki:
 
         errors: list[str] = []
         try:
-            sources, claims, pages, receipts = self._load_inputs()
+            sources, claims, pages, curations, receipts = self._load_inputs()
+            review_items = _load_yaml_list(self._settings.review_queue_path, "items")
         except WoonError as error:
             return CompilationAudit(0, 0, (str(error),))
         outputs: set[str] = set()
+        referenced_sources: set[str] = set()
+        referenced_claims: set[str] = set()
+        for source_id, source in sorted(sources.items()):
+            try:
+                _validate_source(source)
+                _validate_archive_review_binding(source, review_items)
+            except WoonError as error:
+                errors.append(f"{source_id}: {error}")
+        for claim_id, claim in sorted(claims.items()):
+            try:
+                _validate_claim_record(claim)
+            except WoonError as error:
+                errors.append(f"{claim_id}: {error}")
         for page_id, page in sorted(pages.items()):
             try:
+                curation = self._page_curation(page, curations)
                 source_records = self._page_sources(page, sources)
                 claim_records = self._page_claims(page, claims)
-                _validate_page(page, source_records, claim_records)
+                _validate_page(page, source_records, claim_records, curation)
+                referenced_sources.update(record["source_id"] for record in source_records)
+                referenced_claims.update(record["claim_id"] for record in claim_records)
                 relative = page["output_path"]
                 if relative in outputs:
                     raise WoonError(f"duplicate compiled output_path: {relative}")
@@ -371,7 +860,7 @@ class CompiledWiki:
                 path = _inside(self._settings.output_root, relative, "page output_path")
                 if not path.is_file():
                     raise WoonError("compiled output is missing")
-                input_sha256 = _input_hash(page, source_records, claim_records)
+                input_sha256 = _input_hash(page, source_records, claim_records, curation)
                 receipt = receipts.get(page_id)
                 if receipt is None:
                     raise WoonError("compiled receipt is missing")
@@ -384,10 +873,55 @@ class CompiledWiki:
                 errors.append(f"{page_id}: {error}")
         for page_id in sorted(set(receipts).difference(pages)):
             errors.append(f"{page_id}: receipt has no page spec")
+        for source_id in sorted(set(sources).difference(referenced_sources)):
+            inactive_error = _inactive_revision_error(
+                source_id,
+                sources[source_id],
+                sources,
+                referenced_sources,
+                state_key="lifecycle",
+                inactive_state="archived",
+                record_label="source",
+            )
+            if inactive_error is not None:
+                errors.append(f"{source_id}: {inactive_error}")
+        for claim_id in sorted(set(claims).difference(referenced_claims)):
+            inactive_error = _inactive_revision_error(
+                claim_id,
+                claims[claim_id],
+                claims,
+                referenced_claims,
+                state_key="status",
+                inactive_state="superseded",
+                record_label="claim",
+            )
+            if inactive_error is not None:
+                errors.append(f"{claim_id}: {inactive_error}")
+        for page_id in sorted(set(curations).difference(pages)):
+            errors.append(f"{page_id}: curation has no page spec")
         try:
             current_relations = _load_yaml_list(self._settings.relations_path, "relations")
             if current_relations != _expected_relations(pages):
                 errors.append("relations catalog is stale for current page specs")
+            else:
+                known_targets = self._known_relation_targets(pages)
+                for relation in current_relations:
+                    target = _required_string(relation, "to_id")
+                    if target not in known_targets:
+                        errors.append(f"relation target does not resolve: {target}")
+        except WoonError as error:
+            errors.append(str(error))
+        try:
+            review_items = _load_yaml_list(self._settings.review_queue_path, "items")
+            for position, item in enumerate(review_items, start=1):
+                source_ids = item.get("source_ids", [])
+                if source_ids == []:
+                    continue
+                for source_id in _string_list(source_ids, "review item source_ids"):
+                    if source_id not in sources:
+                        errors.append(
+                            f"review item {position} references missing source_id {source_id!r}"
+                        )
         except WoonError as error:
             errors.append(str(error))
         return CompilationAudit(len(pages), len(receipts), tuple(errors))
@@ -421,22 +955,26 @@ class CompiledWiki:
         dict[str, dict[str, Any]],
         dict[str, dict[str, Any]],
         dict[str, dict[str, Any]],
+        dict[str, dict[str, Any]],
     ]:
         raw_sources = _load_yaml_list(self._settings.sources_path, "sources")
         raw_claims = _load_yaml_list(self._settings.claims_path, "claims")
         raw_pages = _load_yaml_list(self._settings.pages_path, "pages")
+        raw_curations = _load_yaml_list(self._settings.curation_path, "curations")
         raw_receipts = _load_yaml_list(self._settings.receipts_path, "receipts")
         sources = _indexed(raw_sources, "source_id", "source")
         claims = _indexed(raw_claims, "claim_id", "claim")
         pages = _indexed(raw_pages, "page_id", "page")
+        curations = _indexed(raw_curations, "page_id", "curation")
         receipts = _indexed(raw_receipts, "page_id", "receipt")
-        return sources, claims, pages, receipts
+        return sources, claims, pages, curations, receipts
 
     def _write_inputs(
         self,
         sources: dict[str, dict[str, Any]],
         claims: dict[str, dict[str, Any]],
         pages: dict[str, dict[str, Any]],
+        curations: dict[str, dict[str, Any]],
     ) -> None:
         _write_yaml(
             self._settings.sources_path,
@@ -450,6 +988,13 @@ class CompiledWiki:
             self._settings.pages_path,
             {"version": SCHEMA_VERSION, "pages": [pages[key] for key in sorted(pages)]},
         )
+        _write_yaml(
+            self._settings.curation_path,
+            {
+                "version": SCHEMA_VERSION,
+                "curations": [curations[key] for key in sorted(curations)],
+            },
+        )
 
     def _page_sources(
         self, page: dict[str, Any], sources: dict[str, dict[str, Any]]
@@ -462,6 +1007,16 @@ class CompiledWiki:
                 raise WoonError(f"page references missing source_id {identifier!r}")
             records.append(record)
         return records
+
+    def _page_curation(
+        self, page: dict[str, Any], curations: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        page_id = _required_string(page, "page_id")
+        curation = curations.get(page_id)
+        if curation is None:
+            raise WoonError(f"page has no current-use curation: {page_id}")
+        _validate_curation(curation, page_id)
+        return curation
 
     def _page_claims(
         self, page: dict[str, Any], claims: dict[str, dict[str, Any]]
@@ -480,6 +1035,7 @@ class CompiledWiki:
             self._settings.sources_path,
             self._settings.claims_path,
             self._settings.pages_path,
+            self._settings.curation_path,
             self._settings.relations_path,
             self._settings.receipts_path,
         )
@@ -500,9 +1056,31 @@ class CompiledWiki:
                 state.append((path.relative_to(self._settings.vault).as_posix(), -1, -1))
         return tuple(state)
 
+    def _known_relation_targets(self, pages: dict[str, dict[str, Any]]) -> set[str]:
+        """Resolve Wikilink-style targets without requiring every target to be a compiled page."""
+
+        targets = set(pages)
+        for page in pages.values():
+            output = Path(page["output_path"])
+            targets.add(output.with_suffix("").as_posix())
+            targets.add(output.stem)
+            frontmatter = page.get("frontmatter")
+            if isinstance(frontmatter, dict):
+                canonical_id = frontmatter.get("canonical_id")
+                if isinstance(canonical_id, str) and canonical_id.strip():
+                    targets.add(canonical_id.strip())
+        for path in self._settings.vault.rglob("*.md"):
+            relative = path.relative_to(self._settings.vault).with_suffix("").as_posix()
+            targets.add(relative)
+            targets.add(path.stem)
+        return targets
+
 
 def _validate_page(
-    page: dict[str, Any], sources: list[dict[str, Any]], claims: list[dict[str, Any]]
+    page: dict[str, Any],
+    sources: list[dict[str, Any]],
+    claims: list[dict[str, Any]],
+    curation: dict[str, Any],
 ) -> None:
     page_id = _required_string(page, "page_id")
     output_path = _required_string(page, "output_path")
@@ -516,6 +1094,7 @@ def _validate_page(
         raise WoonError("page frontmatter must be a mapping")
     if str(frontmatter.get("title", "")).strip() != title:
         raise WoonError("page frontmatter title must match page title")
+    _validate_curation(curation, page_id)
     render = page.get("render")
     if not isinstance(render, dict):
         raise WoonError("page render must be a mapping")
@@ -528,8 +1107,15 @@ def _validate_page(
             raise WoonError("source-body render source_id must be included in page source_ids")
     for source in sources:
         _validate_source(source)
+        if source.get("lifecycle") != "compiled":
+            raise WoonError("compiled page may only use compiled sources")
     for claim in claims:
         _validate_claim(claim, sources)
+        if kind == "claims" and len(claim["markdown"].strip()) > MAX_COMPOSED_CLAIM_MARKDOWN_CHARS:
+            raise WoonError(
+                "composed claim markdown exceeds "
+                f"{MAX_COMPOSED_CLAIM_MARKDOWN_CHARS} characters; split it by revisitable claim"
+            )
     access = str(frontmatter.get("access", "local-only"))
     if access == "public" and any(str(source.get("privacy")) != "public" for source in sources):
         raise WoonError("public compiled page requires public source provenance")
@@ -545,32 +1131,219 @@ def _validate_source(source: dict[str, Any]) -> None:
     _required_digest(source, "normalized_sha256")
     if source.get("privacy") not in {"local-only", "private", "public", "external-private"}:
         raise WoonError("source privacy is invalid")
-    if source.get("lifecycle") not in {"captured", "compiled", "archived"}:
+    lifecycle = source.get("lifecycle")
+    if lifecycle not in {"captured", "compiled", "archived"}:
         raise WoonError("source lifecycle is invalid")
+    if lifecycle == "archived":
+        _required_string(source, "superseded_by")
+    elif "superseded_by" in source:
+        raise WoonError("only archived source may declare superseded_by")
     if source.get("kind") != "legacy-wiki":
         _required_string(source, "purpose")
+    archive_origin = source.get("archive_origin")
+    if archive_origin is not None and archive_origin not in (
+        *MANUAL_ARCHIVE_ORIGINS,
+        GIT_RESTORE_ARCHIVE_ORIGIN,
+    ):
+        raise WoonError("source archive_origin is invalid")
+    review_id = source.get("approved_review_id")
+    if archive_origin in MANUAL_ARCHIVE_ORIGINS:
+        _required_string(source, "approved_review_id")
+    elif archive_origin == GIT_RESTORE_ARCHIVE_ORIGIN:
+        if review_id is not None:
+            raise WoonError("Git restore source must not declare approved_review_id")
+        source_session_ids = source.get("source_session_ids")
+        if (
+            not isinstance(source_session_ids, list)
+            or len(source_session_ids) != 1
+            or not isinstance(source_session_ids[0], str)
+            or not source_session_ids[0].startswith("git:")
+            or not source_session_ids[0][4:].strip()
+        ):
+            raise WoonError("Git restore source must declare exactly one Git revision")
+    elif review_id is not None:
+        raise WoonError("source approved_review_id requires archive_origin")
     if not isinstance(source.get("body"), str):
         raise WoonError("source body must be a string")
+    if _sha256_text(_normalize(source["body"])) != source["normalized_sha256"]:
+        raise WoonError("source normalized_sha256 does not match the normalized source body")
+
+
+def _validate_archive_review_binding(
+    source: dict[str, Any], review_items: list[dict[str, Any]]
+) -> None:
+    """Re-check review evidence during compile audit, not just at write time."""
+
+    if source.get("archive_origin") not in MANUAL_ARCHIVE_ORIGINS:
+        return
+    body = source.get("body")
+    if not isinstance(body, str):
+        raise WoonError("approved archive source body must be a string")
+    body_hash = _sha256_text(_normalize(body))
+    review_id = source.get("approved_review_id")
+    for item in review_items:
+        if item.get("candidate_id") != review_id:
+            continue
+        if (
+            item.get("status") == "approved"
+            and item.get("kind") == "manual-archive"
+            and item.get("input_sha256") == body_hash
+            and isinstance(item.get("approved_by"), str)
+            and item["approved_by"].strip()
+        ):
+            return
+        break
+    raise WoonError("approved archive source has no matching review evidence")
+
+
+def _validate_curation(curation: dict[str, Any], page_id: str) -> None:
+    if _required_string(curation, "page_id") != page_id:
+        raise WoonError("current-use curation page_id must match page")
+    _required_string(curation, "current_use")
+    basis = _required_string(curation, "basis")
+    if basis not in {
+        "archive-request",
+        "legacy-page-metadata",
+        "manual-review",
+        "curated-revision",
+    }:
+        raise WoonError("current-use curation basis is invalid")
+    status = _required_string(curation, "status")
+    if status not in {"provisional", "confirmed", "needs-review"}:
+        raise WoonError("current-use curation status is invalid")
 
 
 def _validate_claim(claim: dict[str, Any], sources: list[dict[str, Any]]) -> None:
-    _required_string(claim, "claim_id")
-    _required_string(claim, "kind")
-    _required_string(claim, "statement")
+    _validate_claim_record(claim)
     if claim.get("status") != "accepted":
         raise WoonError("compiled page may only use accepted claims")
     source_ids = _string_list(claim.get("source_ids"), "claim source_ids")
     known = {str(source.get("source_id")) for source in sources}
     if not set(source_ids).issubset(known):
         raise WoonError("claim evidence source_id must belong to its page")
+
+
+def _validate_claim_record(claim: dict[str, Any]) -> None:
+    _required_string(claim, "claim_id")
+    _required_string(claim, "kind")
+    _required_string(claim, "statement")
+    status = claim.get("status")
+    if status not in {"accepted", "superseded"}:
+        raise WoonError("claim status is invalid")
+    if status == "superseded":
+        _required_string(claim, "superseded_by")
+    elif "superseded_by" in claim:
+        raise WoonError("only superseded claim may declare superseded_by")
+    _string_list(claim.get("source_ids"), "claim source_ids")
     if not isinstance(claim.get("markdown"), str):
         raise WoonError("claim markdown must be a string")
+
+
+def _curated_body(value: str) -> str:
+    """Keep the compiler-owned frontmatter and H1 outside generated prose."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise WoonError("curated revision body must be a non-empty string")
+    body = value.rstrip() + "\n"
+    if body.startswith("---\n"):
+        raise WoonError("curated revision body must not include frontmatter")
+    if re.match(r"\s*#\s+", body):
+        raise WoonError("curated revision body must not include an H1")
+    return body
+
+
+def _supersede_replaced_conversation_revision(
+    page: dict[str, Any],
+    pages: dict[str, dict[str, Any]],
+    page_id: str,
+    sources: dict[str, dict[str, Any]],
+    claims: dict[str, dict[str, Any]],
+    canonical_id: str,
+    successor_source_id: str,
+    successor_claim_id: str,
+) -> None:
+    """Preserve the previous generated conversation revision as inactive evidence."""
+
+    source_prefix = f"source://conversation/{canonical_id}/"
+    claim_prefix = f"claim://conversation/{canonical_id}/"
+    other_source_ids = {
+        source_id
+        for other_page_id, other_page in pages.items()
+        if other_page_id != page_id
+        for source_id in _string_list(other_page.get("source_ids"), "page source_ids")
+    }
+    other_claim_ids = {
+        claim_id
+        for other_page_id, other_page in pages.items()
+        if other_page_id != page_id
+        for claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
+    }
+    for source_id in _string_list(page.get("source_ids"), "page source_ids"):
+        if (
+            source_id == successor_source_id
+            or source_id in other_source_ids
+            or not source_id.startswith(source_prefix)
+        ):
+            continue
+        source = sources.get(source_id)
+        if source is None:
+            continue
+        source["lifecycle"] = "archived"
+        source["superseded_by"] = successor_source_id
+    for claim_id in _string_list(page.get("claim_ids"), "page claim_ids"):
+        if (
+            claim_id == successor_claim_id
+            or claim_id in other_claim_ids
+            or not claim_id.startswith(claim_prefix)
+        ):
+            continue
+        claim = claims.get(claim_id)
+        if claim is None:
+            continue
+        claim["status"] = "superseded"
+        claim["superseded_by"] = successor_claim_id
+
+
+def _inactive_revision_error(
+    record_id: str,
+    record: dict[str, Any],
+    records: dict[str, dict[str, Any]],
+    referenced: set[str],
+    *,
+    state_key: str,
+    inactive_state: str,
+    record_label: str,
+) -> str | None:
+    """Ensure inactive history reaches a current record without a cycle."""
+
+    if record.get(state_key) != inactive_state:
+        return f"{record_label} has no page spec"
+    successor = record.get("superseded_by")
+    if not isinstance(successor, str) or not successor:
+        return f"inactive {record_label} has no superseded_by"
+    seen = {record_id}
+    current = successor
+    while current not in referenced:
+        if current in seen:
+            return f"{record_label} supersession chain contains a cycle"
+        seen.add(current)
+        successor_record = records.get(current)
+        if successor_record is None:
+            return f"{record_label} superseded_by does not exist"
+        if successor_record.get(state_key) != inactive_state:
+            return f"{record_label} supersession does not reach a current page"
+        next_successor = successor_record.get("superseded_by")
+        if not isinstance(next_successor, str) or not next_successor:
+            return f"inactive {record_label} has no superseded_by"
+        current = next_successor
+    return None
 
 
 def _render_page(
     page: dict[str, Any],
     sources: list[dict[str, Any]],
     claims: list[dict[str, Any]],
+    curation: dict[str, Any],
     input_sha256: str,
 ) -> str:
     render = page["render"]
@@ -584,6 +1357,9 @@ def _render_page(
     if not body.strip():
         raise WoonError("compiled page body must not be empty")
     frontmatter = dict(page["frontmatter"])
+    # This is a present operating purpose, not a reconstructed source intent.
+    frontmatter["purpose"] = curation["current_use"]
+    frontmatter["purpose_basis"] = curation["basis"]
     frontmatter[COMPILED_KEY] = {
         "schema_version": SCHEMA_VERSION,
         "build_id": input_sha256[:24],
@@ -596,13 +1372,23 @@ def _render_page(
 
 
 def _input_hash(
-    page: dict[str, Any], sources: list[dict[str, Any]], claims: list[dict[str, Any]]
+    page: dict[str, Any],
+    sources: list[dict[str, Any]],
+    claims: list[dict[str, Any]],
+    curation: dict[str, Any],
 ) -> str:
     payload = {
         "version": SCHEMA_VERSION,
         "page": page,
         "sources": sources,
         "claims": claims,
+        # Review state is operational metadata.  Confirming it must not make
+        # every prose-quality review stale when the rendered Markdown is unchanged.
+        "curation": {
+            "page_id": curation["page_id"],
+            "current_use": curation["current_use"],
+            "basis": curation["basis"],
+        },
     }
     serialized = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
@@ -625,6 +1411,49 @@ def _canonical_frontmatter(metadata: DocumentMetadata) -> dict[str, Any]:
         "prerequisites": list(metadata.prerequisites),
         "next_concepts": list(metadata.next_concepts),
         "related": list(metadata.related),
+    }
+
+
+def _initial_curation(
+    page_id: str,
+    title: str,
+    frontmatter: dict[str, Any],
+    source_records: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Derive current-use provenance without fabricating legacy intent."""
+
+    kinds = {_required_string(source, "kind") for source in source_records}
+    explicit_purposes = [
+        _required_string(source, "purpose")
+        for source in source_records
+        if _required_string(source, "kind") != "legacy-wiki"
+    ]
+    distinct_purposes = list(dict.fromkeys(explicit_purposes))
+    existing = frontmatter.get("purpose")
+    if len(distinct_purposes) == 1:
+        current_use = distinct_purposes[0]
+    elif isinstance(existing, str) and existing.strip():
+        current_use = existing.strip()
+    elif frontmatter.get("index_role") == "folder-index" or title.endswith("지도"):
+        current_use = f"{title} 관련 문서를 찾고 학습 순서를 잡을 때, 탐색의 출발점으로 사용한다."
+    else:
+        current_use = (
+            f"{title} 내용을 다시 학습하거나 설명할 때, 관련 개념과 자료를 찾는 기준으로 사용한다."
+        )
+    if kinds == {"legacy-wiki"}:
+        basis = "legacy-page-metadata"
+        status = "provisional"
+    elif "legacy-wiki" in kinds or "curated-wiki" in kinds:
+        basis = "manual-review"
+        status = "confirmed"
+    else:
+        basis = "archive-request"
+        status = "confirmed"
+    return {
+        "page_id": page_id,
+        "current_use": current_use,
+        "basis": basis,
+        "status": status,
     }
 
 
