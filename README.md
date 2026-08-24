@@ -2,6 +2,11 @@
 
 경로에 종속되지 않는 Python 기반 Woon 제어 도구다. 저장소와 AI 지침을 관리하고, private Markdown 정본을 MCP로 검색·갱신·복구한다.
 
+실제 운영 대상은 macOS다. Apple Calendar·Obsidian 로컬 자동화와 POSIX 파일 권한
+계약은 macOS에서 검증하며, Linux는 전체 회귀 테스트를 위한 동일 POSIX 환경으로
+사용한다. Windows는 패키지 설치·정적 검사·timezone 데이터·빌드 호환성까지만
+지원하고, EventKit과 POSIX 권한 동작은 지원 대상으로 주장하지 않는다.
+
 ## 주요 기능
 
 - 충돌을 허용하지 않는 workspace root 탐색

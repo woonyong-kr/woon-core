@@ -11,7 +11,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -29,4 +29,22 @@ jobs:
         run: |
           swiftc scripts/woon-calendar-bridge.swift -o /tmp/woon-calendar-bridge
           /tmp/woon-calendar-bridge --self-test
+      - run: uv build
+
+  windows-compatibility:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --all-extras --dev
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      - run: uv run mypy src
+      - name: Verify package and timezone data
+        run: |
+          uv run woon version
+          uv run python -c "from zoneinfo import ZoneInfo; assert ZoneInfo('Asia/Seoul').key == 'Asia/Seoul'"
       - run: uv build
