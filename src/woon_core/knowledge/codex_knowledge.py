@@ -1,14 +1,10 @@
-"""One safe projection of Codex conclusions into growth and daily knowledge.
+"""One-pass projection of Codex conclusions into the single Wiki.
 
 The caller may inspect opted-in Codex conversations, but this module never
 accepts or stores a transcript.  It receives only short, Korean conclusions
-and writes two derived views from the same validated payload:
-
-* a small ``brain/wiki`` page for reusable learning or decisions;
-* a local daily ledger consumed later by the daily-record lane.
-
-This removes the former double interpretation of the same conversation while
-keeping the daily note and the growth Wiki under their separate owners.
+and writes one canonical subject update plus a private execution receipt.  A
+daily page, Calendar view, person list, and project list are projections of
+that Wiki state; they are not parallel knowledge stores.
 """
 
 from __future__ import annotations
@@ -24,12 +20,21 @@ from typing import Literal, cast
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write, encode_json
 from woon_core.knowledge.orchestration import load_orchestrator_settings
-from woon_core.knowledge.second_brain_candidates import ReviewCandidate, persist_review_candidates
+from woon_core.knowledge.second_brain_candidates import (
+    ReviewCandidate,
+    prepare_review_candidates,
+)
 from woon_core.knowledge.second_brain_runtime import (
     AutomationRunStore,
     RunOutcome,
     RunRequest,
     snapshot_owned_paths,
+)
+from woon_core.knowledge.woon_wiki import (
+    InterviewAnswerRevision,
+    WikiDelta,
+    prepare_wiki_pages,
+    resolve_wiki_path,
 )
 
 _KINDS = {
@@ -51,27 +56,44 @@ _KINDS = {
     "생활",
     "여행·구매",
     "회고",
+    "콘텐츠",
+    "프로젝트",
 }
-_GROWTH_KINDS = {"학습", "개념", "결정"}
-_INPUT_STATES = {"processed", "no-meaningful", "pending", "unavailable"}
+_INPUT_STATES = {"processed", "no-meaningful", "partial", "pending", "unavailable"}
 _TITLE_LIMIT = 72
 _SUMMARY_LIMIT = 360
 _QUESTION_LIMIT = 240
 _INTENT_LIMIT = 240
 _CALENDAR_TITLE_LIMIT = 120
+_OBJECTIVE_LIMIT = 280
 _VISIBLE_SECRET_RE = re.compile(
     r"(?:\b(?:api[_-]?key|token|secret|password|bearer)\b|sk-[A-Za-z0-9_-]{12,})",
     flags=re.IGNORECASE,
 )
-_FILE_STEM_RE = re.compile(r"[^0-9A-Za-z가-힣_-]+")
-_RELATED_ROOTS = ("brain/wiki/", "wiki/", "maps/")
+_RELATED_ROOTS = ("wiki/", "maps/")
 _CODEX_OWNED_PATHS = {
-    "brain/wiki",
+    "wiki",
     "brain/review/codex",
     ".local/woon-knowledge/codex-knowledge",
 }
 _CALENDAR_LINK_REASONS = {"준비", "작업", "결정", "결과", "참고"}
 _PERSON_NAME_RE = re.compile(r"[A-Za-z가-힣][A-Za-z가-힣 .'-]{0,47}")
+_CONTENT_KINDS = {
+    "book",
+    "film",
+    "series",
+    "lecture",
+    "course",
+    "podcast",
+    "game",
+    "article",
+    "exhibition",
+    "learning-material-bundle",
+}
+_PROJECT_STATUSES = {"Planned", "Active", "Paused", "Completed", "Cancelled"}
+_CODEX_RANGE_RE = re.compile(
+    r"^codex-kst-(\d{4}-\d{2}-\d{2})-(?:scan-)?through-(\d+)(?:-[a-z0-9-]+)?-v\d+$"
+)
 
 type CodexKnowledgeKind = Literal[
     "활동",
@@ -92,8 +114,11 @@ type CodexKnowledgeKind = Literal[
     "생활",
     "여행·구매",
     "회고",
+    "콘텐츠",
+    "프로젝트",
 ]
-type CodexInputState = Literal["processed", "no-meaningful", "pending", "unavailable"]
+type CodexInputState = Literal["processed", "no-meaningful", "partial", "pending", "unavailable"]
+type CodexDisposition = Literal["organized", "review"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +129,7 @@ class CalendarContext:
     event_title: str
     related_documents: tuple[str, ...]
     reason: str
-    include_generated_growth_page: bool = False
+    include_wiki_subject: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +151,43 @@ class PersonMention:
 
 
 @dataclass(frozen=True, slots=True)
+class ContentMention:
+    """One explicitly named work or material bundle, never its raw body."""
+
+    title: str
+    content_kind: str
+    creators: tuple[str, ...] = ()
+    official_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectMention:
+    """One explicit outcome-bound project derived from the user's wording."""
+
+    title: str
+    objective: str
+    status: str = "Active"
+    materials: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class InterviewAnswerMention:
+    """A minimized revision tied to one existing interview project Wiki."""
+
+    question: str
+    answer: str | None
+    project_path: str
+    context: str | None = None
+    evidence: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+    job_variants: tuple[str, ...] = ()
+    change_reason: str = "답변을 새로 정리했다."
+    quality_assessment: str | None = None
+    source_label: str | None = None
+    promote_current: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class CodexKnowledgeEntry:
     """A minimized conclusion selected from an opted-in user/assistant exchange."""
 
@@ -133,11 +195,19 @@ class CodexKnowledgeEntry:
     kind: CodexKnowledgeKind
     title: str
     summary: str
+    wiki_update: bool = False
+    wiki_subject_path: str | None = None
+    new_wiki_reason: str | None = None
     intent: str | None = None
     next_question: str | None = None
     related_documents: tuple[str, ...] = ()
     calendar_contexts: tuple[CalendarContext, ...] = ()
     people: tuple[PersonMention, ...] = ()
+    contents: tuple[ContentMention, ...] = ()
+    projects: tuple[ProjectMention, ...] = ()
+    interview_answer: InterviewAnswerMention | None = None
+    disposition: CodexDisposition = "organized"
+    review_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +215,7 @@ class CodexKnowledgeResult:
     """Non-sensitive outcome for one idempotent conversation projection."""
 
     entry_count: int
-    growth_page_count: int
+    wiki_page_count: int
     receipt_id: str
     replayed: bool
     day: str
@@ -159,16 +229,33 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexKnowled
         raise WoonError("Codex knowledge entries may contain at most twenty-four records")
     entries: list[CodexKnowledgeEntry] = []
     for raw in records:
+        disposition = raw.get("disposition", "organized")
+        if disposition == "excluded":
+            # Excluded material is deliberately not validated, hashed, logged,
+            # or returned.  The caller may pass a classifier explanation, raw
+            # body, or opaque locator; none of it crosses the persistence
+            # boundary.
+            continue
+        if disposition not in {"organized", "review"}:
+            raise WoonError("Codex knowledge disposition is invalid")
         allowed = {
             "day",
             "kind",
             "title",
             "summary",
+            "wiki_update",
+            "wiki_subject_path",
+            "new_wiki_reason",
             "intent",
             "next_question",
             "related_documents",
             "calendar_contexts",
             "people",
+            "contents",
+            "projects",
+            "interview_answer",
+            "disposition",
+            "review_reason",
         }
         required = {"day", "kind", "title", "summary"}
         if set(raw).difference(allowed) or not required.issubset(raw):
@@ -181,9 +268,16 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexKnowled
         )
         next_question = raw.get("next_question")
         intent = raw.get("intent")
+        wiki_update = raw.get("wiki_update", False)
+        wiki_subject_path = raw.get("wiki_subject_path")
+        new_wiki_reason = raw.get("new_wiki_reason")
         related = raw.get("related_documents", [])
         calendar_contexts = raw.get("calendar_contexts", [])
         people = raw.get("people", [])
+        contents = raw.get("contents", [])
+        projects = raw.get("projects", [])
+        interview_answer = raw.get("interview_answer")
+        review_reason = raw.get("review_reason")
         if not isinstance(raw_day, str):
             raise WoonError("Codex knowledge day must be a string")
         if not isinstance(kind, str) or not isinstance(title, str) or not isinstance(summary, str):
@@ -192,12 +286,28 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexKnowled
             raise WoonError("Codex knowledge next_question must be a string or null")
         if intent is not None and not isinstance(intent, str):
             raise WoonError("Codex knowledge intent must be a string or null")
+        if not isinstance(wiki_update, bool):
+            raise WoonError("Codex knowledge wiki_update must be a boolean")
+        if wiki_subject_path is not None and not isinstance(wiki_subject_path, str):
+            raise WoonError("Codex knowledge wiki_subject_path must be a string or null")
+        if new_wiki_reason is not None and not isinstance(new_wiki_reason, str):
+            raise WoonError("Codex knowledge new_wiki_reason must be a string or null")
+        if review_reason is not None and not isinstance(review_reason, str):
+            raise WoonError("Codex knowledge review_reason must be a string or null")
+        if disposition == "review" and review_reason is None:
+            raise WoonError("review disposition requires review_reason")
+        if disposition == "organized" and review_reason is not None:
+            raise WoonError("organized disposition must not have review_reason")
         if not isinstance(related, list) or not all(isinstance(value, str) for value in related):
             raise WoonError("Codex knowledge related_documents must be a string list")
         if not isinstance(calendar_contexts, list):
             raise WoonError("Codex knowledge calendar_contexts must be a list")
         if not isinstance(people, list):
             raise WoonError("Codex knowledge people must be a list")
+        if not isinstance(contents, list):
+            raise WoonError("Codex knowledge contents must be a list")
+        if not isinstance(projects, list):
+            raise WoonError("Codex knowledge projects must be a list")
         try:
             entry_day = date.fromisoformat(raw_day)
         except ValueError as error:
@@ -210,17 +320,29 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexKnowled
             _visible(next_question, "next_question", _QUESTION_LIMIT)
         if intent is not None:
             _visible(intent, "intent", _INTENT_LIMIT)
+        if review_reason is not None:
+            _visible(review_reason, "review_reason", _INTENT_LIMIT)
+        if new_wiki_reason is not None:
+            _visible(new_wiki_reason, "new_wiki_reason", _INTENT_LIMIT)
         entries.append(
             CodexKnowledgeEntry(
                 day=entry_day,
                 kind=cast(CodexKnowledgeKind, kind),
                 title=title,
                 summary=summary,
+                wiki_update=wiki_update,
+                wiki_subject_path=wiki_subject_path,
+                new_wiki_reason=new_wiki_reason,
                 intent=intent,
                 next_question=next_question,
                 related_documents=tuple(related),
                 calendar_contexts=_calendar_contexts_from_records(calendar_contexts),
                 people=_people_from_records(people),
+                contents=_contents_from_records(contents),
+                projects=_projects_from_records(projects),
+                interview_answer=_interview_answer_from_record(interview_answer),
+                disposition=cast(CodexDisposition, disposition),
+                review_reason=review_reason,
             )
         )
     return tuple(entries)
@@ -253,6 +375,7 @@ def record_codex_knowledge_entries(
         )
     if set(contract.owned_paths) != _CODEX_OWNED_PATHS:
         raise WoonError("Codex conversation knowledge automation has an unsafe write boundary")
+    _validate_monotonic_source_range(settings.checkpoint_path, source_range)
     _validate_entries(settings.vault, day=day, entries=entries, input_state=input_state)
     serialized = _encode_entries(entries, day=day, input_state=input_state)
     request = RunRequest(
@@ -261,36 +384,66 @@ def record_codex_knowledge_entries(
         expected_owned_revision=snapshot_owned_paths(settings.vault, contract.owned_paths),
         cursor_after=source_range,
     )
-    growth_paths = tuple(
-        _growth_path(settings.vault, entry) for entry in entries if entry.kind in _GROWTH_KINDS
-    )
+    wiki_deltas = _wiki_deltas(settings.vault, entries)
+    wiki_page_count = len({resolve_wiki_path(settings.vault, delta.title) for delta in wiki_deltas})
 
     def produce() -> RunOutcome:
-        _reject_conflicting_growth_pages(settings.vault, growth_paths, entries)
-        _write_input_status(settings.vault, day=day, input_state=input_state)
-        for entry in entries:
-            _write_ledger_entry(settings.vault, entry)
-        for entry in entries:
-            if entry.kind in _GROWTH_KINDS:
-                _write_growth_page(settings.vault, entry)
+        wiki_pages = prepare_wiki_pages(settings.vault, wiki_deltas)
         candidates = _review_candidates(entries)
-        if candidates:
-            persist_review_candidates(settings.vault, "brain/review/codex", candidates)
+        review_pages = dict(
+            prepare_review_candidates(settings.vault, "brain/review/codex", candidates)
+        )
+        runtime_pages = dict(
+            [_prepare_input_status(settings.vault, day=day, input_state=input_state)]
+            + [_prepare_ledger_entry(settings.vault, entry) for entry in entries]
+        )
+        prepared = {**wiki_pages, **review_pages, **runtime_pages}
+        _apply_codex_pipeline_batch(settings.vault, prepared)
         return RunOutcome(
             candidate_ids=tuple(_entry_id(entry) for entry in entries)
             + tuple(candidate.candidate_id for candidate in candidates),
-            output_sha256=hashlib.sha256(_output_bytes(settings.vault, day, entries)).hexdigest(),
+            output_sha256=hashlib.sha256(
+                b"\0".join(prepared[path] for path in sorted(prepared))
+            ).hexdigest(),
         )
 
     result = AutomationRunStore(settings).run("codex-conversation-ingest", request, produce)
     return CodexKnowledgeResult(
         entry_count=len(entries),
-        growth_page_count=len(growth_paths),
+        wiki_page_count=wiki_page_count,
         receipt_id=result.receipt_id,
         replayed=result.replayed,
         day=day.isoformat(),
         input_state=input_state,
     )
+
+
+def _validate_monotonic_source_range(checkpoint_path: Path, source_range: str) -> None:
+    """Reject an older completed-turn boundary before any projection is prepared."""
+
+    candidate = _codex_range_boundary(source_range)
+    if candidate is None or not checkpoint_path.is_file():
+        return
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        current = checkpoint.get("lanes", {}).get("codex-conversation-ingest", {}).get("cursor")
+    except (OSError, json.JSONDecodeError, AttributeError) as error:
+        raise WoonError("Codex knowledge checkpoint is unreadable") from error
+    if not isinstance(current, str):
+        return
+    previous = _codex_range_boundary(current)
+    if previous is not None and candidate < previous:
+        raise WoonError("Codex knowledge source range must not move backward")
+
+
+def _codex_range_boundary(value: str) -> tuple[date, int] | None:
+    match = _CODEX_RANGE_RE.fullmatch(value)
+    if match is None:
+        return None
+    try:
+        return date.fromisoformat(match.group(1)), int(match.group(2))
+    except ValueError as error:
+        raise WoonError("Codex knowledge source range is invalid") from error
 
 
 def load_daily_entries(vault: Path, *, day: date) -> tuple[dict[str, object], ...]:
@@ -371,12 +524,14 @@ def calendar_document_links_for_event(
         title = record.get("title")
         if not isinstance(kind, str) or not isinstance(title, str):
             raise WoonError("Codex knowledge calendar context ledger is unreadable")
-        generated_growth_path = _growth_relative_path(title) if kind in _GROWTH_KINDS else None
+        subject_path = record.get("wiki_subject_path")
+        if subject_path is not None and not isinstance(subject_path, str):
+            raise WoonError("Codex knowledge calendar context Wiki path is unreadable")
         parsed_contexts = _calendar_contexts_from_records(contexts)
         _validate_calendar_contexts(
             vault,
             parsed_contexts,
-            generated_growth_path=generated_growth_path,
+            wiki_subject_path=subject_path,
         )
         for context in parsed_contexts:
             if (
@@ -386,7 +541,7 @@ def calendar_document_links_for_event(
                 continue
             for relative_path in _calendar_context_documents(
                 context,
-                generated_growth_path=generated_growth_path,
+                wiki_subject_path=subject_path,
             ):
                 selected.setdefault(relative_path, set()).add(context.reason)
     return tuple(
@@ -424,19 +579,58 @@ def _validate_entries(
             _visible(entry.intent, "intent", _INTENT_LIMIT)
         if entry.next_question is not None:
             _visible(entry.next_question, "next_question", _QUESTION_LIMIT)
+        if entry.review_reason is not None:
+            _visible(entry.review_reason, "review_reason", _INTENT_LIMIT)
+        if entry.new_wiki_reason is not None:
+            _visible(entry.new_wiki_reason, "new_wiki_reason", _INTENT_LIMIT)
+        identity_fields = int(entry.wiki_subject_path is not None) + int(
+            entry.new_wiki_reason is not None
+        )
+        if entry.wiki_update and identity_fields != 1:
+            raise WoonError(
+                "wiki_update requires exactly one existing wiki_subject_path or new_wiki_reason"
+            )
+        if not entry.wiki_update and identity_fields:
+            raise WoonError("non-Wiki Codex knowledge must not declare a Wiki identity")
+        if entry.disposition == "review" and (
+            entry.calendar_contexts
+            or entry.people
+            or entry.contents
+            or entry.projects
+            or entry.interview_answer
+            or entry.related_documents
+            or entry.wiki_subject_path
+            or entry.new_wiki_reason
+        ):
+            raise WoonError(
+                "review-only Codex knowledge must not create links or entity side effects"
+            )
         if len(set(entry.related_documents)) != len(entry.related_documents):
             raise WoonError("Codex knowledge related documents must be unique")
         for relative_path in entry.related_documents:
             _related_document(vault, relative_path)
-        generated_growth_path = (
-            _growth_relative_path(entry.title) if entry.kind in _GROWTH_KINDS else None
-        )
+        wiki_identity = _wiki_identity(vault, entry)
+        wiki_subject_path = wiki_identity[0] if wiki_identity is not None else None
         _validate_calendar_contexts(
             vault,
             entry.calendar_contexts,
-            generated_growth_path=generated_growth_path,
+            wiki_subject_path=wiki_subject_path,
         )
         _validate_people(entry.people)
+        _validate_contents(entry.contents)
+        _validate_projects(entry.projects)
+        _validate_interview_answer_mention(vault, entry)
+        if entry.projects and any(
+            content.content_kind == "learning-material-bundle" for content in entry.contents
+        ):
+            raise WoonError(
+                "Project-exclusive learning materials must be listed under the project hub"
+            )
+        entity_titles = [item.title for item in entry.contents]
+        entity_titles.extend(item.title for item in entry.projects)
+        entity_paths = tuple(_wiki_relative_path(vault, title) for title in entity_titles)
+        if len(entity_paths) != len(set(entity_paths)):
+            raise WoonError("Codex knowledge entity documents must be unique")
         entry_id = _entry_id(entry)
         if entry_id in seen:
             raise WoonError("Codex knowledge entries must be unique")
@@ -446,6 +640,69 @@ def _validate_entries(
 def _visible(value: str, field: str, limit: int) -> None:
     if not value.strip() or len(value) > limit or "\n" in value or _VISIBLE_SECRET_RE.search(value):
         raise WoonError(f"Codex knowledge {field} is not safe visible text")
+
+
+def _validate_contents(contents: tuple[ContentMention, ...]) -> None:
+    if len(contents) > 3:
+        raise WoonError("Codex knowledge contents may contain at most three records")
+    for content in contents:
+        _visible(content.title, "content title", _TITLE_LIMIT)
+        if content.content_kind not in _CONTENT_KINDS:
+            raise WoonError("Codex knowledge content kind is invalid")
+        if len(content.creators) > 8 or len(set(content.creators)) != len(content.creators):
+            raise WoonError("Codex knowledge content creators must be unique and bounded")
+        for creator in content.creators:
+            _visible(creator, "content creator", 72)
+        if content.official_url is not None and (
+            len(content.official_url) > 240
+            or not content.official_url.startswith("https://")
+            or any(char.isspace() for char in content.official_url)
+        ):
+            raise WoonError("Codex knowledge content official_url must be a safe HTTPS URL")
+
+
+def _validate_projects(projects: tuple[ProjectMention, ...]) -> None:
+    if len(projects) > 2:
+        raise WoonError("Codex knowledge projects may contain at most two records")
+    for project in projects:
+        _visible(project.title, "project title", _TITLE_LIMIT)
+        _visible(project.objective, "project objective", _OBJECTIVE_LIMIT)
+        if project.status not in _PROJECT_STATUSES:
+            raise WoonError("Codex knowledge project status is invalid")
+        if len(project.materials) > 12 or len(set(project.materials)) != len(project.materials):
+            raise WoonError("Codex knowledge project materials must be unique and bounded")
+        for material in project.materials:
+            _visible(material, "project material", 120)
+
+
+def _validate_interview_answer_mention(vault: Path, entry: CodexKnowledgeEntry) -> None:
+    mention = entry.interview_answer
+    if mention is None:
+        return
+    if not entry.wiki_update or entry.kind not in {"질문", "커리어", "학습"}:
+        raise WoonError(
+            "Codex interview answers require a question, career, or learning Wiki update"
+        )
+    identity = _wiki_identity(vault, entry)
+    if identity is None or mention.question.strip() != identity[1].strip():
+        raise WoonError("Codex interview question must match the stable Wiki identity")
+    project = _related_document(vault, mention.project_path)
+    if not mention.project_path.startswith("wiki/"):
+        raise WoonError("Codex interview project_path must target the Wiki")
+    if "프로젝트" not in _frontmatter_list(project.read_text(encoding="utf-8"), "facets"):
+        raise WoonError("Codex interview project_path must target a project Wiki")
+    InterviewAnswerRevision(
+        question=mention.question,
+        answer=mention.answer,
+        context=mention.context,
+        evidence=mention.evidence,
+        limitations=mention.limitations,
+        job_variants=mention.job_variants,
+        change_reason=mention.change_reason,
+        quality_assessment=mention.quality_assessment,
+        source_label=mention.source_label,
+        promote_current=mention.promote_current,
+    )
 
 
 def _related_document(vault: Path, relative_path: str) -> Path:
@@ -464,6 +721,57 @@ def _related_document(vault: Path, relative_path: str) -> Path:
     return path
 
 
+def _wiki_identity(vault: Path, entry: CodexKnowledgeEntry) -> tuple[str, str] | None:
+    """Resolve one explicit subject identity before any Wiki or receipt write."""
+
+    if not entry.wiki_update:
+        return None
+    if entry.wiki_subject_path is not None:
+        relative_path = entry.wiki_subject_path.strip()
+        if not relative_path.startswith("wiki/"):
+            raise WoonError("Codex knowledge wiki_subject_path must target wiki/**/*.md")
+        path = _related_document(vault, relative_path)
+        text = path.read_text(encoding="utf-8")
+        title = _markdown_title(text)
+        if not title:
+            raise WoonError("Codex knowledge Wiki subject has no human-readable title")
+        state = _frontmatter_value(text, "knowledge_state")
+        if state == "폐기됨":
+            raise WoonError("Codex knowledge must not update a retired Wiki subject")
+        return relative_path, title
+
+    path = resolve_wiki_path(vault, entry.title)
+    if path.is_file():
+        raise WoonError("new_wiki_reason cannot replace an existing subject; use wiki_subject_path")
+    return path.relative_to(vault.resolve()).as_posix(), entry.title.strip()
+
+
+def _markdown_title(text: str) -> str:
+    value = _frontmatter_value(text, "title")
+    if value:
+        return value
+    match = re.search(r"^#\s+(.+?)\s*$", text, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _frontmatter_value(text: str, key: str) -> str:
+    match = re.search(rf'^\s*{re.escape(key)}:\s*["\']?(.+?)["\']?\s*$', text, flags=re.MULTILINE)
+    return match.group(1).strip().strip("\"'") if match else ""
+
+
+def _frontmatter_list(text: str, key: str) -> tuple[str, ...]:
+    match = re.search(rf"^\s*{re.escape(key)}:\s*(\[.*\])\s*$", text, flags=re.MULTILINE)
+    if match is None:
+        return ()
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError as error:
+        raise WoonError(f"Codex knowledge Wiki {key} is invalid") from error
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise WoonError(f"Codex knowledge Wiki {key} must be a string list")
+    return tuple(value)
+
+
 def _calendar_contexts_from_records(records: list[object]) -> tuple[CalendarContext, ...]:
     contexts: list[CalendarContext] = []
     for raw in records:
@@ -474,7 +782,7 @@ def _calendar_contexts_from_records(records: list[object]) -> tuple[CalendarCont
             "event_title",
             "related_documents",
             "reason",
-            "include_generated_growth_page",
+            "include_wiki_subject",
         }
         required = {"event_day", "event_title", "related_documents", "reason"}
         if set(raw).difference(allowed) or not required.issubset(raw):
@@ -483,7 +791,7 @@ def _calendar_contexts_from_records(records: list[object]) -> tuple[CalendarCont
         event_title = raw["event_title"]
         related_documents = raw["related_documents"]
         reason = raw["reason"]
-        include_generated_growth_page = raw.get("include_generated_growth_page", False)
+        include_wiki_subject = raw.get("include_wiki_subject", False)
         if (
             not isinstance(event_day, str)
             or not isinstance(event_title, str)
@@ -496,9 +804,9 @@ def _calendar_contexts_from_records(records: list[object]) -> tuple[CalendarCont
             raise WoonError(
                 "Codex knowledge calendar context related_documents must be a string list"
             )
-        if not isinstance(include_generated_growth_page, bool):
+        if not isinstance(include_wiki_subject, bool):
             raise WoonError(
-                "Codex knowledge calendar context include_generated_growth_page must be a boolean"
+                "Codex knowledge calendar context include_wiki_subject must be a boolean"
             )
         try:
             parsed_day = date.fromisoformat(event_day)
@@ -512,7 +820,7 @@ def _calendar_contexts_from_records(records: list[object]) -> tuple[CalendarCont
                 event_title=event_title,
                 related_documents=tuple(related_documents),
                 reason=reason,
-                include_generated_growth_page=include_generated_growth_page,
+                include_wiki_subject=include_wiki_subject,
             )
         )
     return tuple(contexts)
@@ -522,7 +830,7 @@ def _validate_calendar_contexts(
     vault: Path,
     contexts: tuple[CalendarContext, ...],
     *,
-    generated_growth_path: str | None,
+    wiki_subject_path: str | None,
 ) -> None:
     seen: set[tuple[date, str, tuple[str, ...], str, bool]] = set()
     for context in contexts:
@@ -531,12 +839,12 @@ def _validate_calendar_contexts(
             raise WoonError("Codex knowledge calendar context reason is invalid")
         document_paths = _calendar_context_documents(
             context,
-            generated_growth_path=generated_growth_path,
+            wiki_subject_path=wiki_subject_path,
         )
         if not document_paths or len(set(document_paths)) != len(document_paths):
             raise WoonError("Codex knowledge calendar context related documents must be unique")
         for relative_path in document_paths:
-            if relative_path == generated_growth_path:
+            if relative_path == wiki_subject_path:
                 continue
             _related_document(vault, relative_path)
         key = (
@@ -544,7 +852,7 @@ def _validate_calendar_contexts(
             _normalized_calendar_title(context.event_title),
             document_paths,
             context.reason,
-            context.include_generated_growth_page,
+            context.include_wiki_subject,
         )
         if key in seen:
             raise WoonError("Codex knowledge calendar contexts must be unique")
@@ -585,6 +893,139 @@ def _people_from_records(records: list[object]) -> tuple[PersonMention, ...]:
     return tuple(people)
 
 
+def _contents_from_records(records: list[object]) -> tuple[ContentMention, ...]:
+    if len(records) > 3:
+        raise WoonError("Codex knowledge contents may contain at most three records")
+    contents: list[ContentMention] = []
+    for raw in records:
+        if not isinstance(raw, dict):
+            raise WoonError("Codex knowledge content mention must be a mapping")
+        allowed = {"title", "content_kind", "creators", "official_url"}
+        required = {"title", "content_kind"}
+        if set(raw).difference(allowed) or not required.issubset(raw):
+            raise WoonError("Codex knowledge content mention has unsupported fields")
+        title = raw["title"]
+        content_kind = raw["content_kind"]
+        creators = raw.get("creators", [])
+        official_url = raw.get("official_url")
+        if not isinstance(title, str) or not isinstance(content_kind, str):
+            raise WoonError("Codex knowledge content mention text fields must be strings")
+        if not isinstance(creators, list) or not all(isinstance(item, str) for item in creators):
+            raise WoonError("Codex knowledge content creators must be a string list")
+        if official_url is not None and not isinstance(official_url, str):
+            raise WoonError("Codex knowledge content official_url must be a string or null")
+        contents.append(
+            ContentMention(
+                title=title,
+                content_kind=content_kind,
+                creators=tuple(creators),
+                official_url=official_url,
+            )
+        )
+    return tuple(contents)
+
+
+def _projects_from_records(records: list[object]) -> tuple[ProjectMention, ...]:
+    if len(records) > 2:
+        raise WoonError("Codex knowledge projects may contain at most two records")
+    projects: list[ProjectMention] = []
+    for raw in records:
+        if not isinstance(raw, dict):
+            raise WoonError("Codex knowledge project mention must be a mapping")
+        allowed = {"title", "objective", "status", "materials"}
+        required = {"title", "objective"}
+        if set(raw).difference(allowed) or not required.issubset(raw):
+            raise WoonError("Codex knowledge project mention has unsupported fields")
+        title = raw["title"]
+        objective = raw["objective"]
+        status = raw.get("status", "Active")
+        materials = raw.get("materials", [])
+        if (
+            not isinstance(title, str)
+            or not isinstance(objective, str)
+            or not isinstance(status, str)
+        ):
+            raise WoonError("Codex knowledge project mention text fields must be strings")
+        if not isinstance(materials, list) or not all(isinstance(item, str) for item in materials):
+            raise WoonError("Codex knowledge project materials must be a string list")
+        projects.append(
+            ProjectMention(
+                title=title,
+                objective=objective,
+                status=status,
+                materials=tuple(materials),
+            )
+        )
+    return tuple(projects)
+
+
+def _interview_answer_from_record(raw: object) -> InterviewAnswerMention | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise WoonError("Codex knowledge interview_answer must be a mapping")
+    allowed = {
+        "question",
+        "answer",
+        "project_path",
+        "context",
+        "evidence",
+        "limitations",
+        "job_variants",
+        "change_reason",
+        "quality_assessment",
+        "source_label",
+        "promote_current",
+    }
+    required = {"question", "answer", "project_path"}
+    if set(raw).difference(allowed) or not required.issubset(raw):
+        raise WoonError("Codex knowledge interview_answer has unsupported fields")
+    question = raw["question"]
+    answer = raw["answer"]
+    project_path = raw["project_path"]
+    context = raw.get("context")
+    evidence = raw.get("evidence", [])
+    limitations = raw.get("limitations", [])
+    job_variants = raw.get("job_variants", [])
+    change_reason = raw.get("change_reason", "답변을 새로 정리했다.")
+    quality_assessment = raw.get("quality_assessment")
+    source_label = raw.get("source_label")
+    promote_current = raw.get("promote_current", True)
+    if not isinstance(question, str) or not isinstance(project_path, str):
+        raise WoonError("Codex knowledge interview question and project_path must be text")
+    if answer is not None and not isinstance(answer, str):
+        raise WoonError("Codex knowledge interview answer must be text or null")
+    for value, field in (
+        (context, "context"),
+        (quality_assessment, "quality_assessment"),
+        (source_label, "source_label"),
+    ):
+        if value is not None and not isinstance(value, str):
+            raise WoonError(f"Codex knowledge interview {field} must be text or null")
+    if not isinstance(change_reason, str) or not isinstance(promote_current, bool):
+        raise WoonError("Codex knowledge interview change metadata is invalid")
+    for values, field in (
+        (evidence, "evidence"),
+        (limitations, "limitations"),
+        (job_variants, "job_variants"),
+    ):
+        if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+            raise WoonError(f"Codex knowledge interview {field} must be a string list")
+    return InterviewAnswerMention(
+        question=question,
+        answer=answer,
+        project_path=project_path,
+        context=context,
+        evidence=tuple(evidence),
+        limitations=tuple(limitations),
+        job_variants=tuple(job_variants),
+        change_reason=change_reason,
+        quality_assessment=quality_assessment,
+        source_label=source_label,
+        promote_current=promote_current,
+    )
+
+
 def _validate_people(people: tuple[PersonMention, ...]) -> None:
     if len(people) > 3:
         raise WoonError("Codex knowledge entry may contain at most three person mentions")
@@ -614,15 +1055,13 @@ def _visible_person_line(value: str, field: str) -> None:
 
 
 def _calendar_context_documents(
-    context: CalendarContext, *, generated_growth_path: str | None
+    context: CalendarContext, *, wiki_subject_path: str | None
 ) -> tuple[str, ...]:
-    if not context.include_generated_growth_page:
+    if not context.include_wiki_subject:
         return context.related_documents
-    if generated_growth_path is None:
-        raise WoonError(
-            "Codex knowledge calendar context may include a generated page only for 학습 or 결정"
-        )
-    return (*context.related_documents, generated_growth_path)
+    if wiki_subject_path is None:
+        raise WoonError("Codex knowledge calendar context has no Wiki subject")
+    return (*context.related_documents, wiki_subject_path)
 
 
 def _entry_id(entry: CodexKnowledgeEntry) -> str:
@@ -634,6 +1073,11 @@ def _entry_id(entry: CodexKnowledgeEntry) -> str:
             entry.summary.strip(),
             entry.intent or "",
             entry.next_question or "",
+            entry.disposition,
+            entry.review_reason or "",
+            str(entry.wiki_update),
+            entry.wiki_subject_path or "",
+            entry.new_wiki_reason or "",
             *entry.related_documents,
             *(
                 "\0".join(
@@ -642,7 +1086,7 @@ def _entry_id(entry: CodexKnowledgeEntry) -> str:
                         context.event_title.strip(),
                         context.reason,
                         *context.related_documents,
-                        str(context.include_generated_growth_page),
+                        str(context.include_wiki_subject),
                     )
                 )
                 for context in entry.calendar_contexts
@@ -652,6 +1096,49 @@ def _entry_id(entry: CodexKnowledgeEntry) -> str:
                     (person.display_name.strip(), *person.explicit_facts, person.next_action or "")
                 )
                 for person in entry.people
+            ),
+            *(
+                "\0".join(
+                    (
+                        content.title.strip(),
+                        content.content_kind,
+                        *content.creators,
+                        content.official_url or "",
+                    )
+                )
+                for content in entry.contents
+            ),
+            *(
+                "\0".join(
+                    (
+                        project.title.strip(),
+                        project.objective.strip(),
+                        project.status,
+                        *project.materials,
+                    )
+                )
+                for project in entry.projects
+            ),
+            *(
+                (
+                    "\0".join(
+                        (
+                            entry.interview_answer.question,
+                            entry.interview_answer.answer or "",
+                            entry.interview_answer.project_path,
+                            entry.interview_answer.context or "",
+                            *entry.interview_answer.evidence,
+                            *entry.interview_answer.limitations,
+                            *entry.interview_answer.job_variants,
+                            entry.interview_answer.change_reason,
+                            entry.interview_answer.quality_assessment or "",
+                            entry.interview_answer.source_label or "",
+                            str(entry.interview_answer.promote_current),
+                        )
+                    ),
+                )
+                if entry.interview_answer is not None
+                else ()
             ),
         )
     )
@@ -671,6 +1158,9 @@ def _encode_entries(
                     "kind": entry.kind,
                     "title": entry.title,
                     "summary": entry.summary,
+                    "wiki_update": entry.wiki_update,
+                    "wiki_subject_path": entry.wiki_subject_path,
+                    "new_wiki_reason": entry.new_wiki_reason,
                     "intent": entry.intent,
                     "next_question": entry.next_question,
                     "related_documents": list(entry.related_documents),
@@ -680,7 +1170,7 @@ def _encode_entries(
                             "event_title": context.event_title,
                             "related_documents": list(context.related_documents),
                             "reason": context.reason,
-                            "include_generated_growth_page": context.include_generated_growth_page,
+                            "include_wiki_subject": context.include_wiki_subject,
                         }
                         for context in entry.calendar_contexts
                     ],
@@ -692,6 +1182,27 @@ def _encode_entries(
                         }
                         for person in entry.people
                     ],
+                    "contents": [
+                        {
+                            "title": content.title,
+                            "content_kind": content.content_kind,
+                            "creators": list(content.creators),
+                            "official_url": content.official_url,
+                        }
+                        for content in entry.contents
+                    ],
+                    "projects": [
+                        {
+                            "title": project.title,
+                            "objective": project.objective,
+                            "status": project.status,
+                            "materials": list(project.materials),
+                        }
+                        for project in entry.projects
+                    ],
+                    "interview_answer": _interview_answer_record(entry.interview_answer),
+                    "disposition": entry.disposition,
+                    "review_reason": entry.review_reason,
                 }
                 for entry in entries
             ],
@@ -700,6 +1211,26 @@ def _encode_entries(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _interview_answer_record(
+    mention: InterviewAnswerMention | None,
+) -> dict[str, object] | None:
+    if mention is None:
+        return None
+    return {
+        "question": mention.question,
+        "answer": mention.answer,
+        "project_path": mention.project_path,
+        "context": mention.context,
+        "evidence": list(mention.evidence),
+        "limitations": list(mention.limitations),
+        "job_variants": list(mention.job_variants),
+        "change_reason": mention.change_reason,
+        "quality_assessment": mention.quality_assessment,
+        "source_label": mention.source_label,
+        "promote_current": mention.promote_current,
+    }
 
 
 def _ledger_path(vault: Path, entry: CodexKnowledgeEntry) -> Path:
@@ -711,21 +1242,45 @@ def _ledger_path(vault: Path, entry: CodexKnowledgeEntry) -> Path:
     )
 
 
-def _write_ledger_entry(vault: Path, entry: CodexKnowledgeEntry) -> None:
+def _wiki_related_documents(vault: Path, entry: CodexKnowledgeEntry) -> tuple[str, ...]:
+    if entry.disposition == "review":
+        return entry.related_documents
+    identity = _wiki_identity(vault, entry)
+    subject_paths = (identity[0],) if identity is not None else ()
+    return tuple(
+        dict.fromkeys(
+            (
+                *subject_paths,
+                *entry.related_documents,
+                *((entry.interview_answer.project_path,) if entry.interview_answer else ()),
+                *(_wiki_relative_path(vault, item.title) for item in entry.contents),
+                *(_wiki_relative_path(vault, item.title) for item in entry.projects),
+            )
+        )
+    )
+
+
+def _prepare_ledger_entry(vault: Path, entry: CodexKnowledgeEntry) -> tuple[Path, bytes]:
     path = _ledger_path(vault, entry)
+    identity = _wiki_identity(vault, entry)
     value = {
         "kind": entry.kind,
         "title": entry.title.strip(),
         "summary": entry.summary.strip(),
+        "wiki_update": entry.wiki_update,
+        "wiki_subject_path": identity[0] if identity is not None else None,
+        "new_wiki_reason": entry.new_wiki_reason,
+        "disposition": entry.disposition,
+        "review_reason": entry.review_reason,
         "intent": entry.intent.strip() if entry.intent else None,
-        "related_documents": list(entry.related_documents),
+        "related_documents": list(_wiki_related_documents(vault, entry)),
         "calendar_contexts": [
             {
                 "event_day": context.event_day.isoformat(),
                 "event_title": context.event_title.strip(),
                 "related_documents": list(context.related_documents),
                 "reason": context.reason,
-                "include_generated_growth_page": context.include_generated_growth_page,
+                "include_wiki_subject": context.include_wiki_subject,
             }
             for context in entry.calendar_contexts
         ],
@@ -737,15 +1292,37 @@ def _write_ledger_entry(vault: Path, entry: CodexKnowledgeEntry) -> None:
             }
             for person in entry.people
         ],
+        "contents": [
+            {
+                "title": content.title.strip(),
+                "content_kind": content.content_kind,
+                "creators": list(content.creators),
+                "official_url": content.official_url,
+            }
+            for content in entry.contents
+        ],
+        "projects": [
+            {
+                "title": project.title.strip(),
+                "objective": project.objective.strip(),
+                "status": project.status,
+                "materials": list(project.materials),
+            }
+            for project in entry.projects
+        ],
+        "interview_answer": _interview_answer_record(entry.interview_answer),
     }
     serialized = encode_json(value)
     if path.exists() and path.read_bytes() != serialized:
         raise WoonError("Codex knowledge ledger entry conflicts with an existing record")
-    if not path.exists():
-        atomic_write(path, serialized, mode=0o600)
+    return path, serialized
 
 
-def _write_input_status(vault: Path, *, day: date, input_state: str) -> None:
+def _write_ledger_entry(vault: Path, entry: CodexKnowledgeEntry) -> None:
+    path, serialized = _prepare_ledger_entry(vault, entry)
+
+
+def _prepare_input_status(vault: Path, *, day: date, input_state: str) -> tuple[Path, bytes]:
     """Persist only the availability state needed to explain a blank daily view."""
 
     path = (
@@ -755,8 +1332,65 @@ def _write_input_status(vault: Path, *, day: date, input_state: str) -> None:
         / "_input-status.json"
     )
     serialized = encode_json({"input_state": input_state})
+    return path, serialized
+
+
+def _write_input_status(vault: Path, *, day: date, input_state: str) -> None:
+    path, serialized = _prepare_input_status(vault, day=day, input_state=input_state)
     if not path.exists() or path.read_bytes() != serialized:
         atomic_write(path, serialized, mode=0o600)
+
+
+def _apply_codex_pipeline_batch(vault: Path, prepared: dict[Path, bytes]) -> None:
+    """Write one Codex input batch as a rollback-capable local transaction."""
+
+    root = vault.resolve()
+    allowed_roots = tuple(
+        (root / relative).resolve()
+        for relative in (
+            "wiki",
+            "brain/review/codex",
+            ".local/woon-knowledge/codex-knowledge",
+        )
+    )
+    snapshots: list[tuple[Path, bytes | None, int]] = []
+    writes: list[tuple[Path, bytes, int]] = []
+    for path, content in sorted(prepared.items(), key=lambda item: item[0].as_posix()):
+        resolved = path.resolve()
+        if not any(resolved.is_relative_to(allowed) for allowed in allowed_roots):
+            raise WoonError("Codex knowledge pipeline attempted an unowned write")
+        previous = resolved.read_bytes() if resolved.is_file() else None
+        mode = (resolved.stat().st_mode & 0o777) if resolved.exists() else 0o600
+        snapshots.append((resolved, previous, mode))
+        if previous != content:
+            writes.append((resolved, content, mode))
+    try:
+        for path, content, mode in writes:
+            _ensure_private_runtime_parent(root, path.parent)
+            atomic_write(path, content, mode=mode)
+    except Exception:
+        for path, previous, mode in reversed(snapshots):
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write(path, previous, mode=mode)
+        raise
+
+
+def _ensure_private_runtime_parent(vault: Path, parent: Path) -> None:
+    """Create every Codex-ledger directory with user-only permissions."""
+
+    runtime_root = (vault / ".local/woon-knowledge").resolve()
+    resolved_parent = parent.resolve()
+    if not resolved_parent.is_relative_to(runtime_root):
+        return
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    runtime_root.chmod(0o700)
+    current = runtime_root
+    for part in resolved_parent.relative_to(runtime_root).parts:
+        current /= part
+        current.mkdir(exist_ok=True)
+        current.chmod(0o700)
 
 
 _ENTRY_REVIEW_KINDS = {
@@ -780,6 +1414,27 @@ def _review_candidates(entries: tuple[CodexKnowledgeEntry, ...]) -> tuple[Review
 
     candidates: list[ReviewCandidate] = []
     for entry in entries:
+        if entry.disposition == "review":
+            stable = "\0".join(
+                (_entry_id(entry), entry.title, entry.summary, entry.review_reason or "")
+            )
+            candidates.append(
+                ReviewCandidate(
+                    candidate_id=(
+                        f"codex-ambiguous-{hashlib.sha256(stable.encode('utf-8')).hexdigest()[:24]}"
+                    ),
+                    kind="codex-projection",
+                    source_locator=f"codex:{_entry_id(entry)}",
+                    summary=entry.summary.strip(),
+                    display_title=f"확인 필요: {entry.title.strip()}"[:72],
+                    review_kind="분류 확인",
+                    occurred_at=datetime.fromtimestamp(0, tz=UTC),
+                    time_precision="none",
+                    scheduled_for=None,
+                    calendar_candidate=False,
+                )
+            )
+            continue
         review_kind = _ENTRY_REVIEW_KINDS.get(entry.kind)
         if review_kind is not None:
             stable = "\0".join((_entry_id(entry), review_kind, entry.title, entry.summary))
@@ -827,96 +1482,161 @@ def _review_candidates(entries: tuple[CodexKnowledgeEntry, ...]) -> tuple[Review
     return tuple(candidates)
 
 
-def _growth_path(vault: Path, entry: CodexKnowledgeEntry) -> Path:
-    return vault.resolve() / _growth_relative_path(entry.title)
+def _wiki_relative_path(vault: Path, title: str) -> str:
+    return resolve_wiki_path(vault, title).relative_to(vault.resolve()).as_posix()
 
 
-def _growth_relative_path(title: str) -> str:
-    return growth_relative_path(title)
+def _wiki_deltas(vault: Path, entries: tuple[CodexKnowledgeEntry, ...]) -> tuple[WikiDelta, ...]:
+    """Convert one sanitized batch directly into canonical Wiki subject deltas."""
 
-
-def growth_relative_path(title: str) -> str:
-    """Return the canonical local path for a generated Growth Wiki page.
-
-    Daily-history rendering uses this helper to link a learning/decision back
-    to the already-created page.  It does not create a page or accept an
-    arbitrary path from a conversation record.
-    """
-
-    stem = _FILE_STEM_RE.sub("-", title.strip()).strip("-_").lower()
-    if not stem:
-        raise WoonError("Codex knowledge title cannot form a growth Wiki filename")
-    return f"brain/wiki/{stem}.md"
-
-
-def _render_growth_page(vault: Path, entry: CodexKnowledgeEntry) -> bytes:
-    lines = [
-        "---",
-        "type: Wiki",
-        f'title: "{entry.title.strip()}"',
-        "record_owner: choi-woonyoung",
-        "publish: false",
-        "access: local-only",
-        "status: Active",
-        f'summary: "{entry.summary.strip()}"',
-        "---",
-        "",
-        f"# {entry.title.strip()}",
-        "",
-        "## 현재 이해",
-        "",
-        entry.summary.strip(),
-    ]
-    if entry.intent:
-        lines.extend(["", "## 남긴 의도", "", f"추정 의도: {entry.intent.strip()}"])
-    if entry.related_documents:
-        lines.extend(["", "## 연결"])
-        for relative_path in entry.related_documents:
-            lines.append(
-                f"- [[../../{relative_path[:-3]}|{_related_document_title(vault, relative_path)}]]"
+    deltas: list[WikiDelta] = []
+    for entry in entries:
+        if entry.disposition == "review":
+            continue
+        identity = _wiki_identity(vault, entry)
+        subject_path = identity[0] if identity is not None else None
+        subject_title = identity[1] if identity is not None else entry.title
+        entity_paths = tuple(
+            dict.fromkeys(
+                [_wiki_relative_path(vault, content.title) for content in entry.contents]
+                + [_wiki_relative_path(vault, project.title) for project in entry.projects]
             )
-    if entry.next_question:
-        lines.extend(["", "## 다음 질문", "", entry.next_question.strip()])
-    lines.append("")
-    return "\n".join(lines).encode("utf-8")
+        )
+        main_relations = tuple(
+            path
+            for path in dict.fromkeys((*entry.related_documents, *entity_paths))
+            if path != subject_path
+        )
+        if entry.wiki_update:
+            interview = entry.interview_answer
+            interview_project_title = (
+                _markdown_title((vault / interview.project_path).read_text(encoding="utf-8"))
+                if interview is not None
+                else ""
+            )
+            deltas.append(
+                WikiDelta(
+                    title=subject_title,
+                    summary=entry.summary,
+                    facets=(
+                        ("커리어", "학습")
+                        if interview is not None
+                        else _facets_for_kind(entry.kind)
+                    ),
+                    knowledge_state=_state_for_kind(entry.kind),
+                    day=entry.day,
+                    event_kind=_event_kind_for_entry(entry.kind),
+                    intent=entry.intent,
+                    next_question=entry.next_question,
+                    related_documents=main_relations,
+                    parent_topics=(
+                        (
+                            "[["
+                            f"{Path(interview.project_path).with_suffix('').as_posix()}"
+                            f"|{interview_project_title}]]",
+                        )
+                        if interview is not None
+                        else ()
+                    ),
+                    interview_answer=(
+                        InterviewAnswerRevision(
+                            question=interview.question,
+                            answer=interview.answer,
+                            context=interview.context,
+                            evidence=interview.evidence,
+                            limitations=interview.limitations,
+                            job_variants=interview.job_variants,
+                            change_reason=interview.change_reason,
+                            quality_assessment=interview.quality_assessment,
+                            source_label=interview.source_label,
+                            promote_current=interview.promote_current,
+                        )
+                        if interview is not None
+                        else None
+                    ),
+                )
+            )
+        for content in entry.contents:
+            content_path = _wiki_relative_path(vault, content.title)
+            relations = (
+                (subject_path,) if subject_path is not None and subject_path != content_path else ()
+            )
+            learning = content.content_kind in {
+                "book",
+                "lecture",
+                "course",
+                "article",
+                "learning-material-bundle",
+            }
+            deltas.append(
+                WikiDelta(
+                    title=content.title,
+                    summary=f"{content.title.strip()}을 {content.content_kind} 콘텐츠로 관리한다.",
+                    facets=("콘텐츠", "학습") if learning else ("콘텐츠",),
+                    knowledge_state="확인 필요",
+                    day=entry.day,
+                    event_kind="산출물",
+                    related_documents=relations,
+                    content_kind=content.content_kind,
+                    creators=content.creators,
+                    official_url=content.official_url,
+                )
+            )
+        for project in entry.projects:
+            project_path = _wiki_relative_path(vault, project.title)
+            relations = (
+                (subject_path,) if subject_path is not None and subject_path != project_path else ()
+            )
+            deltas.append(
+                WikiDelta(
+                    title=project.title,
+                    summary=project.objective,
+                    facets=("프로젝트",),
+                    knowledge_state="생각 중",
+                    day=entry.day,
+                    event_kind="산출물",
+                    related_documents=relations,
+                    project_status=project.status,
+                    objective=project.objective,
+                    materials=project.materials,
+                )
+            )
+    return tuple(deltas)
 
 
-def _reject_conflicting_growth_pages(
-    vault: Path, paths: tuple[Path, ...], entries: tuple[CodexKnowledgeEntry, ...]
-) -> None:
-    expected = (
-        {
-            _growth_path(vault, entry): _render_growth_page(vault, entry)
-            for entry in entries
-            if entry.kind in _GROWTH_KINDS
-        }
-        if paths
-        else {}
-    )
-    if len(expected) != len(paths):
-        raise WoonError("Codex knowledge growth Wiki titles must be unique within one run")
-    for path, content in expected.items():
-        if path.exists() and path.read_bytes() != content:
-            raise WoonError("Codex knowledge growth Wiki update needs curation review")
+def _facets_for_kind(kind: str) -> tuple[str, ...]:
+    mapping: dict[str, tuple[str, ...]] = {
+        "학습": ("개념", "학습"),
+        "개념": ("개념", "학습"),
+        "질문": ("개념", "학습"),
+        "결정": ("개념", "생활"),
+        "회고": ("개념", "생활"),
+        "커리어": ("커리어",),
+        "콘텐츠": ("콘텐츠",),
+        "자료": ("콘텐츠", "학습"),
+        "프로젝트": ("프로젝트",),
+        "인물": ("인물",),
+        "관계": ("인물", "생활"),
+        "창작": ("콘텐츠", "프로젝트"),
+        "건강": ("생활",),
+    }
+    return mapping.get(kind, ("생활",))
 
 
-def _write_growth_page(vault: Path, entry: CodexKnowledgeEntry) -> None:
-    path = _growth_path(vault, entry)
-    content = _render_growth_page(vault, entry)
-    if not path.exists():
-        atomic_write(path, content, mode=0o600)
+def _state_for_kind(kind: str) -> str:
+    if kind in {"일정", "인물", "관계", "커리어", "재정·행정", "자료"}:
+        return "확인 필요"
+    return "생각 중"
 
 
-def _output_bytes(vault: Path, day: date, entries: tuple[CodexKnowledgeEntry, ...]) -> bytes:
-    paths = [_ledger_path(vault, entry) for entry in entries]
-    paths.append(
-        vault.resolve()
-        / ".local/woon-knowledge/codex-knowledge"
-        / day.isoformat()
-        / "_input-status.json"
-    )
-    paths.extend(_growth_path(vault, entry) for entry in entries if entry.kind in _GROWTH_KINDS)
-    return b"\0".join(path.read_bytes() for path in sorted(paths))
+def _event_kind_for_entry(kind: str) -> str:
+    if kind == "일정":
+        return "예정"
+    if kind == "결정":
+        return "변경"
+    if kind in {"자료", "콘텐츠", "프로젝트", "창작"}:
+        return "산출물"
+    return "실행"
 
 
 def _related_document_title(vault: Path, relative_path: str) -> str:

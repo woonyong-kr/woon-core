@@ -157,6 +157,48 @@ def reconcile_catalog(
     )
 
 
+def verify_private_source_catalog(
+    source_root: Path,
+    target_root: Path,
+    catalog_path: Path,
+    ledger_path: Path,
+) -> ReconciliationAudit:
+    """Verify an external-private catalog without copying or interpreting files.
+
+    This path is intentionally narrower than reconciliation.  Every catalog
+    record must already be classified as external-private, have no Vault
+    target, and still match its recorded hash.  The resulting ledger proves
+    inventory coverage and privacy classification only; it never writes source
+    bodies or Markdown into the compiled knowledge Vault.
+    """
+
+    source = source_root.expanduser().resolve()
+    target = target_root.expanduser().resolve()
+    assert_disjoint_source_and_target(source, target)
+    catalog = _load_mapping(catalog_path)
+    records = catalog.get("records")
+    if not isinstance(records, list):
+        raise WoonError("source catalog records must be a list")
+    for raw in records:
+        record = _record(raw)
+        if record["state"] not in {"external-private", "external-private-existing"}:
+            raise WoonError("private source verification accepts external-private records only")
+        if record.get("target") is not None or record.get("target_sha256") is not None:
+            raise WoonError("external-private source record must not have a Vault target")
+        source_path = _inside(source, record["locator"], "private source")
+        if not source_path.is_file() or _sha256(source_path) != record["sha256"]:
+            raise WoonError(
+                f"source changed after cataloging: {record['locator']}; rebuild the catalog"
+            )
+
+    ledger = _load_ledger(ledger_path, str(catalog.get("source", "")))
+    lock = target / ".local/woon-knowledge/ingest.lock"
+    with exclusive_file_lock(lock):
+        if _checkpoint_static_records(source, target, records, ledger):
+            _write_yaml(ledger_path, ledger)
+    return audit_reconciliation(source, target, catalog_path, ledger_path)
+
+
 def _apply_source_decisions(
     source_root: Path,
     target_root: Path,

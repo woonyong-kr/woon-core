@@ -1,0 +1,632 @@
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from woon_core.errors import WoonError
+from woon_core.knowledge.woon_wiki import (
+    INTERVIEW_ARCHIVE_START,
+    INTERVIEW_CURRENT_START,
+    INTERVIEW_HISTORY_START,
+    WIKI_CURRENT_START,
+    WIKI_TIMELINE_START,
+    InterviewAnswerRevision,
+    WikiDelta,
+    apply_legacy_wiki_merge,
+    apply_prepared_wiki_pages,
+    compiled_wiki_contract,
+    prepare_legacy_wiki_merge,
+    prepare_wiki_corpus_migration,
+    prepare_wiki_pages,
+    preserve_managed_context,
+    resolve_wiki_path,
+    transition_knowledge_state,
+)
+
+
+def test_compiled_wiki_contract_matches_single_wiki_model() -> None:
+    text = """---
+type: Wiki
+title: 활성화 함수
+tags: [domain:ai, topic:activation-function]
+---
+
+# 활성화 함수
+
+> 한 줄 요약: 활성화 함수는 신경망에 비선형성을 더한다.
+"""
+
+    contract = compiled_wiki_contract(Path("ai/activation-functions.md"), text)
+
+    assert contract["canonical_id"] == "ai/activation-functions"
+    assert contract["facets"] == ["개념", "학습"]
+    assert contract["knowledge_state"] == "근거 확인됨"
+    assert contract["parent_topics"] == ["[[wiki/ai/README|ai]]"]
+    assert contract["summary"] == "활성화 함수는 신경망에 비선형성을 더한다."
+
+
+def test_compiled_wiki_root_has_no_parent() -> None:
+    contract = compiled_wiki_contract(
+        Path("README.md"),
+        "---\ntype: Wiki\ntitle: Wiki\n---\n\n# Wiki\n\n지식 정본의 입구다.\n",
+    )
+
+    assert contract["canonical_id"] == "README"
+    assert contract["parent_topics"] == []
+
+
+def test_compiled_page_without_section_index_links_to_wiki_root() -> None:
+    contract = compiled_wiki_contract(
+        Path("pintos/pintos.md"),
+        "---\ntype: Wiki\ntitle: PintOS\n---\n\n# PintOS\n\n교육용 운영체제다.\n",
+    )
+
+    assert contract["parent_topics"] == ["[[wiki/README|Wiki]]"]
+
+
+def test_new_conversation_delta_creates_one_wiki_subject(tmp_path: Path) -> None:
+    pages = prepare_wiki_pages(
+        tmp_path,
+        (
+            WikiDelta(
+                title="AICE Associate 준비",
+                summary="회귀와 분류 문제를 반복해서 풀며 시험을 준비한다.",
+                facets=("프로젝트", "학습", "커리어"),
+                knowledge_state="생각 중",
+                day=date(2026, 8, 24),
+                intent="자격 취득 준비를 한곳에서 추적하려는 것으로 보인다.",
+            ),
+        ),
+    )
+
+    assert list(path.relative_to(tmp_path).as_posix() for path in pages) == [
+        "wiki/personal/aice-associate-준비.md"
+    ]
+    text = next(iter(pages.values())).decode("utf-8")
+    assert 'canonical_id: "personal/aice-associate-준비"' in text
+    assert 'facets: ["프로젝트", "학습", "커리어"]' in text
+    assert "project_id: aice-associate-준비" in text
+    assert "project_status: Active" in text
+    assert 'objective: "회귀와 분류 문제를 반복해서 풀며 시험을 준비한다."' in text
+    assert 'knowledge_state: "생각 중"' in text
+    assert WIKI_CURRENT_START in text
+    assert WIKI_TIMELINE_START in text
+
+
+def test_existing_subject_is_updated_in_place_and_keeps_free_prose(tmp_path: Path) -> None:
+    path = tmp_path / "wiki/ai/transformer.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """---
+type: Wiki
+title: Transformer
+facets: ["개념", "학습"]
+knowledge_state: "근거 확인됨"
+---
+
+# Transformer
+
+## 기존 설명
+
+이 문단은 compiler 또는 사람이 소유한다.
+""",
+        encoding="utf-8",
+    )
+
+    pages = prepare_wiki_pages(
+        tmp_path,
+        (
+            WikiDelta(
+                title="Transformer",
+                summary="Attention의 계산 흐름을 다시 확인할 필요가 있다.",
+                facets=("개념", "학습"),
+                knowledge_state="확인 필요",
+                day=date(2026, 8, 24),
+            ),
+        ),
+    )
+
+    assert list(pages) == [path]
+    text = pages[path].decode("utf-8")
+    assert "이 문단은 compiler 또는 사람이 소유한다." in text
+    assert 'knowledge_state: "확인 필요"' in text
+    assert "2026-08-24 · 실행" in text
+
+
+def test_resolver_rejects_duplicate_subject_titles(tmp_path: Path) -> None:
+    for relative in ("wiki/ai/a.md", "wiki/tools/b.md"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\ntype: Wiki\ntitle: 같은 주제\n---\n", encoding="utf-8")
+
+    with pytest.raises(WoonError, match="multiple documents"):
+        resolve_wiki_path(tmp_path, "같은 주제")
+
+
+def test_corpus_migration_normalizes_every_visible_wiki_document(tmp_path: Path) -> None:
+    first = tmp_path / "wiki/database/index.md"
+    first.parent.mkdir(parents=True)
+    first.write_text(
+        """---
+type: 키워드
+title: DB 인덱스
+status: Active
+tags:
+- domain:database
+llm_wiki:
+  page_id: database/index
+---
+
+# DB 인덱스
+
+근거가 있는 기존 설명이다.
+""",
+        encoding="utf-8",
+    )
+    canonical = tmp_path / "wiki/canonical/hidden.md"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text(
+        "---\ntype: Wiki\ntitle: 기존 정본\nstatus: Canonical\n---\n\n# 기존 정본\n",
+        encoding="utf-8",
+    )
+
+    report = prepare_wiki_corpus_migration(tmp_path, migration_day=date(2026, 8, 24))
+
+    assert report.document_count == 2
+    assert report.changed_count == 2
+    text = report.pages[first].decode("utf-8")
+    assert "type: Wiki" in text
+    assert 'canonical_id: "database/index"' in text
+    assert 'facets: ["개념", "학습"]' in text
+    assert 'knowledge_state: "근거 확인됨"' in text
+    assert "근거가 있는 기존 설명이다." in text
+    assert 'summary: "근거가 있는 기존 설명이다."' in text
+    assert "단일 Wiki 정본 계약" not in text
+    canonical_text = report.pages[canonical].decode("utf-8")
+    assert 'canonical_id: "canonical/hidden"' in canonical_text
+    assert 'knowledge_state: "확인 필요"' in canonical_text
+
+
+def test_corpus_migration_preserves_and_recovers_entity_facets(tmp_path: Path) -> None:
+    fixtures = {
+        "wiki/personal/project.md": (
+            "---\ntype: Wiki\ntitle: 시험 준비\nproject_id: exam\n"
+            'facets: ["프로젝트", "학습"]\n---\n',
+            '["프로젝트", "학습"]',
+        ),
+        "wiki/personal/book.md": (
+            "---\ntype: Wiki\ntitle: 학습 책\ncontent_kind: book\n"
+            'facets: ["콘텐츠", "학습"]\n---\n',
+            '["콘텐츠", "학습"]',
+        ),
+        "wiki/personal/person.md": (
+            "---\ntype: Wiki\ntitle: 확인된 사람\nentity_type: person\n"
+            'person_id: known-person\nfacets: ["개념", "학습"]\n---\n',
+            '["인물"]',
+        ),
+    }
+    for relative, (body, _) in fixtures.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+    first = prepare_wiki_corpus_migration(tmp_path, migration_day=date(2026, 8, 24))
+    apply_prepared_wiki_pages(tmp_path, first.pages)
+    second = prepare_wiki_corpus_migration(tmp_path, migration_day=date(2026, 8, 24))
+
+    for relative, (_, expected) in fixtures.items():
+        text = (tmp_path / relative).read_text(encoding="utf-8")
+        assert f"facets: {expected}" in text
+    assert second.changed_count == 0
+
+
+def test_corpus_migration_removes_operational_history_and_keeps_real_history(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "wiki/ai/queue.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """---
+type: Wiki
+title: 큐
+facets: ["개념", "학습"]
+knowledge_state: "확인 필요"
+---
+
+# 큐
+
+큐는 먼저 들어온 값을 먼저 꺼내는 자료구조다.
+
+## 시간 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 변경 — 기존 문서를 단일 Wiki 정본 계약으로 전환
+- 2026-08-24 · 실행 — 큐 구현을 다시 연습했다.
+<!-- woon-wiki-timeline:end -->
+""",
+        encoding="utf-8",
+    )
+
+    report = prepare_wiki_corpus_migration(tmp_path, migration_day=date(2026, 8, 24))
+    text = report.pages[path].decode("utf-8")
+
+    assert "단일 Wiki 정본 계약" not in text
+    assert "큐 구현을 다시 연습했다." in text
+    assert 'summary: "큐는 먼저 들어온 값을 먼저 꺼내는 자료구조다."' in text
+
+
+def test_corpus_migration_prefers_human_one_line_summary_over_breadcrumb(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "wiki/ai/attention.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """---
+type: Wiki
+title: Attention
+facets: ["개념", "학습"]
+knowledge_state: "근거 확인됨"
+---
+
+# Attention
+
+<!-- breadcrumb:start -->
+상위 링크: WIKI / AI / Attention
+<!-- breadcrumb:end -->
+
+> 한 줄 요약: Query와 Key를 비교한 가중치로 Value를 섞는다.
+
+## 설명
+
+Attention의 세부 계산을 설명한다.
+""",
+        encoding="utf-8",
+    )
+
+    report = prepare_wiki_corpus_migration(tmp_path, migration_day=date(2026, 8, 24))
+
+    assert 'summary: "Query와 Key를 비교한 가중치로 Value를 섞는다."' in report.pages[path].decode(
+        "utf-8"
+    )
+
+
+def test_compiler_render_preserves_wiki_context() -> None:
+    existing = """---
+type: Wiki
+title: 큐
+canonical_id: ai/queue
+facets: ["개념", "학습"]
+knowledge_state: "확인 필요"
+record_owner: choi-woonyoung
+---
+
+# 큐
+
+## 현재 이해
+
+<!-- woon-wiki-current:start -->
+대화에서 남긴 현재 이해
+<!-- woon-wiki-current:end -->
+
+## 시간 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 실행 — 큐를 다시 학습했다.
+<!-- woon-wiki-timeline:end -->
+"""
+    rendered = """---
+type: 키워드
+title: 큐
+---
+
+# 큐
+
+근거로 다시 만든 설명
+"""
+
+    merged = preserve_managed_context(existing, rendered)
+
+    assert "facets:\n- 개념\n- 학습" in merged
+    assert "canonical_id: ai/queue" in merged
+    assert "type: Wiki" in merged
+    assert 'knowledge_state: "근거 확인됨"' in merged
+    assert "근거로 다시 만든 설명" in merged
+    assert "대화에서 남긴 현재 이해" in merged
+    assert "큐를 다시 학습했다" in merged
+
+
+def test_compiler_render_does_not_duplicate_managed_timeline() -> None:
+    existing = """---
+type: Wiki
+title: 큐
+knowledge_state: "확인 필요"
+---
+
+# 큐
+
+## 시간 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 실행 — 큐를 다시 학습했다.
+<!-- woon-wiki-timeline:end -->
+"""
+    rendered = existing.replace("확인 필요", "근거 확인됨")
+
+    merged = preserve_managed_context(existing, rendered)
+
+    assert merged.count("<!-- woon-wiki-timeline:start -->") == 1
+    assert merged.count("## 시간 이력") == 1
+    assert "큐를 다시 학습했다" in merged
+
+
+def test_compiler_drops_generic_migration_history() -> None:
+    existing = """---
+type: Wiki
+title: Wiki
+knowledge_state: "근거 확인됨"
+---
+
+# Wiki
+
+## 시간 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 변경 — 기존 문서를 단일 Wiki 정본 계약으로 전환
+<!-- woon-wiki-timeline:end -->
+"""
+    rendered = """---
+type: Wiki
+title: Wiki
+knowledge_state: "근거 확인됨"
+---
+
+# Wiki
+
+지식 정본의 입구다.
+"""
+
+    merged = preserve_managed_context(existing, rendered)
+
+    assert "단일 Wiki 정본 계약으로 전환" not in merged
+    assert WIKI_TIMELINE_START not in merged
+
+
+def test_compiler_repairs_duplicate_timeline_in_historical_rendered_source() -> None:
+    existing = """---
+type: Wiki
+title: 큐
+knowledge_state: "확인 필요"
+---
+
+# 큐
+
+## 시간 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 실행 — 큐를 다시 학습했다.
+<!-- woon-wiki-timeline:end -->
+"""
+    duplicate = """
+
+## 시간 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 실행 — 큐를 다시 학습했다.
+<!-- woon-wiki-timeline:end -->
+"""
+
+    merged = preserve_managed_context(existing, existing + duplicate)
+
+    assert merged.count("<!-- woon-wiki-timeline:start -->") == 1
+    assert merged.count("## 시간 이력") == 1
+
+
+def test_prepared_batch_applies_all_pages(tmp_path: Path) -> None:
+    first = tmp_path / "wiki/a.md"
+    second = tmp_path / "wiki/b.md"
+
+    written = apply_prepared_wiki_pages(
+        tmp_path,
+        {first: "첫 문서\n".encode(), second: "둘째 문서\n".encode()},
+    )
+
+    assert written == (first, second)
+    assert first.read_text(encoding="utf-8") == "첫 문서\n"
+    assert second.read_text(encoding="utf-8") == "둘째 문서\n"
+
+
+def test_prepared_batch_rejects_paths_outside_wiki(tmp_path: Path) -> None:
+    with pytest.raises(WoonError, match="only wiki"):
+        apply_prepared_wiki_pages(tmp_path, {tmp_path / "brain/wiki/a.md": b"not allowed\n"})
+
+
+def test_state_authorities_cannot_skip_verification_or_reopen_retired_page() -> None:
+    assert (
+        transition_knowledge_state(
+            current_state="생각 중",
+            requested_state="근거 확인됨",
+            authority="evidence-compiler",
+        )
+        == "근거 확인됨"
+    )
+    with pytest.raises(WoonError, match="exceeds"):
+        transition_knowledge_state(
+            current_state="생각 중",
+            requested_state="근거 확인됨",
+            authority="conversation",
+        )
+    with pytest.raises(WoonError, match="explicit user"):
+        transition_knowledge_state(
+            current_state="폐기됨",
+            requested_state="근거 확인됨",
+            authority="evidence-compiler",
+        )
+
+
+def test_legacy_subject_roots_merge_into_wiki_and_rewrite_links(tmp_path: Path) -> None:
+    source = tmp_path / "projects/aice.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "---\ntype: Project\ntitle: AICE 준비\n---\n\n# AICE 준비\n\n시험을 준비한다.\n",
+        encoding="utf-8",
+    )
+    index = tmp_path / "projects/README.md"
+    index.write_text("---\ntitle: 프로젝트\n---\n", encoding="utf-8")
+    home = tmp_path / "brain/home.md"
+    home.parent.mkdir(parents=True)
+    home.write_text("[[projects/aice|AICE 준비]]\n", encoding="utf-8")
+
+    report = prepare_legacy_wiki_merge(tmp_path, migration_day=date(2026, 8, 24))
+    apply_legacy_wiki_merge(tmp_path, report)
+
+    target = tmp_path / "wiki/personal/aice-준비.md"
+    assert report.subject_count == 1
+    assert target.is_file()
+    assert not source.exists()
+    assert not index.exists()
+    assert 'facets: ["프로젝트"]' in target.read_text(encoding="utf-8")
+    assert "[[wiki/personal/aice-준비|AICE 준비]]" in home.read_text(encoding="utf-8")
+
+
+def test_interview_answer_keeps_current_and_archives_the_previous_revision(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "wiki/personal/interview/ai-engineer/README.md"
+    project.parent.mkdir(parents=True)
+    project.write_text(
+        "\n".join(
+            (
+                "---",
+                "type: Wiki",
+                "title: AI Engineer 면접 준비",
+                'facets: ["프로젝트", "커리어"]',
+                'knowledge_state: "확인 필요"',
+                "---",
+                "# AI Engineer 면접 준비",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    parent = "[[wiki/personal/interview/ai-engineer/README|AI Engineer 면접 준비]]"
+    first = WikiDelta(
+        title="Kyro에서 본인이 직접 한 일은 무엇입니까?",
+        summary="Kyro의 개인 기여를 근거와 함께 설명한다.",
+        facets=("커리어", "학습"),
+        knowledge_state="확인 필요",
+        day=date(2026, 8, 18),
+        parent_topics=(parent,),
+        interview_answer=InterviewAnswerRevision(
+            question="Kyro에서 본인이 직접 한 일은 무엇입니까?",
+            context="개인 기여와 팀 결과를 구분하는 질문이다.",
+            answer="전체 구조를 설계했다.",
+            limitations=("개인 기여의 코드 범위를 더 확인해야 한다.",),
+            change_reason="첫 답변을 정리했다.",
+            source_label="초기 답변",
+        ),
+    )
+    path, content = next(iter(prepare_wiki_pages(tmp_path, (first,)).items()))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+    second = WikiDelta(
+        title=first.title,
+        summary="개인 기여와 팀 결과를 분리해 답변한다.",
+        facets=("커리어", "학습"),
+        knowledge_state="확인 필요",
+        day=date(2026, 8, 24),
+        parent_topics=(parent,),
+        interview_answer=InterviewAnswerRevision(
+            question=first.title,
+            context="개인 기여와 팀 결과를 구분하는 질문이다.",
+            answer="관리 서버의 장애 판정 흐름을 설계하고 구현했다.",
+            evidence=("관리 서버 코드와 계약 테스트",),
+            limitations=("실환경 정확도를 증명한 결과는 아니다.",),
+            change_reason="개인 기여와 검증 한계를 분리했다.",
+            quality_assessment="근거 범위가 이전보다 명확해졌다.",
+            source_label="근거 보강 전 답변",
+        ),
+    )
+    merged = next(iter(prepare_wiki_pages(tmp_path, (second,)).values())).decode()
+
+    assert merged.count(INTERVIEW_CURRENT_START) == 1
+    assert merged.count(INTERVIEW_HISTORY_START) == 1
+    assert merged.count(INTERVIEW_ARCHIVE_START) == 1
+    assert "관리 서버의 장애 판정 흐름을 설계하고 구현했다." in merged
+    assert "전체 구조를 설계했다." in merged
+    assert "개인 기여와 검증 한계를 분리했다." in merged
+    assert "실환경 정확도를 증명한 결과는 아니다." in merged
+    assert f'parent_topics: ["{parent}"]' in merged
+
+
+def test_interview_parent_must_resolve_to_an_existing_wiki(tmp_path: Path) -> None:
+    delta = WikiDelta(
+        title="면접 질문",
+        summary="답변을 정리한다.",
+        facets=("커리어", "학습"),
+        knowledge_state="확인 필요",
+        day=date(2026, 8, 24),
+        parent_topics=("[[wiki/personal/없는-프로젝트|없는 프로젝트]]",),
+        interview_answer=InterviewAnswerRevision(
+            question="무엇을 했습니까?",
+            answer="확인 중이다.",
+        ),
+    )
+
+    with pytest.raises(WoonError, match="parent topic"):
+        prepare_wiki_pages(tmp_path, (delta,))
+
+
+def test_weaker_interview_attempt_is_archived_without_replacing_current(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "wiki/personal/interview/project.md"
+    project.parent.mkdir(parents=True)
+    project.write_text(
+        '---\ntype: Wiki\ntitle: 면접 프로젝트\nfacets: ["프로젝트"]\n---\n',
+        encoding="utf-8",
+    )
+    parent = "[[wiki/personal/interview/project|면접 프로젝트]]"
+    initial = WikiDelta(
+        title="개인 기여는 무엇입니까?",
+        summary="개인 기여를 설명한다.",
+        facets=("커리어", "학습"),
+        knowledge_state="확인 필요",
+        day=date(2026, 8, 23),
+        parent_topics=(parent,),
+        interview_answer=InterviewAnswerRevision(
+            question="개인 기여는 무엇입니까?",
+            answer="계약 검증 흐름을 구현했다.",
+            promote_current=True,
+        ),
+    )
+    path, content = next(iter(prepare_wiki_pages(tmp_path, (initial,)).items()))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+    practice = WikiDelta(
+        title=initial.title,
+        summary="연습 답변의 약점을 기록한다.",
+        facets=("커리어", "학습"),
+        knowledge_state="확인 필요",
+        day=date(2026, 8, 24),
+        parent_topics=(parent,),
+        interview_answer=InterviewAnswerRevision(
+            question=initial.title,
+            answer="그냥 전체를 만들었다.",
+            change_reason="개인 기여와 팀 결과를 섞어 설명했다.",
+            source_label="연습 답변",
+            promote_current=False,
+        ),
+    )
+    merged = next(iter(prepare_wiki_pages(tmp_path, (practice,)).values())).decode()
+
+    current = merged.split(INTERVIEW_CURRENT_START, 1)[1].split(
+        "<!-- woon-interview-current:end -->", 1
+    )[0]
+    assert "계약 검증 흐름을 구현했다." in current
+    assert "그냥 전체를 만들었다." not in current
+    assert "그냥 전체를 만들었다." in merged
+    assert "개인 기여와 팀 결과를 섞어 설명했다." in merged

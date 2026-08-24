@@ -20,17 +20,17 @@ def _write_document(path: Path, *, title: str = "회의 기록") -> None:
 
 def _service(tmp_path: Path) -> PersonService:
     _write_document(
-        tmp_path / "users/choi-woonyoung/README.md",
+        tmp_path / "wiki/personal/choi-woonyoung.md",
         title="최우녕",
     )
-    owner = tmp_path / "users/choi-woonyoung/README.md"
+    owner = tmp_path / "wiki/personal/choi-woonyoung.md"
     owner.write_text(
         owner.read_text(encoding="utf-8").replace(
             "status: Active\npeople: []",
             "status: Active\nentity_type: person\nperson_id: choi-woonyoung\n"
             "person_kind: vault-owner\nperson_scope: general\n"
             "relationship_to_owner: 볼트 사용자\npeople:\n"
-            '  - "[[users/choi-woonyoung/README|최우녕]]"',
+            '  - "[[wiki/personal/choi-woonyoung|최우녕]]"',
         ),
         encoding="utf-8",
     )
@@ -194,7 +194,7 @@ def test_calendar_title_resolution_uses_explicit_private_identifiers_only(tmp_pa
         purpose="김희준과 직접 관련된 기록을 다시 찾기 위한 연결점이다.",
         creation_basis="explicit-request",
     )
-    private_card = tmp_path / "users/lee-minjeong/README.md"
+    private_card = tmp_path / "wiki/private/lee-minjeong.md"
     _write_document(private_card, title="이민정")
     private_card.write_text(
         private_card.read_text(encoding="utf-8").replace(
@@ -300,7 +300,7 @@ def test_materializes_default_owner_without_rewriting_private_or_novel_records(
     service = _service(tmp_path)
     _write_document(tmp_path / "brain/decision.md", title="학습 결정")
     _write_document(tmp_path / "sources/private/original.md", title="비공개 원본")
-    novel_card = tmp_path / "users/lee-minjeong/README.md"
+    novel_card = tmp_path / "wiki/private/lee-minjeong.md"
     _write_document(novel_card, title="이민정")
     novel_card.write_text(
         novel_card.read_text(encoding="utf-8").replace(
@@ -311,7 +311,7 @@ def test_materializes_default_owner_without_rewriting_private_or_novel_records(
         ),
         encoding="utf-8",
     )
-    _write_document(tmp_path / "users/lee-minjeong/notes.md", title="창작 메모")
+    _write_document(tmp_path / "sources/private/lee-minjeong-notes.md", title="창작 메모")
 
     first = service.materialize_default_owner()
     second = service.materialize_default_owner()
@@ -324,12 +324,12 @@ def test_materializes_default_owner_without_rewriting_private_or_novel_records(
     assert "record_owner:" not in (tmp_path / "sources/private/original.md").read_text(
         encoding="utf-8"
     )
-    assert "record_owner:" not in (tmp_path / "users/lee-minjeong/notes.md").read_text(
+    assert "record_owner:" not in (tmp_path / "sources/private/lee-minjeong-notes.md").read_text(
         encoding="utf-8"
     )
 
 
-def test_rejects_guess_driven_cards_and_compiled_or_private_link_targets(tmp_path: Path) -> None:
+def test_rejects_guess_driven_cards_and_private_link_targets(tmp_path: Path) -> None:
     service = _service(tmp_path)
     with pytest.raises(WoonError, match="explicit-request or repeated-evidence"):
         service.upsert_card(
@@ -352,14 +352,14 @@ def test_rejects_guess_driven_cards_and_compiled_or_private_link_targets(tmp_pat
     _write_document(tmp_path / "wiki/example.md", title="컴파일 산출물")
     _write_document(tmp_path / "sources/private/example.md", title="개인 원본")
 
-    with pytest.raises(WoonError, match="compiled Wiki"):
-        service.link_document(
-            relative_path="wiki/example.md",
-            person_id="kim-heejun",
-            roles=("participant",),
-            evidence="명시된 참석자",
-        )
-    with pytest.raises(WoonError, match="compiled Wiki"):
+    linked = service.link_document(
+        relative_path="wiki/example.md",
+        person_id="kim-heejun",
+        roles=("participant",),
+        evidence="명시된 참석자",
+    )
+    assert linked.changed is True
+    with pytest.raises(WoonError, match="private originals"):
         service.link_document(
             relative_path="sources/private/example.md",
             person_id="kim-heejun",

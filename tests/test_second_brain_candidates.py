@@ -15,6 +15,7 @@ from woon_core.knowledge.second_brain_candidates import (
     candidate_from_codex_messages,
     candidate_from_codex_person_memory,
     persist_review_candidates,
+    prepare_review_candidates,
 )
 
 
@@ -84,6 +85,19 @@ def test_refuses_to_overwrite_a_changed_review_candidate(tmp_path: Path) -> None
         persist_review_candidates(tmp_path, "brain/review/mail", (candidate,))
 
     assert path.read_text(encoding="utf-8") == "user-edited\n"
+
+
+def test_prepares_all_review_candidates_without_writing(tmp_path: Path) -> None:
+    candidate = candidate_from_allowlisted_mail(_mail())
+    assert candidate is not None
+
+    prepared = prepare_review_candidates(tmp_path, "brain/review/mail", (candidate,))
+
+    assert len(prepared) == 1
+    path, data = prepared[0]
+    assert path.name == "크래프톤-면접-일정-확인이-필요하다.md"
+    assert b"status: Review" in data
+    assert not path.exists()
 
 
 def test_codex_candidate_uses_only_opted_in_user_and_assistant_messages() -> None:

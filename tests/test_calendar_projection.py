@@ -49,7 +49,8 @@ def _write_person_card(
     person_scope: str = "general",
     identifiers: tuple[tuple[str, tuple[str, ...]], ...] = (),
 ) -> None:
-    path = vault / "users" / person_id / "README.md"
+    root = "private" if person_scope == "novel-local-only" else "personal"
+    path = vault / "wiki" / root / f"{person_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     identifier_lines = ""
     for value, context_terms in identifiers:
@@ -261,7 +262,7 @@ def test_refresh_projects_an_explicit_calendar_category_without_changing_ics(
 def test_refresh_renders_explicit_conversation_document_links_for_exact_event_context(
     tmp_path: Path,
 ) -> None:
-    document = tmp_path / "brain/wiki/일정-준비-원칙.md"
+    document = tmp_path / "wiki/personal/일정-준비-원칙.md"
     document.parent.mkdir(parents=True)
     document.write_text("# 큐 설계\n", encoding="utf-8")
     ledger = tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-17/context.json"
@@ -272,6 +273,8 @@ def test_refresh_renders_explicit_conversation_document_links_for_exact_event_co
                 "kind": "학습",
                 "title": "일정 준비 원칙",
                 "summary": "일정 준비와 함께 문서를 만들었다.",
+                "wiki_update": True,
+                "wiki_subject_path": "wiki/personal/일정-준비-원칙.md",
                 "related_documents": [],
                 "calendar_contexts": [
                     {
@@ -279,7 +282,7 @@ def test_refresh_renders_explicit_conversation_document_links_for_exact_event_co
                         "event_title": "러닝 약속, 공원",
                         "related_documents": [],
                         "reason": "준비",
-                        "include_generated_growth_page": True,
+                        "include_wiki_subject": True,
                     }
                 ],
             },
@@ -294,13 +297,13 @@ def test_refresh_renders_explicit_conversation_document_links_for_exact_event_co
 
     markdown = next((tmp_path / result.relative_path).glob("*.md")).read_text(encoding="utf-8")
     assert "## 관련 문서" in markdown
-    assert "[[brain/wiki/일정-준비-원칙|큐 설계]] · 준비" in markdown
+    assert "[[wiki/personal/일정-준비-원칙|큐 설계]] · 준비" in markdown
 
 
 def test_refresh_does_not_link_same_day_context_with_a_different_event_title(
     tmp_path: Path,
 ) -> None:
-    document = tmp_path / "brain/wiki/queue-design.md"
+    document = tmp_path / "wiki/personal/queue-design.md"
     document.parent.mkdir(parents=True)
     document.write_text("# 큐 설계\n", encoding="utf-8")
     ledger = tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-17/context.json"
@@ -311,12 +314,12 @@ def test_refresh_does_not_link_same_day_context_with_a_different_event_title(
                 "kind": "결정",
                 "title": "학습 순서를 정한다",
                 "summary": "다른 일정의 준비 문서다.",
-                "related_documents": ["brain/wiki/queue-design.md"],
+                "related_documents": ["wiki/personal/queue-design.md"],
                 "calendar_contexts": [
                     {
                         "event_day": "2026-08-17",
                         "event_title": "다른 학습 약속",
-                        "related_documents": ["brain/wiki/queue-design.md"],
+                        "related_documents": ["wiki/personal/queue-design.md"],
                         "reason": "준비",
                     }
                 ],
@@ -337,7 +340,7 @@ def test_refresh_does_not_link_same_day_context_with_a_different_event_title(
 def test_refresh_does_not_fan_out_context_to_duplicate_same_day_event_titles(
     tmp_path: Path,
 ) -> None:
-    document = tmp_path / "brain/wiki/queue-design.md"
+    document = tmp_path / "wiki/personal/queue-design.md"
     document.parent.mkdir(parents=True)
     document.write_text("# 큐 설계\n", encoding="utf-8")
     ledger = tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-17/context.json"
@@ -348,12 +351,12 @@ def test_refresh_does_not_fan_out_context_to_duplicate_same_day_event_titles(
                 "kind": "결정",
                 "title": "면접 준비 순서를 정한다",
                 "summary": "면접 약속을 준비하며 문서를 만들었다.",
-                "related_documents": ["brain/wiki/queue-design.md"],
+                "related_documents": ["wiki/personal/queue-design.md"],
                 "calendar_contexts": [
                     {
                         "event_day": "2026-08-17",
                         "event_title": "면접 준비",
-                        "related_documents": ["brain/wiki/queue-design.md"],
+                        "related_documents": ["wiki/personal/queue-design.md"],
                         "reason": "준비",
                     }
                 ],
@@ -398,9 +401,9 @@ def test_refresh_links_known_people_and_owned_calendar_owner(tmp_path: Path) -> 
 
     markdown = next((tmp_path / result.relative_path).glob("*.md")).read_text(encoding="utf-8")
     assert "record_owner: choi-woonyoung" in markdown
-    assert '"[[users/choi-woonyoung/README|최우녕]]"' in markdown
-    assert '"[[users/kim-heejun/README|김희준]]"' in markdown
-    assert '"[[users/lee-minjeong/README|이민정]]"' in markdown
+    assert '"[[wiki/personal/choi-woonyoung|최우녕]]"' in markdown
+    assert '"[[wiki/personal/kim-heejun|김희준]]"' in markdown
+    assert '"[[wiki/private/lee-minjeong|이민정]]"' in markdown
     assert 'role: "organizer"' in markdown
     assert 'role: "mentioned"' in markdown
     assert 'basis: "user-confirmed-identifier-in-calendar-title"' in markdown
@@ -430,12 +433,12 @@ def test_refresh_writes_review_without_linking_an_ambiguous_calendar_identifier(
 
     markdown = next((tmp_path / result.relative_path).glob("*.md")).read_text(encoding="utf-8")
     review = (tmp_path / CALENDAR_PERSON_IDENTITY_REVIEW_RELATIVE_PATH).read_text(encoding="utf-8")
-    assert "users/park-minjeong" not in markdown
-    assert "users/kim-minjeong" not in markdown
+    assert "wiki/personal/park-minjeong" not in markdown
+    assert "wiki/personal/kim-minjeong" not in markdown
     assert "calendar-person-identity-review" in review
     assert "민정" in review
-    assert "users/park-minjeong/README|박민정" in review
-    assert "users/kim-minjeong/README|김민정" in review
+    assert "wiki/personal/park-minjeong|박민정" in review
+    assert "wiki/personal/kim-minjeong|김민정" in review
 
 
 def test_refresh_removes_owned_identity_review_after_user_resolves_candidates(

@@ -32,14 +32,13 @@ _ROLES = frozenset(
         "mentioned",
     }
 )
-_FORBIDDEN_LINK_ROOTS = ("wiki/", "catalog/", "sources/private/", "projects/writing/")
+_FORBIDDEN_LINK_ROOTS = ("catalog/", "sources/private/")
 _PRIVATE_HISTORY_ROOTS = (
     "inbox/calendar/events/",
     "inbox/daily/",
 )
 _PRIVATE_HISTORY_EXCLUDED_PATHS = frozenset(
     {
-        "users/README.md",
         "maps/people-index.md",
         "maps/local-private-index.md",
         "inbox/daily/README.md",
@@ -174,7 +173,8 @@ class PersonService:
 
     def __init__(self, vault: Path) -> None:
         self._vault = vault.expanduser().resolve()
-        self._users_root = self._vault / "users"
+        self._wiki_personal_root = self._vault / "wiki/personal"
+        self._wiki_private_root = self._vault / "wiki/private"
         self._state_path = self._vault / ".local/woon-knowledge/people-state.json"
 
     def find(self, query: str) -> tuple[PersonCard, ...]:
@@ -195,11 +195,18 @@ class PersonService:
         return tuple(card for card in self._all_cards() if card.person_scope == "general")
 
     def _all_cards(self) -> tuple[PersonCard, ...]:
-        if not self._users_root.exists():
-            return ()
-        return tuple(
-            _read_card(path, self._vault) for path in sorted(self._users_root.glob("*/README.md"))
-        )
+        cards: list[PersonCard] = []
+        for directory in (self._wiki_personal_root, self._wiki_private_root):
+            if not directory.exists():
+                continue
+            for path in sorted(directory.rglob("*.md")):
+                try:
+                    metadata, _ = _frontmatter(path.read_text(encoding="utf-8"), path)
+                except WoonError:
+                    continue
+                if metadata.get("entity_type") == "person":
+                    cards.append(_read_card(path, self._vault))
+        return tuple(cards)
 
     def default_owner_reference(self) -> CalendarPersonReference | None:
         """Return the known Vault owner without creating a card or guessing identity."""
@@ -362,6 +369,10 @@ class PersonService:
             relative = _relative(path, self._vault)
             if relative == card.relative_path or relative.startswith(_FORBIDDEN_LINK_ROOTS):
                 continue
+            if relative.startswith("inbox/private-person-history/"):
+                # Core-owned output is regenerated from source records and must
+                # never be read back as an input relation.
+                continue
             if relative.startswith("inbox/daily-digests/"):
                 # A retired duplicate projection must never become person history.
                 continue
@@ -434,7 +445,7 @@ class PersonService:
             purpose,
             creation_basis,
         )
-        path = self._users_root / person_id / "README.md"
+        path = self._wiki_personal_root / f"{person_id}.md"
         with exclusive_file_lock(self._state_path.with_suffix(".lock")):
             current = _read_card(path, self._vault) if path.exists() else None
             if expected_revision is not None and (
@@ -570,12 +581,14 @@ class PersonService:
 
     def _person_card_path(self, person_id: str) -> Path:
         _validate_person_id(person_id)
-        path = self._users_root / person_id / "README.md"
-        if not path.is_file():
-            raise WoonError(
-                "person card does not exist; create it only with explicit or repeated evidence"
-            )
-        return path
+        matches = tuple(card for card in self._all_cards() if card.person_id == person_id)
+        if len(matches) > 1:
+            raise WoonError("person_id resolves to multiple Wiki documents")
+        if matches:
+            return self._vault / matches[0].relative_path
+        raise WoonError(
+            "person card does not exist; create it only with explicit or repeated evidence"
+        )
 
 
 def _read_card(path: Path, vault: Path) -> PersonCard:
@@ -662,18 +675,14 @@ def _replace_record_owner(text: str, owner_id: str) -> str:
 def _belongs_to_novel_local_person(path: Path, vault: Path) -> bool:
     """Keep a local-only person card and its workspace out of general migrations."""
 
-    relative = _relative(path, vault)
-    parts = Path(relative).parts
-    if len(parts) < 3 or parts[0] != "users":
-        return False
-    card_path = vault / "users" / parts[1] / "README.md"
-    if not card_path.is_file():
-        return False
     try:
-        metadata, _ = _frontmatter(card_path.read_text(encoding="utf-8"), card_path)
+        metadata, _ = _frontmatter(path.read_text(encoding="utf-8"), path)
     except WoonError:
-        return True
-    return metadata.get("person_scope") == "novel-local-only"
+        return False
+    return (
+        metadata.get("entity_type") == "person"
+        and metadata.get("person_scope") == "novel-local-only"
+    )
 
 
 def _document_path(vault: Path, relative_path: str) -> Path:
@@ -694,7 +703,7 @@ def _document_path(vault: Path, relative_path: str) -> Path:
 
 
 def _markdown_files(vault: Path) -> tuple[Path, ...]:
-    content_roots = ("brain", "inbox", "sources", "maps", "users")
+    content_roots = ("brain", "inbox", "sources", "maps", "wiki")
     ignored = {".git", ".github", ".obsidian", ".local", "exports", "quartz", "templates", "types"}
     files: list[Path] = []
     for root in content_roots:
@@ -722,7 +731,7 @@ def _record_owner(value: object, path: Path) -> str | None:
     if not isinstance(value, str):
         raise WoonError(f"record_owner must be a person ID or person-card link: {path}")
     owner = value.strip()
-    if _PERSON_ID.fullmatch(owner) or owner.startswith("[[users/"):
+    if _PERSON_ID.fullmatch(owner) or owner.startswith(("[[wiki/personal/", "[[wiki/private/")):
         return owner
     raise WoonError(f"record_owner must be a person ID or person-card link: {path}")
 
@@ -733,7 +742,7 @@ def _link_list(value: object, path: Path, field: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise WoonError(f"{field} must be a list of person-card links: {path}")
     links = [item.strip() for item in value]
-    if any(not item.startswith("[[users/") for item in links):
+    if any(not item.startswith(("[[wiki/personal/", "[[wiki/private/")) for item in links):
         raise WoonError(f"{field} must only contain person-card links: {path}")
     return links
 
@@ -950,7 +959,7 @@ def _render_card(
     purpose: str,
     creation_basis: str,
 ) -> str:
-    link = f"[[users/{person_id}/README|{title}]]"
+    link = f"[[wiki/personal/{person_id}|{title}]]"
     frontmatter = {
         "type": "Wiki",
         "title": title,
@@ -958,6 +967,10 @@ def _render_card(
         "access": "local-only",
         "status": "Active",
         "lifecycle": "active",
+        "canonical_id": f"personal/{person_id}",
+        "facets": ["인물"],
+        "knowledge_state": "확인 필요",
+        "state_reason": "explicit-or-repeated-person-evidence",
         "entity_type": "person",
         "person_id": person_id,
         "person_kind": person_kind,

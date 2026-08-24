@@ -52,7 +52,7 @@ def test_people_mcp_stdio_lists_and_queries_general_people(tmp_path: Path) -> No
                         "relationship_to_owner": "볼트 사용자",
                         "person_scope": "general",
                         "identifiers": [],
-                        "relative_path": "users/choi-woonyoung/README.md",
+                        "relative_path": "wiki/personal/choi-woonyoung.md",
                         "revision": response.structuredContent["people"][0]["revision"],
                     }
                 ],
@@ -62,7 +62,7 @@ def test_people_mcp_stdio_lists_and_queries_general_people(tmp_path: Path) -> No
 
 
 def _write_owner_card(vault: Path) -> None:
-    path = vault / "users/choi-woonyoung/README.md"
+    path = vault / "wiki/personal/choi-woonyoung.md"
     path.parent.mkdir(parents=True)
     path.write_text(
         """---

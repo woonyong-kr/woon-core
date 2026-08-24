@@ -64,7 +64,11 @@ from woon_core.knowledge.orchestration import (
     load_orchestrator_settings,
     verify_codex_automation_registry,
 )
-from woon_core.knowledge.reconciliation import audit_reconciliation, reconcile_catalog
+from woon_core.knowledge.reconciliation import (
+    audit_reconciliation,
+    reconcile_catalog,
+    verify_private_source_catalog,
+)
 from woon_core.knowledge.research_intake import (
     create_research_intake_plan,
     export_notebooklm_artifact,
@@ -195,6 +199,8 @@ Usage:
   woon knowledge source-reconcile --source <path> --source-name <name>
     [--vault <path>] [--limit <count>] [--model <model>] [--state <state>]
   woon knowledge source-audit --source <path> --source-name <name> [--vault <path>]
+  woon knowledge source-verify-private --source <path> --source-name <name>
+    [--vault <path>]
   woon knowledge validate-orchestrator [--vault <path>]
     [--automation-root <path>]
   woon knowledge governance-preflight [--vault <path>]
@@ -227,7 +233,7 @@ NOTEBOOKLM_EXPORT_USAGE = """usage: woon knowledge notebooklm-export
   [--nlm <binary>]
 
 Downloads one already-generated NotebookLM artifact as Markdown through a pinned nlm
-client and writes a review-required manifest. It does not upload sources or modify Woon Wiki.
+client and writes a review-required manifest. It does not upload sources or modify Wiki.
 """
 
 
@@ -526,6 +532,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "source-audit":
         _run_knowledge_source_audit(raw_options, output)
         return
+    if command == "source-verify-private":
+        _run_knowledge_private_source_verification(raw_options, output)
+        return
     if command in {
         "migrate-compiled",
         "initialize-curation",
@@ -658,10 +667,22 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         raise WoonError(f"unknown knowledge command {command!r}")
 
 
+def _default_codex_automation_root() -> Path:
+    """Return the active Codex automation registry without hard-coding a home."""
+
+    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    return codex_home / "automations"
+
+
 def _run_second_brain_orchestrator_validation(arguments: list[str], output: TextIO) -> None:
     """Validate policy shape without creating locks, receipts, or tasks."""
 
-    automation_root: Path | None = None
+    # A policy that says a heartbeat is active is not enough evidence that the
+    # corresponding Codex automation is actually registered.  Resolve the
+    # same registry location Codex uses by default, while retaining an
+    # explicit override for isolated tests and non-default CODEX_HOME setups.
+    automation_root = _default_codex_automation_root()
+    automation_root_seen = False
     raw_options: list[str] = []
     index = 0
     while index < len(arguments):
@@ -670,19 +691,16 @@ def _run_second_brain_orchestrator_validation(arguments: list[str], output: Text
             raw_options.append(option)
             index += 1
             continue
-        if automation_root is not None or index + 1 >= len(arguments):
+        if automation_root_seen or index + 1 >= len(arguments):
             raise WoonError("--automation-root requires exactly one path")
         automation_root = Path(arguments[index + 1]).expanduser()
+        automation_root_seen = True
         index += 2
     vault, options = _parse_knowledge_options(raw_options)
     if options:
         raise WoonError("knowledge validate-orchestrator takes no positional arguments")
     settings = load_orchestrator_settings(vault or resolve_knowledge_vault())
-    verified = (
-        verify_codex_automation_registry(settings, automation_root)
-        if automation_root is not None
-        else ()
-    )
+    verified = verify_codex_automation_registry(settings, automation_root)
     print(
         json.dumps(
             {
@@ -698,6 +716,7 @@ def _run_second_brain_orchestrator_validation(arguments: list[str], output: Text
                     }
                     for item in settings.automations
                 ],
+                "codex_registry_root": str(automation_root),
                 "codex_registry_verified": list(verified),
             },
             ensure_ascii=False,
@@ -715,7 +734,7 @@ def _run_governance_preflight(arguments: list[str], output: TextIO) -> None:
     carries digests only; it never stores the checked instruction text.
     """
 
-    automation_root = Path.home() / ".codex" / "automations"
+    automation_root = _default_codex_automation_root()
     automation_root_seen = False
     raw_options: list[str] = []
     index = 0
@@ -795,6 +814,7 @@ def _governance_preflight_evidence(
             continue
         inventory.extend(sorted(repository.rglob("AGENTS.md")))
         inventory.extend(sorted(repository.rglob("CLAUDE.md")))
+    inventory.extend(_governance_skill_inventory(workspace))
     inventory.extend(sorted(automation_root.glob("*/automation.toml")))
     digest = hashlib.sha256()
     retired_markers = ("ai-reference", "_quarantine", "woon-brain", "codex-write-vault")
@@ -819,20 +839,43 @@ def _governance_preflight_evidence(
     return digest.hexdigest(), output.hexdigest()
 
 
+def _governance_skill_inventory(
+    workspace: Path, *, installed_root: Path | None = None
+) -> tuple[Path, ...]:
+    """Return canonical skills and reject drift in active installed copies."""
+
+    repository = workspace / "woon-skills"
+    if not repository.is_dir():
+        return ()
+    catalog = repository / "catalog.json"
+    if not catalog.is_file():
+        raise WoonError("second-brain governance skill catalog is missing")
+    canonical = tuple(sorted((repository / "skills").rglob("SKILL.md")))
+    if not canonical:
+        raise WoonError("second-brain governance canonical skill inventory is empty")
+    active_root = installed_root or (Path.home() / ".codex/skills")
+    installed: list[Path] = []
+    for source in canonical:
+        active = active_root / source.parent.name / "SKILL.md"
+        if not active.exists():
+            continue
+        if not active.is_file() or active.read_bytes() != source.read_bytes():
+            raise WoonError(f"second-brain governance installed skill drift: {source.parent.name}")
+        installed.append(active)
+    return (catalog, *canonical, *sorted(installed))
+
+
 _VAULT_TOOL_SCRIPTS = {
     "apply-breadcrumbs": "apply-breadcrumbs.py",
-    "apply-people-properties": "apply-people-properties.py",
     "assess-document-cohesion": "assess-document-cohesion.py",
     "audit-canonical-map-tree": "audit-canonical-map-tree.py",
     "audit-folder-depth": "audit-folder-depth.py",
-    "audit-root-keyword-graph": "audit-root-keyword-graph.py",
     "audit-source-assets": "audit-source-assets.py",
     "audit-vault-health": "audit-vault-health.py",
     "convert-svg-diagrams-to-mermaid": "convert-svg-diagrams-to-mermaid.py",
     "normalize-section-headings": "normalize-section-headings.py",
     "personalize-section-headings": "personalize-section-headings.py",
     "remove-ascii-box-diagrams": "remove-ascii-box-diagrams.py",
-    "update-readme-recent-docs": "update-readme-recent-docs.py",
 }
 _VAULT_TOOL_SHELL_SCRIPTS = {
     "fetch-transformer-explainer": "fetch-transformer-explainer.sh",
@@ -1899,6 +1942,37 @@ def _run_knowledge_source_audit(arguments: list[str], output: TextIO) -> None:
     if not audit.complete:
         raise WoonError(
             f"source reconciliation is incomplete: pending={audit.pending}, "
+            f"failed={audit.failed}, errors={len(audit.errors)}"
+        )
+
+
+def _run_knowledge_private_source_verification(arguments: list[str], output: TextIO) -> None:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--source", "--source-name", "--vault"}:
+            raise WoonError(f"unexpected source-verify-private argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--source" not in values or "--source-name" not in values:
+        raise WoonError("source-verify-private requires --source and --source-name")
+    target = Path(values.get("--vault", ".")).expanduser().resolve()
+    source = Path(values["--source"])
+    _reject_self_source_catalog(source, target)
+    name = values["--source-name"]
+    audit = verify_private_source_catalog(
+        source,
+        target,
+        target / f"catalog/sources/{name}.yaml",
+        target / f"catalog/reconciliation/{name}.yaml",
+    )
+    print(json.dumps(asdict(audit), ensure_ascii=False, indent=2), file=output)
+    if not audit.complete:
+        raise WoonError(
+            f"private source verification is incomplete: pending={audit.pending}, "
             f"failed={audit.failed}, errors={len(audit.errors)}"
         )
 

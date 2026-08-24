@@ -55,7 +55,12 @@ def run_people(arguments: list[str], output: TextIO) -> None:
             labels: list[str] = []
             if document.record_owner == positionals[0] or (
                 document.record_owner
-                and document.record_owner.startswith(f"[[users/{positionals[0]}/README")
+                and document.record_owner.startswith(
+                    (
+                        f"[[wiki/personal/{positionals[0]}",
+                        f"[[wiki/private/{positionals[0]}",
+                    )
+                )
             ):
                 labels.append("record-owner")
             labels.extend(document.roles)

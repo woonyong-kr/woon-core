@@ -183,9 +183,14 @@ def archive_conversation(
 def reindex_knowledge() -> dict[str, object]:
     """Rebuild the replaceable local search index from canonical Markdown files, then exit."""
 
-    settings, _ = build_knowledge_service()
-    service = _service()
+    # A reindex is also the explicit configuration-refresh boundary.  Without
+    # clearing the cached service first, a newly added search root is silently
+    # ignored until the stdio server restarts, while the returned settings
+    # misleadingly describe the new configuration.
+    _service.cache_clear()
+    settings, service = build_knowledge_service()
     count = service.reindex()
+    _service.cache_clear()
     return {"indexed": count, "adapter": settings.search_adapter}
 
 
@@ -299,13 +304,29 @@ def record_codex_knowledge_entries_run(
     """Record one day of short Codex conclusions, never a transcript.
 
     Each entry has one Korean category such as ``활동``, ``일정``, ``인물``,
-    ``학습``, ``개념``, ``커리어``, ``창작`` or ``자료`` plus a short title and
-    summary.  Every entry enters the local daily ledger; reusable ``학습``,
-    ``개념`` and ``결정`` also become a local-only Growth Wiki page.  Pass
-    ``input_state=unavailable`` with ``entries=[]`` when the persisted session
-    for that day is absent, so a blank note explains its cause.  Do not pass
-    raw chat text, system/developer text, tool output, reasoning, credentials,
-    opaque locators, private originals, or Novel text.
+    ``학습``, ``개념``, ``커리어``, ``창작``, ``자료``, ``콘텐츠`` or
+    ``프로젝트`` plus a short title and summary.  Every organized entry updates
+    the local daily ledger.  Set ``wiki_update=true`` only for a reusable,
+    stable subject; then the same run creates or updates one canonical
+    ``wiki/`` document.  Every ``wiki_update=true`` entry must provide exactly
+    one identity proof: ``wiki_subject_path`` for an existing canonical subject,
+    or ``new_wiki_reason`` after searching the Wiki and finding no matching
+    subject.  This prevents sentence-shaped duplicates from bypassing an
+    existing project, content, person, or concept page.  A one-time event keeps
+    ``wiki_update=false`` and does not become a subject page.  Use
+    ``disposition=review`` with a short ``review_reason`` when classification or
+    identity needs a person; it creates no Wiki, Calendar, person, project or
+    content side effect.  Use ``disposition=excluded`` for advertisements,
+    system/tool/reasoning text, secrets, raw private originals and Novel text;
+    excluded input is not validated, hashed or persisted.  Explicitly named
+    books, films, lectures and articles may define ``contents``; explicit finite
+    outcomes may define ``projects``.  Both are facets in the same Wiki, not
+    parallel folders.  Existing matching subjects are reused instead of
+    duplicated.  Pass ``input_state=unavailable`` with
+    ``entries=[]`` when the persisted session for that day is absent, so a blank
+    note explains its cause.  Do not pass raw chat text, system/developer text,
+    tool output, reasoning, credentials, opaque locators, private originals, or
+    Novel text.
     """
 
     try:

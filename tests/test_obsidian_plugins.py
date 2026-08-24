@@ -223,6 +223,82 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
     )
 
 
+def test_official_install_preserves_existing_plugin_settings(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination.mkdir()
+    for name, content in {
+        "main.js": b"old runtime\n",
+        "manifest.json": json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.5.5"}).encode(),
+        "styles.css": b"old styles\n",
+        "data.json": b'{"defaultGraphId":"interview"}\n',
+    }.items():
+        (destination / name).write_bytes(content)
+    release, assets = _release(
+        CONTEXT_GRAPH_ID, "0.5.12", "https://github.com/woonyong-kr/linked-canvas"
+    )
+    downloads = {
+        "https://api.github.com/repos/woonyong-kr/linked-canvas/releases/latest": json.dumps(
+            release
+        ).encode(),
+        **{
+            f"https://github.com/example/{CONTEXT_GRAPH_ID}/{name}": content
+            for name, content in assets.items()
+        },
+    }
+
+    receipt = ObsidianPluginService(vault, download=downloads.__getitem__).install(
+        [CONTEXT_GRAPH_ID]
+    )
+
+    assert receipt["plugins"][0]["preserved_settings"] == ["data.json"]
+    assert (destination / "data.json").read_bytes() == b'{"defaultGraphId":"interview"}\n'
+
+
+def test_recover_settings_restores_only_non_runtime_files_from_exact_backup(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination.mkdir()
+    for name in ("main.js", "styles.css"):
+        (destination / name).write_text("current runtime\n", encoding="utf-8")
+    (destination / "manifest.json").write_text(
+        json.dumps({"id": CONTEXT_GRAPH_ID, "name": "Linked Canvas", "version": "0.5.12"}),
+        encoding="utf-8",
+    )
+    source_receipt_id = "obsidian-plugin-20260824T000000Z-example"
+    receipt_root = vault / ".local/woon-knowledge/obsidian-plugins/receipts"
+    receipt_root.mkdir(parents=True)
+    (receipt_root / f"{source_receipt_id}.json").write_text(
+        json.dumps(
+            {
+                "receipt_id": source_receipt_id,
+                "action": "install",
+                "plugins": [{"id": CONTEXT_GRAPH_ID}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    backup = (
+        vault
+        / ".local/woon-knowledge/obsidian-plugins/backups"
+        / source_receipt_id
+        / CONTEXT_GRAPH_ID
+    )
+    backup.mkdir(parents=True)
+    (backup / "main.js").write_text("old runtime\n", encoding="utf-8")
+    (backup / "data.json").write_text('{"defaultGraphId":"interview"}\n', encoding="utf-8")
+
+    receipt = ObsidianPluginService(vault).recover_settings_from_backup(
+        CONTEXT_GRAPH_ID, source_receipt_id
+    )
+
+    assert receipt["action"] == "recover-settings"
+    assert (destination / "main.js").read_text(encoding="utf-8") == "current runtime\n"
+    assert (destination / "data.json").read_text(encoding="utf-8") == (
+        '{"defaultGraphId":"interview"}\n'
+    )
+
+
 def test_remove_detected_mindmaps_preserves_backup_and_unrelated_plugins(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     plugins = vault / ".obsidian" / "plugins"
@@ -397,6 +473,18 @@ def test_install_local_build_preserves_settings_backup_hashes_and_enabled_config
         (vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")
     )
     assert list((vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json"))
+
+
+def test_install_local_build_keeps_plugin_runtime_state_user_only(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    source = _local_context_graph_build(tmp_path)
+
+    ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+
+    runtime = vault / ".local/woon-knowledge/obsidian-plugins"
+    for path in (runtime, *runtime.rglob("*")):
+        expected = 0o700 if path.is_dir() else 0o600
+        assert path.stat().st_mode & 0o777 == expected
 
 
 def test_install_local_build_rejects_a_version_mismatch_before_mutating_the_vault(

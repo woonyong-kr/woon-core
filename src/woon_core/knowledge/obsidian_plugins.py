@@ -289,6 +289,89 @@ class ObsidianPluginService:
 
         return self._mutate(lambda: self._install_locked(plugin_ids))
 
+    def recover_settings_from_backup(
+        self, plugin_id: str, source_receipt_id: str
+    ) -> dict[str, Any]:
+        """Restore non-runtime plugin files from one exact install backup.
+
+        This is a narrow recovery lane for an interrupted or older official
+        installer. Runtime assets are never copied back from the backup.
+        """
+
+        return self._mutate(
+            lambda: self._recover_settings_from_backup_locked(plugin_id, source_receipt_id)
+        )
+
+    def _recover_settings_from_backup_locked(
+        self, plugin_id: str, source_receipt_id: str
+    ) -> dict[str, Any]:
+        self._require_vault()
+        if plugin_id not in OFFICIAL_PLUGINS:
+            raise WoonError(f"unapproved Obsidian plugin ID: {plugin_id}")
+        if not source_receipt_id.startswith("obsidian-plugin-") or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+            for character in source_receipt_id
+        ):
+            raise WoonError("Obsidian plugin recovery receipt ID is invalid")
+
+        source_receipt_path = self._local / "receipts" / f"{source_receipt_id}.json"
+        _require_vault_local_file(
+            self._vault, source_receipt_path, "Obsidian plugin recovery receipt"
+        )
+        source_receipt = self._read_json_object(source_receipt_path)
+        installed = source_receipt.get("plugins")
+        if (
+            source_receipt.get("action") != "install"
+            or not isinstance(installed, list)
+            or not any(isinstance(item, dict) and item.get("id") == plugin_id for item in installed)
+        ):
+            raise WoonError("Obsidian plugin recovery receipt does not own the requested plugin")
+
+        backup = self._local / "backups" / source_receipt_id / plugin_id
+        destination = self._plugins / plugin_id
+        _require_vault_local_directory(self._vault, backup, "Obsidian plugin recovery backup")
+        _require_vault_local_directory(
+            self._vault, destination, "Obsidian plugin recovery destination"
+        )
+        recovered: dict[str, str] = {}
+        for item in sorted(backup.iterdir(), key=lambda path: path.name):
+            if item.name in REQUIRED_ASSETS:
+                continue
+            if item.is_symlink() or not item.is_file():
+                raise WoonError(
+                    f"Obsidian plugin recovery backup has unsupported settings: {item.name}"
+                )
+            target = destination / item.name
+            content = item.read_bytes()
+            current = _current_file_bytes(target)
+            if current is not None and current != content:
+                raise WoonError(
+                    f"Obsidian plugin setting already differs; recovery refused: {item.name}"
+                )
+            if current is None:
+                _atomic_write(target, content)
+            recovered[item.name] = _sha256(content)
+        if not recovered:
+            raise WoonError("Obsidian plugin recovery backup contains no settings")
+
+        receipt_id = self._receipt_id()
+        receipt = {
+            "receipt_id": receipt_id,
+            "action": "recover-settings",
+            "created_at": datetime.now(UTC).isoformat(),
+            "plugin": {"id": plugin_id, "settings_sha256": recovered},
+            "source_receipt_id": source_receipt_id,
+            "runtime_loaded": "unchanged",
+        }
+        _atomic_write(
+            self._local / "receipts" / f"{receipt_id}.json",
+            (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+        )
+        status = next((item for item in self.status()["plugins"] if item["id"] == plugin_id), None)
+        if status is None or not set(recovered).issubset(status["settings_files"]):
+            raise WoonError("Obsidian plugin settings recovery could not be verified")
+        return receipt
+
     def _install_locked(self, plugin_ids: list[str]) -> dict[str, Any]:
         self._require_vault()
         requested = self._approved_ids(plugin_ids)
@@ -994,7 +1077,23 @@ class ObsidianPluginService:
             destination = self._plugins / plugin_id
             backup = backup_root / plugin_id
             replaced_existing = False
-            if destination.exists():
+            preserved: list[str] = []
+            if destination.exists() or destination.is_symlink():
+                if destination.is_symlink() or not destination.is_dir():
+                    raise WoonError(
+                        "official Obsidian plugin destination is not a regular directory: "
+                        f"{plugin_id}"
+                    )
+                _require_within_vault(self._vault, destination, "Obsidian plugin destination")
+                for item in destination.iterdir():
+                    if item.name in REQUIRED_ASSETS:
+                        continue
+                    if item.is_symlink() or not item.is_file():
+                        raise WoonError(
+                            f"official Obsidian plugin has unsupported settings: {item.name}"
+                        )
+                    _atomic_write(stage / item.name, item.read_bytes())
+                    preserved.append(item.name)
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(destination, backup)
                 replaced_existing = True
@@ -1015,6 +1114,7 @@ class ObsidianPluginService:
             "version": manifest["version"],
             "release_url": release.get("html_url"),
             "assets_sha256": downloaded,
+            "preserved_settings": sorted(preserved),
         }
 
     def _write_enabled_ids(self, enabled: set[str], backup_root: Path) -> None:
@@ -1283,9 +1383,26 @@ class ObsidianPluginService:
         """Apply one mutation only while all control paths remain Vault-local."""
 
         self._require_mutation_boundary()
+        self._secure_local_state_permissions()
         with exclusive_file_lock(self._mutation_lock):
             self._require_mutation_boundary()
-            return operation()
+            try:
+                return operation()
+            finally:
+                self._secure_local_state_permissions()
+
+    def _secure_local_state_permissions(self) -> None:
+        """Keep plugin receipts and rollback backups private to the local user."""
+
+        if not self._local.exists():
+            return
+        for path in (self._local, *self._local.rglob("*")):
+            if path.is_symlink():
+                raise WoonError("Obsidian plugin local state must not contain symlinks")
+            if path.is_dir():
+                path.chmod(0o700)
+            elif path.is_file():
+                path.chmod(0o600)
 
     def _require_mutation_boundary(self) -> None:
         _require_vault_local_directory(self._vault, self._obsidian, "Obsidian config directory")

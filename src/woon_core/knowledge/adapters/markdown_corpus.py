@@ -23,7 +23,7 @@ GENERATED_BLOCK = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class CorpusRoot:
-    """One configured Markdown tree and the label exposed in search results."""
+    """One configured Markdown file or tree and the label exposed in search results."""
 
     path: Path
     source_type: str
@@ -70,9 +70,13 @@ class MarkdownKnowledgeCorpus:
         paths: list[tuple[Path, str, str]] = []
         seen: set[str] = set()
         for root in self._roots:
-            if not root.path.is_dir():
+            if root.path.is_file():
+                candidates = [root.path] if root.path.suffix == ".md" else []
+            elif root.path.is_dir():
+                candidates = sorted(root.path.rglob("*.md"))
+            else:
                 continue
-            for path in sorted(root.path.rglob("*.md")):
+            for path in candidates:
                 relative = path.relative_to(self._vault).as_posix()
                 if relative in seen or self._excluded(relative):
                     continue

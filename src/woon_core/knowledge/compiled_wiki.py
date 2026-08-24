@@ -20,6 +20,10 @@ import yaml
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
 from woon_core.knowledge.domain import DocumentMetadata
+from woon_core.knowledge.woon_wiki import (
+    compiled_wiki_contract,
+    preserve_managed_context,
+)
 
 FRONTMATTER = re.compile(r"\A---\n(?P<yaml>[\s\S]*?)\n---\n?(?P<body>[\s\S]*)\Z")
 H1 = re.compile(r"\A(?:\n)*#\s+(?P<title>.+?)\s*\n(?:\n)?")
@@ -232,21 +236,21 @@ class CompiledWiki:
             claim_records = self._page_claims(page, claims)
             _validate_page(page, source_records, claim_records, curation)
             input_sha256 = _input_hash(page, source_records, claim_records, curation)
-            output = _render_page(page, source_records, claim_records, curation, input_sha256)
             output_path = _inside(
                 self._settings.output_root, page["output_path"], "page output_path"
             )
-            existing_hash = (
-                _sha256_bytes(output_path.read_bytes()) if output_path.is_file() else None
-            )
+            rendered = _render_page(page, source_records, claim_records, curation, input_sha256)
+            compiler_projection_sha256 = _sha256_text(preserve_managed_context("", rendered))
+            existing_text = output_path.read_text(encoding="utf-8") if output_path.is_file() else ""
+            output = preserve_managed_context(existing_text, rendered)
             receipt = receipts.get(page_id)
             expected_hash = _sha256_text(output)
             if (
                 not force
                 and receipt is not None
                 and receipt.get("input_sha256") == input_sha256
-                and receipt.get("output_sha256") == expected_hash
-                and existing_hash == expected_hash
+                and receipt.get("compiler_projection_sha256") == compiler_projection_sha256
+                and existing_text == output
             ):
                 unchanged += 1
                 continue
@@ -256,6 +260,7 @@ class CompiledWiki:
                 "compiler": "woon-core/llm-wiki-v1",
                 "input_sha256": input_sha256,
                 "output_sha256": expected_hash,
+                "compiler_projection_sha256": compiler_projection_sha256,
                 "source_ids": [record["source_id"] for record in source_records],
                 "claim_ids": [record["claim_id"] for record in claim_records],
                 "checks": [
@@ -575,6 +580,41 @@ class CompiledWiki:
                     )
                 page["source_ids"] = list(dict.fromkeys([*source_ids, source_id]))
                 page["claim_ids"] = list(dict.fromkeys([*claim_ids, claim_id]))
+                if privacy == "public":
+                    # Historical local-only revisions remain in the catalog,
+                    # but they are not current provenance for a newly reviewed
+                    # public page. Keeping them in the page dependency list
+                    # would make a safe public curation impossible forever.
+                    removed_source_ids = [
+                        value
+                        for value in page["source_ids"]
+                        if sources[value].get("privacy") != "public"
+                    ]
+                    page["source_ids"] = [
+                        value
+                        for value in page["source_ids"]
+                        if sources[value].get("privacy") == "public"
+                    ]
+                    removed_claim_ids = [
+                        value
+                        for value in page["claim_ids"]
+                        if not all(
+                            sources[claim_source].get("privacy") == "public"
+                            for claim_source in _string_list(
+                                claims[value].get("source_ids"), "claim source_ids"
+                            )
+                        )
+                    ]
+                    page["claim_ids"] = [
+                        value for value in page["claim_ids"] if value not in removed_claim_ids
+                    ]
+                    for prior_source_id in removed_source_ids:
+                        self._supersede_unshared_curated_source(
+                            prior_source_id, source_id, page_id, pages, sources
+                        )
+                    self._supersede_unshared_claims(
+                        removed_claim_ids, claim_id, page_id, pages, claims
+                    )
                 page["render"] = {"kind": "source-body", "source_id": source_id}
                 curation.update(
                     {
@@ -640,6 +680,25 @@ class CompiledWiki:
                 continue
             claim.update({"status": "superseded", "superseded_by": successor_claim_id})
         return retained
+
+    @staticmethod
+    def _supersede_unshared_claims(
+        claim_ids: list[str],
+        successor_claim_id: str,
+        page_id: str,
+        pages: dict[str, dict[str, Any]],
+        claims: dict[str, dict[str, Any]],
+    ) -> None:
+        for prior_claim_id in claim_ids:
+            used_elsewhere = any(
+                other_page_id != page_id
+                and prior_claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
+                for other_page_id, other_page in pages.items()
+            )
+            if not used_elsewhere:
+                claims[prior_claim_id].update(
+                    {"status": "superseded", "superseded_by": successor_claim_id}
+                )
 
     def reconcile_superseded_revisions(self) -> RevisionReconciliationReport:
         """Classify safe, unreferenced conversation revisions without discarding them.
@@ -866,9 +925,15 @@ class CompiledWiki:
                     raise WoonError("compiled receipt is missing")
                 if receipt.get("input_sha256") != input_sha256:
                     raise WoonError("compiled output is stale for its source or claims")
-                if receipt.get("output_sha256") != _sha256_bytes(path.read_bytes()):
-                    raise WoonError("compiled output bytes differ from its receipt")
-                _parse_markdown(path.read_text(encoding="utf-8"), Path(relative))
+                actual = path.read_text(encoding="utf-8")
+                rendered = _render_page(page, source_records, claim_records, curation, input_sha256)
+                compiler_projection_sha256 = _sha256_text(preserve_managed_context("", rendered))
+                if receipt.get("compiler_projection_sha256") != compiler_projection_sha256:
+                    raise WoonError("compiled projection differs from its receipt")
+                expected = preserve_managed_context(actual, rendered)
+                if expected != actual:
+                    raise WoonError("compiled output cannot be reproduced with its Wiki context")
+                _parse_markdown(actual, Path(relative))
             except (OSError, UnicodeError, WoonError) as error:
                 errors.append(f"{page_id}: {error}")
         for page_id in sorted(set(receipts).difference(pages)):
@@ -1356,6 +1421,7 @@ def _render_page(
         )
     if not body.strip():
         raise WoonError("compiled page body must not be empty")
+    body = _normalize_compiled_display_body(body)
     frontmatter = dict(page["frontmatter"])
     # This is a present operating purpose, not a reconstructed source intent.
     frontmatter["purpose"] = curation["current_use"]
@@ -1365,10 +1431,32 @@ def _render_page(
         "build_id": input_sha256[:24],
         "page_id": page["page_id"],
     }
+    provisional_yaml = yaml.safe_dump(
+        frontmatter, allow_unicode=True, sort_keys=False, default_flow_style=False
+    )
+    provisional = f"---\n{provisional_yaml}---\n\n# {page['title']}\n\n{body.rstrip()}\n"
+    frontmatter.update(compiled_wiki_contract(Path(page["output_path"]), provisional))
     yaml_text = yaml.safe_dump(
         frontmatter, allow_unicode=True, sort_keys=False, default_flow_style=False
     )
     return f"---\n{yaml_text}---\n\n# {page['title']}\n\n{body.rstrip()}\n"
+
+
+def _normalize_compiled_display_body(body: str) -> str:
+    """Remove retired generated views without rewriting source knowledge.
+
+    Mermaid labels are evidence-bearing content. Truncated historical labels
+    must be repaired in their canonical source record, never guessed or
+    deleted while compiling a view.
+    """
+
+    body = re.sub(
+        r"\n?<!-- recent-docs:start -->.*?<!-- recent-docs:end -->\n?",
+        "\n",
+        body,
+        flags=re.DOTALL,
+    )
+    return body
 
 
 def _input_hash(

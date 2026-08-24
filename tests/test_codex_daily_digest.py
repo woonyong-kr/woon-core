@@ -22,14 +22,14 @@ def test_records_transcript_free_daily_digest_once(tmp_path: Path) -> None:
     settings = _digest_settings(tmp_path)
     (tmp_path / "inbox/daily").mkdir(parents=True)
     (tmp_path / "inbox/daily/2026-08-17.md").write_text("# 2026-08-17\n", encoding="utf-8")
-    (tmp_path / "brain/wiki").mkdir(parents=True)
-    (tmp_path / "brain/wiki/herdr.md").write_text("# Herdr\n", encoding="utf-8")
+    (tmp_path / "wiki/personal").mkdir(parents=True)
+    (tmp_path / "wiki/personal/herdr.md").write_text("# Herdr\n", encoding="utf-8")
     entries = (
         CodexDailyDigestEntry(
             kind="결정",
             title="일일 대화 요약 자동화 추가",
             summary="원문 대신 결정과 다음 행동만 하루 노트에 남기도록 정했다.",
-            related_documents=("brain/wiki/herdr.md",),
+            related_documents=("wiki/personal/herdr.md",),
         ),
     )
 
@@ -47,7 +47,7 @@ def test_records_transcript_free_daily_digest_once(tmp_path: Path) -> None:
     assert first.relative_path == "inbox/daily/2026-08-17.md"
     assert "## 대화에서 남긴 것" in path.read_text(encoding="utf-8")
     assert "## 성장·학습" in path.read_text(encoding="utf-8")
-    assert "[[../../brain/wiki/herdr|Herdr]]" in path.read_text(encoding="utf-8")
+    assert "[[../../wiki/personal/herdr|Herdr]]" in path.read_text(encoding="utf-8")
     assert receipt.is_file()
     assert json.loads(receipt.read_text(encoding="utf-8"))["candidate_ids"]
 
@@ -81,8 +81,7 @@ def test_creates_a_missing_daily_note_from_the_canonical_template(tmp_path: Path
     template = tmp_path / "templates" / "daily-note.md"
     template.parent.mkdir(parents=True)
     template.write_text(
-        "# {{date}}\n\n<!-- woon-codex-digest:start -->\n"
-        "<!-- woon-codex-digest:end -->\n",
+        "# {{date}}\n\n<!-- woon-codex-digest:start -->\n<!-- woon-codex-digest:end -->\n",
         encoding="utf-8",
     )
 
@@ -93,6 +92,120 @@ def test_creates_a_missing_daily_note_from_the_canonical_template(tmp_path: Path
         .read_text(encoding="utf-8")
         .startswith("# 2026-08-17")
     )
+
+
+@pytest.mark.parametrize(
+    ("input_state", "expected_title"),
+    [
+        ("partial", "현재까지 정리됨"),
+        ("pending", "다음 실행 대기"),
+        ("unavailable", "세션 원본을 찾지 못해 대기"),
+        ("no-meaningful", "남길 항목 없음"),
+    ],
+)
+def test_empty_daily_digest_explains_its_honest_input_state(
+    tmp_path: Path, input_state: str, expected_title: str
+) -> None:
+    _digest_settings(tmp_path)
+    (tmp_path / "inbox/daily").mkdir(parents=True)
+    (tmp_path / "inbox/daily/2026-08-17.md").write_text("# 2026-08-17\n", encoding="utf-8")
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 17),
+        entries=(),
+        input_state=input_state,
+    )
+
+    rendered = (tmp_path / "inbox/daily/2026-08-17.md").read_text(encoding="utf-8")
+    assert "## 대화 정리 상태" in rendered
+    assert expected_title in rendered
+    assert "## 대화에서 남긴 것" not in rendered
+
+
+def test_nonempty_daily_digest_marks_completion_before_rendering_entries(tmp_path: Path) -> None:
+    _digest_settings(tmp_path)
+    (tmp_path / "inbox/daily").mkdir(parents=True)
+    (tmp_path / "inbox/daily/2026-08-17.md").write_text("# 2026-08-17\n", encoding="utf-8")
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 17),
+        entries=(
+            CodexDailyDigestEntry(
+                kind="결정",
+                title="정리 상태를 구분한다",
+                summary="빈 노트와 완료된 기록을 같은 문구로 보이지 않게 한다.",
+            ),
+        ),
+    )
+
+    rendered = (tmp_path / "inbox/daily/2026-08-17.md").read_text(encoding="utf-8")
+    assert "**정리 완료**" in rendered
+
+
+def test_partial_daily_digest_renders_items_without_claiming_day_complete(tmp_path: Path) -> None:
+    _digest_settings(tmp_path)
+    (tmp_path / "inbox/daily").mkdir(parents=True)
+    (tmp_path / "inbox/daily/2026-08-24.md").write_text("# 2026-08-24\n", encoding="utf-8")
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 24),
+        entries=(
+            CodexDailyDigestEntry(
+                kind="학습",
+                title="완료된 대화부터 누적한다",
+                summary="진행 중인 날에도 완료된 질문과 답변은 먼저 정리한다.",
+            ),
+        ),
+        input_state="partial",
+    )
+
+    rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
+    assert "**현재까지 정리됨**" in rendered
+    assert "완료된 대화부터 누적한다" in rendered
+    assert "**정리 완료**" not in rendered
+    assert "## 대화에서 남긴 것" in rendered
+
+
+def test_daily_digest_coalesces_incremental_updates_for_the_same_subject(tmp_path: Path) -> None:
+    _digest_settings(tmp_path)
+    (tmp_path / "inbox/daily").mkdir(parents=True)
+    (tmp_path / "inbox/daily/2026-08-24.md").write_text("# 2026-08-24\n", encoding="utf-8")
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 24),
+        entries=(
+            CodexDailyDigestEntry(
+                kind="개념",
+                title="자동화는 실제 산출물로 검증한다",
+                summary="실제 Wiki와 일일 기록이 생성돼야 한다.",
+                intent="산출물 존재를 확인한다.",
+            ),
+            CodexDailyDigestEntry(
+                kind="학습",
+                title="자동화는 실제 산출물로 검증한다",
+                summary="같은 입력의 재실행에서 문서가 변하지 않아야 한다.",
+                intent="재실행 안전성을 확인한다.",
+            ),
+            CodexDailyDigestEntry(
+                kind="학습",
+                title="자동화는 실제 산출물로 검증한다",
+                summary="같은 입력의 재실행에서 문서가 변하지 않아야 한다.",
+                intent="서로 다른 대화 근거도 내부 식별자는 충돌하지 않게 한다.",
+            ),
+        ),
+        input_state="partial",
+    )
+
+    rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
+    assert rendered.count("자동화는 실제 산출물로 검증한다") == 1
+    assert "개념·학습" in rendered
+    assert "실제 Wiki와 일일 기록" in rendered
+    assert "재실행에서 문서가 변하지 않아야" in rendered
+    assert "내부 식별자는 충돌하지 않게" in rendered
 
 
 def test_migrates_only_generated_legacy_digests_into_the_daily_record(tmp_path: Path) -> None:

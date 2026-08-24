@@ -530,6 +530,33 @@ def test_read_only_corpus_excludes_archived_documents(tmp_path: Path) -> None:
     assert service.search("이전 검색 문서", 1) == []
 
 
+def test_read_only_corpus_indexes_a_configured_markdown_file_root(tmp_path: Path) -> None:
+    canonical_root = tmp_path / "wiki/canonical"
+    canonical_root.mkdir(parents=True)
+    activity_log = tmp_path / "brain/log.md"
+    activity_log.parent.mkdir(parents=True)
+    activity_log.write_text(
+        "# 활동 이력\n\n사용자가 확인한 결정과 완료를 날짜별로 다시 찾는다.\n",
+        encoding="utf-8",
+    )
+    service = KnowledgeService(
+        MarkdownDocumentRepository(tmp_path, canonical_root),
+        SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
+        GitKnowledgeHistory(tmp_path),
+        MarkdownKnowledgeCorpus(
+            tmp_path,
+            (CorpusRoot(activity_log, "activity"),),
+            (),
+        ),
+    )
+
+    assert service.reindex() == 1
+    result = service.search("사용자 확인 결정 완료", 1)[0]
+
+    assert result.relative_path == "brain/log.md"
+    assert result.source_type == "activity"
+
+
 def test_search_ignores_generic_intent_words_and_generated_breadcrumbs(tmp_path: Path) -> None:
     canonical_root = tmp_path / "wiki/canonical"
     canonical_root.mkdir(parents=True)

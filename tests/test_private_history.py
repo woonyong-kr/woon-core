@@ -19,7 +19,8 @@ from woon_core.people.service import PersonService
 def _write_person_card(
     vault: Path, *, person_id: str, title: str, person_scope: str = "general"
 ) -> None:
-    path = vault / "users" / person_id / "README.md"
+    root = "private" if person_scope == "novel-local-only" else "personal"
+    path = vault / "wiki" / root / f"{person_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "---\n"
@@ -147,7 +148,7 @@ def test_private_history_sync_projects_explicit_links_and_removes_resolved_revie
     assert "creative-work-1" in review_text
     assert "사용자 확인 전에는 같은 사람인지 확정할 수 없음" in review_text
     assert "create/scene.md" not in review_text
-    assert "비공개 이력" in (vault / "users/participant-person/README.md").read_text(
+    assert "비공개 이력" in (vault / "wiki/personal/participant-person.md").read_text(
         encoding="utf-8"
     )
 
@@ -158,7 +159,7 @@ def test_private_history_sync_projects_explicit_links_and_removes_resolved_revie
     assert not review.exists()
     assert not (vault / VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY / "participant-person.md").exists()
     assert "woon-private-person-history:start" not in (
-        vault / "users/participant-person/README.md"
+        vault / "wiki/personal/participant-person.md"
     ).read_text(encoding="utf-8")
     assert PersonService(vault).private_history_card("subject-person").title == "대상 인물"
 

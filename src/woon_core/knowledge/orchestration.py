@@ -246,20 +246,15 @@ def _has_person_protection(prompt: str) -> bool:
     """
 
     strict = all(term in prompt for term in _AUTOMATION_PERSON_PROMPT_GUARD_TERMS)
-    candidate = all(
-        term in prompt
-        for term in (
-            "local-only 인물 정리 후보",
-            "같은 이름의 카드와 연결",
-            "관계",
-            "신상",
-            "추정하지 않는다",
-            "Novel",
-            "private 원본",
-            "일반 인물 지도",
-            "검색",
-            "넣지 마라",
-        )
+    candidate = (
+        any(term in prompt for term in ("local-only 인물 정리 후보", "review-only people 후보"))
+        and any(term in prompt for term in ("같은 이름의 카드와 연결", "동명이인"))
+        and "관계" in prompt
+        and "신상" in prompt
+        and "추정하지 않는다" in prompt
+        and "Novel" in prompt
+        and "private 원본" in prompt
+        and any(term in prompt for term in ("일반 인물 지도", "일반 검색"))
     )
     return strict or candidate
 
@@ -455,7 +450,7 @@ def _validate_identity_contract(
 
 
 def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, ...]) -> None:
-    """Keep one semantic projection between Codex chat and the two user views."""
+    """Keep one Codex input transaction on the single Wiki and private receipt."""
 
     matches = [item for item in contracts if item.automation_id == "codex-conversation-ingest"]
     if not matches:
@@ -464,15 +459,15 @@ def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, .
         raise WoonError("second-brain orchestrator has duplicate codex-conversation-ingest lanes")
     lane = matches[0]
     expected_paths = {
-        "brain/wiki",
+        "wiki",
         "brain/review/codex",
         ".local/woon-knowledge/codex-knowledge",
     }
     if lane.mode != "materialize" or set(lane.owned_paths) != expected_paths:
-        raise WoonError("codex conversation ingest must own the growth and local ledger boundary")
+        raise WoonError("codex conversation ingest must own the Wiki and local receipt boundary")
     expected_outputs = {
-        "growth-wiki",
-        "daily-history-ledger",
+        "wiki-upsert",
+        "runtime-history-receipt",
         "calendar-document-context",
         "schedule-action-review-candidate",
         "person-memory-review-candidate",
@@ -481,9 +476,7 @@ def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, .
         "source-intake-review-candidate",
     }
     if set(lane.outputs) != expected_outputs:
-        raise WoonError(
-            "codex conversation ingest outputs must use the canonical knowledge projection"
-        )
+        raise WoonError("codex conversation ingest outputs must use the single Wiki transaction")
 
 
 def _validate_daily_record_contract(contracts: tuple[AutomationContract, ...]) -> None:

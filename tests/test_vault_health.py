@@ -9,6 +9,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 MODULE_PATH = (
     Path(__file__).parents[1] / "src/woon_core/knowledge/vault_tools/audit-vault-health.py"
@@ -17,6 +18,27 @@ SPEC = importlib.util.spec_from_file_location("audit_vault_health", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 AUDIT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIT)
+
+
+class VaultRootDirectoryTests(unittest.TestCase):
+    def test_allows_only_canonical_visible_root_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in AUDIT.ALLOWED_VISIBLE_ROOT_DIRECTORIES:
+                (root / name).mkdir()
+            (root / ".local").mkdir()
+
+            self.assertEqual(AUDIT.unexpected_root_directory_issues(root), [])
+
+    def test_rejects_accidental_visible_root_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "무제").mkdir()
+
+            self.assertEqual(
+                AUDIT.unexpected_root_directory_issues(root),
+                ["unexpected visible Vault root directory: 무제"],
+            )
 
 
 class RetiredExternalVideoBoundaryTests(unittest.TestCase):
@@ -69,6 +91,305 @@ class ScopedContextTreeTitleTests(unittest.TestCase):
                 self.assertFalse(
                     AUDIT.is_scoped_context_tree_title_collision([scoped, unrelated], metadata)
                 )
+
+
+class GlobalGraphRootTests(unittest.TestCase):
+    def test_requires_project_cards_to_connect_through_the_single_wiki_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wiki_root = root / "wiki/README.md"
+            project_card = root / "wiki/personal/자격-준비.md"
+            for path in (wiki_root, project_card):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            wiki_root.write_text("[[wiki/personal/자격-준비|자격 준비]]\n", encoding="utf-8")
+            project_card.write_text("# 자격 준비\n", encoding="utf-8")
+            files = [wiki_root, project_card]
+            texts = {path: path.read_text(encoding="utf-8") for path in files}
+            metadata = {
+                wiki_root: {"publish": True, "access": "public"},
+                project_card: {"publish": False, "access": "local-only"},
+            }
+
+            with mock.patch.object(AUDIT, "VAULT", root):
+                issues = AUDIT.global_graph_root_issues(
+                    files, texts, metadata, AUDIT.target_index(files)
+                )
+
+            self.assertEqual(issues, [])
+
+
+class GrowthAndEntityPolicyTests(unittest.TestCase):
+    def test_reports_single_wiki_contract_violations_directly(self) -> None:
+        growth, entities = AUDIT.growth_and_entity_policy_issues(
+            "wiki/personal/깨진-지식.md",
+            "---\ntype: Project\naccess: local-only\n---\n# 깨진 성장\n",
+            {"type": "Project", "access": "local-only"},
+        )
+
+        self.assertTrue(growth)
+        self.assertEqual(entities, [])
+
+    def test_reports_retired_parallel_roots_directly(self) -> None:
+        _, project_entities = AUDIT.growth_and_entity_policy_issues(
+            "projects/깨진-프로젝트.md",
+            "# 깨진 프로젝트\n",
+            {"type": "Wiki", "access": "local-only"},
+        )
+        _, content_entities = AUDIT.growth_and_entity_policy_issues(
+            "content/깨진-콘텐츠.md",
+            "# 깨진 콘텐츠\n",
+            {"type": "Content", "access": "local-only", "content_kind": "unknown"},
+        )
+
+        self.assertTrue(project_entities)
+        self.assertTrue(content_entities)
+
+    def test_accepts_project_and_content_facets_in_the_same_wiki_contract(self) -> None:
+        project = AUDIT.growth_and_entity_policy_issues(
+            "wiki/personal/자격-준비.md",
+            "# 자격 준비\n",
+            {
+                "type": "Wiki",
+                "access": "local-only",
+                "canonical_id": "personal/자격-준비",
+                "facets": ["프로젝트", "학습"],
+                "knowledge_state": "생각 중",
+                "parent_topics": ["[[wiki/README|Wiki]]"],
+                "project_id": "aice-associate",
+                "objective": "자격 취득",
+            },
+        )
+        content = AUDIT.growth_and_entity_policy_issues(
+            "wiki/personal/학습-자료.md",
+            "# 학습 자료\n",
+            {
+                "type": "Wiki",
+                "access": "local-only",
+                "canonical_id": "personal/학습-자료",
+                "facets": ["콘텐츠", "학습"],
+                "knowledge_state": "확인 필요",
+                "parent_topics": ["[[wiki/README|Wiki]]"],
+                "content_kind": "course",
+            },
+        )
+
+        self.assertEqual(project, ([], []))
+        self.assertEqual(content, ([], []))
+
+    def test_rejects_an_invalid_canonical_identity_and_facet(self) -> None:
+        growth, _ = AUDIT.growth_and_entity_policy_issues(
+            "wiki/personal/깨진-정체성.md",
+            "# 깨진 정체성\n",
+            {
+                "type": "Wiki",
+                "canonical_id": "../깨진 정체성",
+                "facets": ["학습", "학습", "임의 종류"],
+                "knowledge_state": "생각 중",
+                "parent_topics": ["[[wiki/README|Wiki]]"],
+            },
+        )
+
+        self.assertTrue(any("canonical_id" in issue for issue in growth))
+        self.assertTrue(any("facets" in issue for issue in growth))
+
+    def test_rejects_multiple_primary_parent_topics(self) -> None:
+        growth, _ = AUDIT.growth_and_entity_policy_issues(
+            "wiki/personal/여러-부모.md",
+            "# 여러 부모\n",
+            {
+                "type": "Wiki",
+                "canonical_id": "personal/여러-부모",
+                "facets": ["개념"],
+                "knowledge_state": "생각 중",
+                "parent_topics": ["[[wiki/README|Wiki]]", "[[wiki/ai/README|AI]]"],
+            },
+        )
+
+        self.assertTrue(any("exactly one primary" in issue for issue in growth))
+
+
+class RuntimePermissionTests(unittest.TestCase):
+    def test_requires_user_only_runtime_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / ".local/woon-knowledge"
+            receipts = runtime / "automation-receipts"
+            receipt = receipts / "run.json"
+            receipts.mkdir(parents=True)
+            receipt.write_text("{}\n", encoding="utf-8")
+            runtime.chmod(0o700)
+            receipts.chmod(0o755)
+            receipt.chmod(0o644)
+
+            issues = AUDIT.runtime_permission_issues(root)
+
+            self.assertEqual(len(issues), 2)
+            self.assertTrue(any("directory mode must be 0700" in issue for issue in issues))
+            self.assertTrue(any("file mode must be 0600" in issue for issue in issues))
+
+    def test_accepts_user_only_runtime_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / ".local/woon-knowledge"
+            runtime.mkdir(parents=True)
+            receipt = runtime / "receipt.json"
+            receipt.write_text("{}\n", encoding="utf-8")
+            runtime.chmod(0o700)
+            receipt.chmod(0o600)
+
+            self.assertEqual(AUDIT.runtime_permission_issues(root), [])
+
+
+class ObsidianWorkspaceTests(unittest.TestCase):
+    def test_rejects_a_saved_tab_for_a_removed_vault_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            obsidian = root / ".obsidian"
+            obsidian.mkdir()
+            (obsidian / "workspaces.json").write_text(
+                '{"workspaces":{"Knowledge":{"main":{"children":['
+                '{"state":{"state":{"file":"maps/삭제된-데모.md"}}}'
+                "]}}}}\n",
+                encoding="utf-8",
+            )
+
+            issues = AUDIT.obsidian_workspace_issues(root)
+
+            self.assertEqual(
+                issues,
+                [".obsidian/workspaces.json: saved file is missing: maps/삭제된-데모.md"],
+            )
+
+    def test_accepts_saved_tabs_that_resolve_to_existing_vault_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            note = root / "brain/home.md"
+            note.parent.mkdir(parents=True)
+            note.write_text("# Home\n", encoding="utf-8")
+            obsidian = root / ".obsidian"
+            obsidian.mkdir()
+            (obsidian / "workspace.json").write_text(
+                '{"main":{"state":{"state":{"file":"brain/home.md"}}}}\n',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(AUDIT.obsidian_workspace_issues(root), [])
+
+    def test_ignores_missing_recent_workspace_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            obsidian = root / ".obsidian"
+            obsidian.mkdir()
+            (obsidian / "workspace.json").write_text(
+                '{"lastOpenFiles":["maps/legacy/삭제된.canvas"]}\n',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(AUDIT.obsidian_workspace_issues(root), [])
+
+    def test_requires_content_cards_to_connect_through_the_wiki_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wiki_root = root / "wiki/README.md"
+            content_card = root / "wiki/personal/예시-책.md"
+            for path in (wiki_root, content_card):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            wiki_root.write_text("[[wiki/personal/예시-책|예시 책]]\n", encoding="utf-8")
+            content_card.write_text("# 예시 책\n", encoding="utf-8")
+            files = [wiki_root, content_card]
+            texts = {path: path.read_text(encoding="utf-8") for path in files}
+            metadata = {
+                wiki_root: {"publish": True, "access": "public"},
+                content_card: {"publish": False, "access": "local-only"},
+            }
+
+            with mock.patch.object(AUDIT, "VAULT", root):
+                issues = AUDIT.global_graph_root_issues(
+                    files, texts, metadata, AUDIT.target_index(files)
+                )
+
+            self.assertEqual(issues, [])
+
+    def test_requires_visible_personal_notes_to_link_from_wiki_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wiki_root = root / "wiki/README.md"
+            note = root / "wiki/personal/연결된-노트.md"
+            for path in (wiki_root, note):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            wiki_root.write_text("[[wiki/personal/연결된-노트|연결된 노트]]\n", encoding="utf-8")
+            note.write_text("# 연결된 노트\n", encoding="utf-8")
+            files = [wiki_root, note]
+            texts = {path: path.read_text(encoding="utf-8") for path in files}
+            metadata = {
+                wiki_root: {"publish": True, "access": "public"},
+                note: {"publish": False, "access": "local-only"},
+            }
+
+            with mock.patch.object(AUDIT, "VAULT", root):
+                issues = AUDIT.global_graph_root_issues(
+                    files, texts, metadata, AUDIT.target_index(files)
+                )
+
+            self.assertEqual(issues, [])
+
+    def test_rejects_an_unconnected_visible_graph_note(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wiki_root = root / "wiki/README.md"
+            orphan = root / "maps/context-graph/example/고아.md"
+            for path in (wiki_root, orphan):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            wiki_root.write_text("# Wiki\n", encoding="utf-8")
+            orphan.write_text("# 고아\n", encoding="utf-8")
+            files = [wiki_root, orphan]
+            texts = {path: path.read_text(encoding="utf-8") for path in files}
+            metadata = {
+                wiki_root: {"publish": True, "access": "public"},
+                orphan: {"publish": False, "access": "local-only"},
+            }
+
+            with mock.patch.object(AUDIT, "VAULT", root):
+                issues = AUDIT.global_graph_root_issues(
+                    files, texts, metadata, AUDIT.target_index(files)
+                )
+
+            self.assertEqual(
+                issues,
+                ["Wiki root cannot reach maps/context-graph/example/고아.md"],
+            )
+
+    def test_rejects_a_separate_local_graph_component(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wiki_root = root / "wiki/README.md"
+            map_index = root / "maps/local-private-index.md"
+            note = root / "wiki/personal/연결된-노트.md"
+            for path in (wiki_root, map_index, note):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            wiki_root.write_text("# Wiki\n", encoding="utf-8")
+            map_index.write_text("[[wiki/personal/연결된-노트|연결된 노트]]\n", encoding="utf-8")
+            note.write_text("[[maps/local-private-index|로컬 지도]]\n", encoding="utf-8")
+            files = [wiki_root, map_index, note]
+            texts = {path: path.read_text(encoding="utf-8") for path in files}
+            metadata = {
+                wiki_root: {"publish": True, "access": "public"},
+                map_index: {"publish": False, "access": "local-only"},
+                note: {"publish": False, "access": "local-only"},
+            }
+
+            with mock.patch.object(AUDIT, "VAULT", root):
+                issues = AUDIT.global_graph_root_issues(
+                    files, texts, metadata, AUDIT.target_index(files)
+                )
+
+            self.assertEqual(
+                issues,
+                [
+                    "Wiki root cannot reach maps/local-private-index.md",
+                    "Wiki root cannot reach wiki/personal/연결된-노트.md",
+                ],
+            )
 
 
 class VaultExecutionOwnershipTests(unittest.TestCase):
@@ -137,6 +458,34 @@ class ManagedNonMarkdownFileTests(unittest.TestCase):
                 self.assertTrue(AUDIT.is_allowed_non_markdown_file(canvas))
                 self.assertFalse(AUDIT.is_allowed_non_markdown_file(invalid))
 
+    def test_allows_linked_canvas_state_only_when_all_targets_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            note = root / "wiki/example.md"
+            note.parent.mkdir(parents=True)
+            note.write_text("# Example\n", encoding="utf-8")
+            canvas = root / "maps/linked-canvas/example.canvas"
+            canvas.parent.mkdir(parents=True)
+            canvas.write_text(
+                '{"nodes":[{"id":"example","type":"file","file":"wiki/example.md"}],"edges":[]}',
+                encoding="utf-8",
+            )
+            state = root / "maps/linked-canvas/example.linked-canvas.json"
+            state.write_text(
+                '{"schemaVersion":1,"canvasPath":"maps/linked-canvas/example.canvas",'
+                '"rootPaths":["wiki/example.md"],"seedPaths":["wiki/example.md"],'
+                '"managed":{"filesByNodeId":{"example":"wiki/example.md"}}}',
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(AUDIT, "VAULT", root):
+                self.assertTrue(AUDIT.is_allowed_non_markdown_file(state))
+                state.write_text(
+                    state.read_text(encoding="utf-8").replace("wiki/example.md", "wiki/missing.md"),
+                    encoding="utf-8",
+                )
+                self.assertFalse(AUDIT.is_allowed_non_markdown_file(state))
+
     def test_allows_context_graph_layout_only_beside_context_map_notes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -157,10 +506,8 @@ class DailyDigestProjectionTests(unittest.TestCase):
             root = Path(directory)
             daily = root / "inbox/daily"
             daily.mkdir(parents=True)
-            today = datetime.now(AUDIT.ZoneInfo("Asia/Seoul")).date().isoformat()
-            (daily / f"{today}.md").write_text(
-                f"![[../daily-digests/{today}]]\n", encoding="utf-8"
-            )
+            today = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+            (daily / f"{today}.md").write_text(f"![[../daily-digests/{today}]]\n", encoding="utf-8")
             legacy = root / "inbox/daily-digests" / f"{today}.md"
             legacy.parent.mkdir(parents=True)
             legacy.write_text("# retired\n", encoding="utf-8")
@@ -358,6 +705,18 @@ class RetiredAiInstructionBoundaryTests(unittest.TestCase):
             self.assertTrue(any(".legacy-backup" in issue for issue in issues))
             self.assertTrue(any("nested Git" in issue for issue in issues))
 
+    def test_rejects_retired_visualization_copy_and_sample_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "maps/legacy").mkdir(parents=True)
+            (root / "maps/samples").mkdir(parents=True)
+
+            issues = AUDIT.retired_legacy_view_issues(root)
+
+            self.assertEqual(len(issues), 2)
+            self.assertTrue(any("maps/legacy" in issue for issue in issues))
+            self.assertTrue(any("maps/samples" in issue for issue in issues))
+
 
 class BrainActivityLogTests(unittest.TestCase):
     def test_accepts_a_complete_user_confirmed_event(self) -> None:
@@ -465,9 +824,10 @@ attributions: []
         )
 
     def _write_card(self, root: Path, *, scope: str = "general") -> None:
-        (root / "users/choi-woonyoung").mkdir(parents=True)
+        folder = "personal" if scope == "general" else "private"
+        (root / f"wiki/{folder}").mkdir(parents=True)
         parent = 'parent_moc: "[[people-index|인물 관계]]"\n' if scope == "general" else ""
-        (root / "users/choi-woonyoung/README.md").write_text(
+        (root / f"wiki/{folder}/최우녕.md").write_text(
             "---\n"
             "type: Wiki\ntitle: 최우녕\npublish: false\naccess: local-only\nstatus: Active\n"
             "entity_type: person\nperson_id: choi-woonyoung\nperson_kind: vault-owner\n"
@@ -479,13 +839,7 @@ attributions: []
     def _write_map(self, root: Path) -> None:
         (root / "maps").mkdir(exist_ok=True)
         (root / "maps/people-index.md").write_text(
-            "# 인물 관계\n\n![[../inbox/person-directory.base]]\n",
-            encoding="utf-8",
-        )
-
-    def _write_registry(self, root: Path) -> None:
-        (root / "users/README.md").write_text(
-            "# 등록 인물\n\n- [[users/choi-woonyoung/README|최우녕]]\n",
+            "# 인물 관계\n\n![[../inbox/wiki/wiki.base#인물]]\n",
             encoding="utf-8",
         )
 
@@ -496,24 +850,25 @@ attributions: []
             self._write_template(root)
             self._write_card(root)
             self._write_map(root)
-            self._write_registry(root)
 
             self.assertEqual(AUDIT.person_schema_issues(root), [])
 
-    def test_rejects_registered_card_missing_from_visible_directory(self) -> None:
+    def test_rejects_person_card_missing_required_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self._write_schema(root)
             self._write_template(root)
             self._write_card(root)
             self._write_map(root)
-            self._write_registry(root)
-            registry = root / "users/README.md"
-            registry.write_text("# 등록 인물\n", encoding="utf-8")
+            card = root / "wiki/personal/최우녕.md"
+            card.write_text(
+                card.read_text(encoding="utf-8").replace("person_id: choi-woonyoung\n", ""),
+                encoding="utf-8",
+            )
 
             issues = AUDIT.person_schema_issues(root)
 
-            self.assertTrue(any("must link registered person card" in issue for issue in issues))
+            self.assertTrue(any("must define person_id" in issue for issue in issues))
 
     def test_rejects_missing_default_owner_and_novel_card_on_general_map(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -522,7 +877,6 @@ attributions: []
             self._write_template(root)
             self._write_card(root)
             self._write_map(root)
-            self._write_registry(root)
             template = root / "templates/note.md"
             template.write_text(
                 template.read_text(encoding="utf-8").replace(
@@ -533,7 +887,7 @@ attributions: []
             )
             people_map = root / "maps/people-index.md"
             people_map.write_text(
-                people_map.read_text(encoding="utf-8") + "[[users/lee-minjeong/README|이민정]]\n",
+                people_map.read_text(encoding="utf-8") + "[[wiki/private/이민정|이민정]]\n",
                 encoding="utf-8",
             )
 

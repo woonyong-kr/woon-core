@@ -17,6 +17,7 @@ from woon_core.knowledge.compiled_wiki import (
     CompiledWiki,
     CompiledWikiSettings,
     CuratedRevision,
+    _normalize_compiled_display_body,
 )
 from woon_core.knowledge.domain import DocumentMetadata, IndexedDocument
 from woon_core.knowledge.service import KnowledgeService
@@ -32,6 +33,42 @@ class FailOnceIndex(SQLiteFtsSearchIndex):
             self.fail_next = False
             raise RuntimeError("injected index failure")
         return super().rebuild(documents)
+
+
+def test_compiler_never_rewrites_mermaid_shape_evidence() -> None:
+    body = """```mermaid
+flowchart LR
+  broken["score<br/>(T"]
+  valid["score<br/>(T, T)"]
+```
+
+본문의 shape은 (T, T)다.
+"""
+
+    repaired = _normalize_compiled_display_body(body)
+
+    assert 'broken["score<br/>(T"]' in repaired
+    assert 'valid["score<br/>(T, T)"]' in repaired
+    assert "본문의 shape은 (T, T)다." in repaired
+
+
+def test_compiler_removes_retired_recent_document_list() -> None:
+    body = """설명
+
+<!-- recent-docs:start -->
+## 최근 문서
+
+- [[wiki/ai/example|중복 목록]]
+<!-- recent-docs:end -->
+
+본문
+"""
+
+    repaired = _normalize_compiled_display_body(body)
+
+    assert "recent-docs" not in repaired
+    assert "중복 목록" not in repaired
+    assert "설명" in repaired and "본문" in repaired
 
 
 def compiled_settings(vault: Path) -> CompiledWikiSettings:
@@ -179,7 +216,71 @@ def test_migration_creates_reproducible_source_schema_and_incremental_build(tmp_
     assert "보조 페이지 테이블" in (tmp_path / "wiki/os/virtual-memory.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_compile_preserves_single_wiki_context_and_audits_it(tmp_path: Path) -> None:
+    write_page(tmp_path, "os/queue.md", "큐", "근거로 확인한 설명이다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    path = tmp_path / "wiki/os/queue.md"
+    context = """
+
+## 현재 이해
+
+<!-- woon-wiki-current:start -->
+대화에서 다시 생각한 내용이다.
+<!-- woon-wiki-current:end -->
+
+## 시간 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 실행 — 큐를 다시 학습했다.
+<!-- woon-wiki-timeline:end -->
+"""
+    path.write_text(path.read_text(encoding="utf-8").rstrip() + context, encoding="utf-8")
+
+    report = compiler.compile(force=True)
+    output = path.read_text(encoding="utf-8")
+
+    assert report.compiled == 1
+    assert "근거로 확인한 설명이다." in output
+    assert "대화에서 다시 생각한 내용이다." in output
+    assert "큐를 다시 학습했다." in output
     assert compiler.audit().complete
+    assert compiler.audit().complete
+
+
+def test_managed_conversation_context_does_not_stale_compiler_receipt(tmp_path: Path) -> None:
+    write_page(tmp_path, "os/queue.md", "큐", "근거로 확인한 설명이다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    path = tmp_path / "wiki/os/queue.md"
+    context = """
+
+## 현재 이해
+
+<!-- woon-wiki-current:start -->
+대화에서 다시 생각한 내용이다.
+<!-- woon-wiki-current:end -->
+
+## 시간 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 실행 — 큐를 다시 학습했다.
+<!-- woon-wiki-timeline:end -->
+"""
+    path.write_text(path.read_text(encoding="utf-8").rstrip() + context, encoding="utf-8")
+
+    assert compiler.audit().complete
+    assert compiler.compile().compiled == 0
+
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("근거로 확인한 설명", "임의로 바꾼 설명"),
+        encoding="utf-8",
+    )
+    audit = compiler.audit()
+    assert not audit.complete
+    assert any("cannot be reproduced" in error for error in audit.errors)
 
 
 def test_current_use_curation_is_separate_from_legacy_source_purpose(tmp_path: Path) -> None:
@@ -295,6 +396,45 @@ def test_curated_revision_preserves_legacy_source_and_archives_prior_curated_bod
     assert any(
         item["status"] == "superseded" and item["kind"] == "curated-document" for item in claims
     )
+    assert compiler.audit().complete
+
+
+def test_public_curation_keeps_local_history_out_of_current_page_provenance(
+    tmp_path: Path,
+) -> None:
+    write_page(tmp_path, "README.md", "Wiki", "단일 지식 정본 입구다.\n")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    pages_path = tmp_path / "catalog/llm-wiki/pages.yaml"
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    page = pages["pages"][0]
+    page["frontmatter"]["publish"] = True
+    page["frontmatter"]["access"] = "public"
+    pages_path.write_text(
+        yaml.safe_dump(pages, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+
+    report = compiler.curate_revisions(
+        (
+            CuratedRevision(
+                page_id="README",
+                body="단일 지식 정본의 공개 가능한 주제 입구다.\n",
+                statement="Wiki는 하나의 지식 정본이다.",
+                current_use="공개 가능한 주제 탐색 입구로 사용한다.",
+            ),
+        )
+    )
+
+    assert report.compiled == 1
+    sources = yaml.safe_load(
+        (tmp_path / "catalog/llm-wiki/sources.yaml").read_text(encoding="utf-8")
+    )["sources"]
+    local_history = [item for item in sources if item["privacy"] == "local-only"]
+    public_current = [item for item in sources if item["privacy"] == "public"]
+    assert local_history
+    assert len(public_current) == 1
+    page = yaml.safe_load(pages_path.read_text(encoding="utf-8"))["pages"][0]
+    assert page["source_ids"] == [public_current[0]["source_id"]]
     assert compiler.audit().complete
 
 
@@ -583,7 +723,7 @@ def test_archive_rejects_automated_or_sensitive_ingestion_origins(tmp_path: Path
         canonical_id="backend/archive-boundary",
         title="아카이브 경계",
         domain="backend",
-        summary="자동 수집은 검증 Wiki를 직접 쓰지 않는다.",
+        summary="자동 수집은 근거 확인 전 공개 문서를 직접 쓰지 않는다.",
         purpose="수집과 검증의 경계를 확인한다.",
     )
 

@@ -5,10 +5,13 @@ import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+
+from woon_core.knowledge import mcp_server
 
 
 def test_mcp_server_imports_without_incomplete_settings_warning() -> None:
@@ -28,6 +31,38 @@ import woon_core.knowledge.mcp_server
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_reindex_reloads_the_cached_service_after_a_configuration_change(monkeypatch) -> None:
+    class Service:
+        def __init__(self, count: int) -> None:
+            self.count = count
+            self.calls = 0
+
+        def reindex(self) -> int:
+            self.calls += 1
+            return self.count
+
+    cached_service = Service(1)
+    refreshed_service = Service(2)
+    services = iter(
+        [
+            (SimpleNamespace(search_adapter="sqlite-fts"), cached_service),
+            (SimpleNamespace(search_adapter="sqlite-fts"), refreshed_service),
+        ]
+    )
+    mcp_server._service.cache_clear()
+    monkeypatch.setattr(mcp_server, "build_knowledge_service", lambda: next(services))
+
+    # Simulate normal retrieval caching the old configuration first.
+    assert mcp_server._service() is cached_service
+
+    result = mcp_server.reindex_knowledge()
+
+    assert result == {"indexed": 2, "adapter": "sqlite-fts"}
+    assert cached_service.calls == 0
+    assert refreshed_service.calls == 1
+    assert mcp_server._service.cache_info().currsize == 0
 
 
 def test_mcp_server_stdio_archives_searches_and_reads_a_section(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from woon_core.errors import WoonError
 from woon_core.knowledge.compiled_wiki import RevisionReconciliationReport
 from woon_core.knowledge.mail_schedule_automation import MailScheduleRecordResult
 from woon_core.knowledge.orchestration import OrchestratorSettings
+from woon_core.knowledge.reconciliation import ReconciliationAudit
 from woon_core.knowledge.schedule_bridge import ScheduleReceipt
 from woon_core.skills import RoutingCaseResult, RoutingEvalResult
 
@@ -29,6 +30,25 @@ def test_version() -> None:
 def test_unknown_command_fails() -> None:
     with pytest.raises(WoonError, match="unknown command"):
         run(["unknown"], StringIO())
+
+
+def test_governance_skill_inventory_rejects_installed_copy_drift(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "woon-skills/skills/knowledge/archive/SKILL.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("---\nname: archive\ndescription: canonical\n---\n", encoding="utf-8")
+    catalog = workspace / "woon-skills/catalog.json"
+    catalog.write_text("{}\n", encoding="utf-8")
+    installed = tmp_path / "installed/archive/SKILL.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("---\nname: archive\ndescription: stale\n---\n", encoding="utf-8")
+
+    with pytest.raises(WoonError, match="installed skill drift: archive"):
+        cli._governance_skill_inventory(workspace, installed_root=tmp_path / "installed")
+
+    installed.write_bytes(source.read_bytes())
+    inventory = cli._governance_skill_inventory(workspace, installed_root=tmp_path / "installed")
+    assert inventory == (catalog, source, installed)
 
 
 def test_retired_daily_digest_commands_are_not_cli_entrypoints() -> None:
@@ -322,12 +342,47 @@ def test_knowledge_validate_orchestrator_has_no_runtime_side_effect(
         )
 
     monkeypatch.setattr(cli, "load_orchestrator_settings", fake_load)
+    automation_root = tmp_path / "codex-home" / "automations"
+    monkeypatch.setenv("CODEX_HOME", str(automation_root.parent))
+    monkeypatch.setattr(cli, "verify_codex_automation_registry", lambda _settings, root: ())
     output = StringIO()
     run(["knowledge", "validate-orchestrator", "--vault", str(tmp_path)], output)
 
     assert captured == {"vault": tmp_path}
     assert '"status": "ok"' in output.getvalue()
+    assert f'"codex_registry_root": "{automation_root}"' in output.getvalue()
     assert not (tmp_path / ".local").exists()
+
+
+def test_knowledge_validate_orchestrator_uses_codex_home_registry_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = tmp_path / "docs/second-brain-operating-model.md"
+    policy.parent.mkdir()
+    policy.write_text("# policy\n", encoding="utf-8")
+    settings = OrchestratorSettings(
+        vault=tmp_path,
+        policy_document=policy,
+        timezone="Asia/Seoul",
+        checkpoint_path=tmp_path / ".local/checkpoint.yaml",
+        receipt_directory=tmp_path / ".local/receipts",
+        lock_directory=tmp_path / ".local/locks",
+        policy_sha256="a" * 64,
+        automations=(),
+    )
+    captured: dict[str, Path] = {}
+    monkeypatch.setattr(cli, "load_orchestrator_settings", lambda _vault: settings)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "isolated-codex"))
+
+    def verify(actual: OrchestratorSettings, root: Path) -> tuple[str, ...]:
+        assert actual is settings
+        captured["root"] = root
+        return ()
+
+    monkeypatch.setattr(cli, "verify_codex_automation_registry", verify)
+    run(["knowledge", "validate-orchestrator", "--vault", str(tmp_path)], StringIO())
+
+    assert captured == {"root": tmp_path / "isolated-codex" / "automations"}
 
 
 def test_knowledge_validate_orchestrator_can_verify_registered_heartbeats(
@@ -438,7 +493,7 @@ def test_knowledge_records_empty_mail_window_through_the_local_cli(
     assert '"candidate_count": 0' in output.getvalue()
 
 
-@pytest.mark.parametrize("command", ["source-plan", "source-audit"])
+@pytest.mark.parametrize("command", ["source-plan", "source-audit", "source-verify-private"])
 def test_knowledge_rejects_current_vault_as_external_source(tmp_path: Path, command: str) -> None:
     arguments = [
         "knowledge",
@@ -453,6 +508,50 @@ def test_knowledge_rejects_current_vault_as_external_source(tmp_path: Path, comm
 
     with pytest.raises(WoonError, match="self-source catalog is retired"):
         run(arguments, StringIO())
+
+
+def test_knowledge_verifies_private_source_catalog_without_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    vault = tmp_path / "vault"
+    source.mkdir()
+    vault.mkdir()
+    captured: dict[str, Path] = {}
+
+    def verify(source_root: Path, target_root: Path, catalog: Path, ledger: Path):
+        captured.update(
+            source=source_root,
+            target=target_root,
+            catalog=catalog,
+            ledger=ledger,
+        )
+        return ReconciliationAudit(1, 0, 1, 0, 0, ())
+
+    monkeypatch.setattr(cli, "verify_private_source_catalog", verify)
+    output = StringIO()
+
+    run(
+        [
+            "knowledge",
+            "source-verify-private",
+            "--source",
+            str(source),
+            "--source-name",
+            "private-study",
+            "--vault",
+            str(vault),
+        ],
+        output,
+    )
+
+    assert captured == {
+        "source": source,
+        "target": vault,
+        "catalog": vault / "catalog/sources/private-study.yaml",
+        "ledger": vault / "catalog/reconciliation/private-study.yaml",
+    }
+    assert '"verified": 1' in output.getvalue()
 
 
 @pytest.mark.parametrize("source_kind", ["child", "parent", "symlink-child"])

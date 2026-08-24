@@ -47,23 +47,25 @@ _ENTRY_KINDS = {
     "여행·구매",
     "회고",
     "완료",
+    "콘텐츠",
+    "프로젝트",
 }
-_INPUT_STATES = {"processed", "no-meaningful", "pending", "unavailable"}
+_INPUT_STATES = {"processed", "no-meaningful", "partial", "pending", "unavailable"}
 _SECTION_ORDER = (
     ("일정·할 일", {"일정", "할 일", "다음 행동", "완료"}),
     ("하루의 활동", {"활동", "생활", "건강", "여행·구매", "재정·행정", "회고"}),
     ("사람·관계", {"인물", "관계"}),
     ("성장·학습", {"학습", "개념", "결정", "질문"}),
-    ("커리어·창작·자료", {"커리어", "창작", "자료"}),
+    ("커리어·창작·자료", {"커리어", "창작", "자료", "콘텐츠", "프로젝트"}),
 )
-_DIGEST_RENDER_REVISION = "5"
+_DIGEST_RENDER_REVISION = "6"
 _VISIBLE_LIMIT = 280
 _TITLE_LIMIT = 80
 _SENSITIVE_RE = re.compile(
     r"(?:\b(?:api[_-]?key|token|secret|password|bearer)\b|sk-[A-Za-z0-9_-]{12,})",
     flags=re.IGNORECASE,
 )
-_RELATED_ROOTS = ("brain/wiki/", "wiki/", "maps/")
+_RELATED_ROOTS = ("wiki/", "maps/")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,10 +188,18 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexDailyDi
             "kind",
             "title",
             "summary",
+            "wiki_update",
+            "wiki_subject_path",
+            "new_wiki_reason",
             "intent",
             "related_documents",
             "calendar_contexts",
             "people",
+            "contents",
+            "projects",
+            "interview_answer",
+            "disposition",
+            "review_reason",
         }
         required = {"kind", "title", "summary"}
         if set(raw).difference(allowed) or not required.issubset(raw):
@@ -227,30 +237,9 @@ def record_daily_digest_from_codex_ledger(vault: Path, *, day: date) -> CodexDai
     is classified exactly once.
     """
 
-    from woon_core.knowledge.codex_knowledge import (
-        growth_relative_path,
-        load_daily_entries,
-        load_daily_input_status,
-    )
+    from woon_core.knowledge.codex_knowledge import load_daily_entries, load_daily_input_status
 
     records = list(load_daily_entries(vault, day=day))
-    # Learning/decision records already have one canonical Growth Wiki page.
-    # Derive its link locally only when that exact generated page exists.  A
-    # same-day title, file timestamp, or semantic similarity is never enough
-    # to attach an arbitrary note to the daily history.
-    for record in records:
-        kind = record.get("kind")
-        title = record.get("title")
-        if kind not in {"학습", "개념", "결정"} or not isinstance(title, str):
-            continue
-        relative_path = growth_relative_path(title)
-        if not (vault.resolve() / relative_path).is_file():
-            continue
-        related = record.get("related_documents", [])
-        if not isinstance(related, list) or not all(isinstance(item, str) for item in related):
-            raise WoonError("Codex knowledge ledger related_documents is unreadable")
-        if relative_path not in related:
-            record["related_documents"] = [*related, relative_path]
     input_state = load_daily_input_status(vault, day=day)
     if input_state is None:
         input_state = "processed" if records else "unavailable"
@@ -362,7 +351,17 @@ def _related_document(vault: Path, relative_path: str) -> Path:
 
 
 def _entry_id(day: date, entry: CodexDailyDigestEntry) -> str:
-    stable = "\0".join((day.isoformat(), entry.kind, entry.title, entry.summary))
+    stable = "\0".join(
+        (
+            day.isoformat(),
+            entry.kind,
+            entry.title,
+            entry.summary,
+            entry.intent or "",
+            *entry.related_documents,
+            *entry.people,
+        )
+    )
     return f"digest-{hashlib.sha256(stable.encode('utf-8')).hexdigest()[:24]}"
 
 
@@ -372,22 +371,24 @@ def _render_daily_block(
     *,
     input_state: str,
 ) -> str:
+    status_title, status_message = _daily_status(input_state=input_state, entry_count=len(entries))
     lines = [
         "<!-- woon-codex-digest:start -->",
         "",
-        "## 대화에서 남긴 것",
+        "## 대화 정리 상태",
+        "",
+        f"- **{status_title}** — {status_message}",
     ]
     if not entries:
         lines.extend(
             [
-                f"- {_empty_message(input_state)}",
                 "",
                 "<!-- woon-codex-digest:end -->",
                 "",
             ]
         )
         return "\n".join(lines)
-    lines.append("")
+    lines.extend(["", "## 대화에서 남긴 것", ""])
     assigned: set[int] = set()
     for heading, kinds in _SECTION_ORDER:
         grouped = [entry for entry in entries if entry.kind in kinds]
@@ -395,8 +396,8 @@ def _render_daily_block(
             continue
         assigned.update(id(entry) for entry in grouped)
         lines.extend([f"## {heading}", ""])
-        for entry in grouped:
-            lines.append(_render_entry(entry))
+        for same_subject in _group_section_entries(grouped):
+            lines.append(_render_subject_entries(same_subject))
         lines.append("")
     for entry in entries:
         if id(entry) not in assigned:
@@ -467,11 +468,7 @@ def _legacy_digest_block(content: str, *, day: date) -> str:
             raise WoonError("legacy daily digest ownership marker is invalid")
         return content[start : end + len(marker_end)].strip() + "\n"
 
-    prefix = (
-        "---\n"
-        "type: DailyDigest\n"
-        f'title: "{day.isoformat()} Codex 하루 정리"\n'
-    )
+    prefix = f'---\ntype: DailyDigest\ntitle: "{day.isoformat()} Codex 하루 정리"\n'
     frontmatter_end = content.find("\n---\n\n")
     heading = f"# {day.isoformat()} Codex 하루 정리\n\n"
     if frontmatter_end < 0 or not content.startswith(prefix):
@@ -485,22 +482,35 @@ def _legacy_digest_block(content: str, *, day: date) -> str:
     return f"{marker_start}\n\n{body}\n\n{marker_end}\n"
 
 
-def _empty_message(input_state: str) -> str:
+def _daily_status(*, input_state: str, entry_count: int) -> tuple[str, str]:
+    """Render a human-readable state without making an empty note look done."""
+
+    if input_state == "partial":
+        return (
+            "현재까지 정리됨",
+            "오늘 대화는 계속 진행 중이며, 완료된 질문과 답변은 아래 날짜 기록에 먼저 "
+            "반영했습니다. 다음 실행은 새로 완료된 대화만 이어서 정리합니다.",
+        )
+    if entry_count:
+        return "정리 완료", "확인한 대화 항목을 아래 날짜 기록으로 정리했습니다."
     messages = {
-        "processed": "".join(
-            (
-                "대화를 확인했지만 오늘의 이력·학습·일정·인물·자료로 남길 최소 항목은 ",
-                "없었습니다.",
-            )
+        "processed": (
+            "남길 항목 없음",
+            "대화를 읽었지만 오늘의 이력·학습·일정·인물·자료로 남길 최소 항목은 없었습니다.",
         ),
-        "no-meaningful": "대화를 확인했지만 재사용하거나 하루 이력으로 남길 항목은 없었습니다.",
+        "no-meaningful": (
+            "남길 항목 없음",
+            "대화를 읽었지만 재사용하거나 하루 이력으로 남길 항목은 없었습니다.",
+        ),
         "pending": (
-            "오늘의 Codex 대화가 아직 안전하게 읽을 수 있는 저장 상태가 아니어서, "
-            "대화 정리는 다음 실행에서 다시 확인합니다."
+            "다음 실행 대기",
+            "오늘의 Codex 대화가 아직 안전하게 읽을 수 있는 저장 상태가 아니어서 "
+            "다음 실행에서 다시 확인합니다.",
         ),
         "unavailable": (
+            "세션 원본을 찾지 못해 대기",
             "이 날짜의 Codex 세션 원본을 현재 기기에서 찾지 못해 자동 대화 정리를 "
-            "만들지 못했습니다."
+            "만들지 못했습니다.",
         ),
     }
     return messages[input_state]
@@ -521,6 +531,36 @@ def _render_entry(entry: CodexDailyDigestEntry) -> str:
     people = f" · 관련 인물: {', '.join(entry.people)}" if entry.people else ""
     intent = f" · 추정 의도: {entry.intent}" if entry.intent else ""
     return f"- **{entry.kind} · {entry.title}** — {entry.summary}{people}{intent}"
+
+
+def _group_section_entries(
+    entries: list[CodexDailyDigestEntry],
+) -> tuple[tuple[CodexDailyDigestEntry, ...], ...]:
+    """Keep one visible row per canonical subject inside a daily section.
+
+    Incremental runs may add a later conclusion for the same Wiki subject.  The
+    ledger deliberately preserves both conclusions, but the human-facing daily
+    note must not look as if two independent documents were created.  Exact
+    titles are therefore coalesced only inside the same semantic section.
+    """
+
+    grouped: dict[str, list[CodexDailyDigestEntry]] = {}
+    for entry in entries:
+        grouped.setdefault(entry.title.strip(), []).append(entry)
+    return tuple(tuple(items) for items in grouped.values())
+
+
+def _render_subject_entries(entries: tuple[CodexDailyDigestEntry, ...]) -> str:
+    if len(entries) == 1:
+        return _render_entry(entries[0])
+    title = entries[0].title
+    kinds = "·".join(dict.fromkeys(entry.kind for entry in entries))
+    summaries = " ".join(dict.fromkeys(entry.summary for entry in entries))
+    people_values = tuple(dict.fromkeys(person for entry in entries for person in entry.people))
+    intents = tuple(dict.fromkeys(entry.intent for entry in entries if entry.intent is not None))
+    people = f" · 관련 인물: {', '.join(people_values)}" if people_values else ""
+    intent = f" · 추정 의도: {' / '.join(intents)}" if intents else ""
+    return f"- **{kinds} · {title}** — {summaries}{people}{intent}"
 
 
 def _ensure_daily_note(vault: Path, day: date) -> None:

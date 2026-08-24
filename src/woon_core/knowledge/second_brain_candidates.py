@@ -192,24 +192,40 @@ def persist_review_candidates(
 ) -> RunOutcome:
     """Write deterministic local review files without overwriting manual changes."""
 
+    prepared = prepare_review_candidates(vault, owned_root, candidates)
+    for path, data in prepared:
+        if not path.exists():
+            atomic_write(path, data, mode=0o600)
+    return _review_outcome(candidates, prepared)
+
+
+def prepare_review_candidates(
+    vault: Path, owned_root: str, candidates: tuple[ReviewCandidate, ...]
+) -> tuple[tuple[Path, bytes], ...]:
+    """Validate every candidate and existing target without writing anything."""
+
     root = _review_root(vault, owned_root)
     seen: set[str] = set()
-    serialized: list[bytes] = []
+    prepared: list[tuple[Path, bytes]] = []
     for candidate in sorted(candidates, key=lambda item: item.candidate_id):
         if candidate.candidate_id in seen:
             raise WoonError("second-brain review candidate IDs must be unique")
         seen.add(candidate.candidate_id)
         data = _render_candidate(candidate).encode("utf-8")
         path = root / _candidate_filename(candidate)
-        if path.exists():
-            if path.read_bytes() != data:
-                raise WoonError("candidate conflicts with an existing review file")
-        else:
-            atomic_write(path, data, mode=0o600)
-        serialized.append(data)
+        if path.exists() and path.read_bytes() != data:
+            raise WoonError("candidate conflicts with an existing review file")
+        prepared.append((path, data))
+    return tuple(prepared)
+
+
+def _review_outcome(
+    candidates: tuple[ReviewCandidate, ...], prepared: tuple[tuple[Path, bytes], ...]
+) -> RunOutcome:
+    seen = {candidate.candidate_id for candidate in candidates}
     return RunOutcome(
         candidate_ids=tuple(sorted(seen)),
-        output_sha256=hashlib.sha256(b"\0".join(serialized)).hexdigest(),
+        output_sha256=hashlib.sha256(b"\0".join(data for _, data in prepared)).hexdigest(),
     )
 
 
