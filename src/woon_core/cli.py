@@ -605,6 +605,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "schedule-apply":
         _run_schedule_apply(raw_options, output)
         return
+    local_commands = {"index", "search", "get", "audit", "history"}
+    if command not in local_commands:
+        raise WoonError(f"unknown knowledge command {command!r}")
     vault, options = _parse_knowledge_options(raw_options)
     settings, service = build_knowledge_service(vault)
     if command == "index":
@@ -663,8 +666,6 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
             json.dumps([asdict(item) for item in entries], ensure_ascii=False, indent=2),
             file=output,
         )
-    else:
-        raise WoonError(f"unknown knowledge command {command!r}")
 
 
 def _default_codex_automation_root() -> Path:

@@ -520,9 +520,12 @@ def test_refresh_folds_long_korean_ics_summary_without_splitting_utf8(tmp_path: 
 
     result = service.refresh(now=datetime(2026, 8, 17, 9, 0, tzinfo=UTC))
     lines = (tmp_path / result.ics_relative_path).read_bytes().split(b"\r\n")
+    markdown_names = [path.name for path in (tmp_path / result.relative_path).glob("*.md")]
 
     assert all(len(line) <= 75 for line in lines if line)
     assert any(line.startswith(b" ") for line in lines)
+    assert len(markdown_names) == 1
+    assert len(markdown_names[0].encode("utf-8")) <= 255
 
 
 def test_refresh_rejects_reader_event_outside_the_requested_window(tmp_path: Path) -> None:

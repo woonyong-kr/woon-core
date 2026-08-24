@@ -385,8 +385,14 @@ def _calendar_filename_stem(title: str) -> str:
             "|": "｜",
         }
     )
-    stem = " ".join(title.translate(replacements).split()).strip(". ")
-    return stem[:120] or "일정"
+    stem = " ".join(title.translate(replacements).split()).strip(". ") or "일정"
+    # Common filesystems limit one path component to 255 bytes, not Unicode
+    # code points.  Leave room for the duplicate date/index suffix and `.md`
+    # while retaining as much of the human-readable Korean title as possible.
+    encoded = stem.encode("utf-8")
+    if len(encoded) <= 180:
+        return stem
+    return encoded[:180].decode("utf-8", errors="ignore").rstrip(". ") or "일정"
 
 
 def _document_link_event_key(event: CalendarProjectionEvent) -> tuple[str, str]:
