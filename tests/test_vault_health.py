@@ -300,6 +300,28 @@ class WikiAndEntityPolicyTests(unittest.TestCase):
 
         self.assertEqual((wiki, entities), ([], []))
 
+    def test_rejects_job_track_as_question_parent(self) -> None:
+        wiki, _ = AUDIT.wiki_and_entity_policy_issues(
+            "wiki/personal/interview/ai-engineer/지원-이유.md",
+            "# 지원 이유는 무엇입니까?\n",
+            {
+                "type": "Wiki",
+                "title": "지원 이유는 무엇입니까?",
+                "canonical_id": "personal/interview/ai-engineer/지원-이유",
+                "facets": ["커리어", "학습"],
+                "knowledge_state": "확인 필요",
+                "parent_topics": [
+                    "[[wiki/personal/interview/ai-engineer/README|KRAFTON AI Engineer 면접 준비]]"
+                ],
+                "question_kind": "interview",
+                "interview_tracks": ["KRAFTON AI Engineer"],
+                "question_topic": "경력 서사와 지원 동기",
+            },
+        )
+
+        self.assertTrue(any("job track" in issue for issue in wiki))
+        self.assertTrue(any("semantic parent title" in issue for issue in wiki))
+
 
 class RuntimePermissionTests(unittest.TestCase):
     def test_requires_user_only_runtime_permissions(self) -> None:
@@ -805,12 +827,16 @@ class RetiredAiInstructionBoundaryTests(unittest.TestCase):
             root = Path(directory)
             (root / "maps/legacy").mkdir(parents=True)
             (root / "maps/samples").mkdir(parents=True)
+            duplicate_base = root / "inbox/recently-touched.base"
+            duplicate_base.parent.mkdir(parents=True)
+            duplicate_base.write_text("views: []\n", encoding="utf-8")
 
             issues = AUDIT.retired_legacy_view_issues(root)
 
-            self.assertEqual(len(issues), 2)
+            self.assertEqual(len(issues), 3)
             self.assertTrue(any("maps/legacy" in issue for issue in issues))
             self.assertTrue(any("maps/samples" in issue for issue in issues))
+            self.assertTrue(any("inbox/recently-touched.base" in issue for issue in issues))
 
 
 class BrainActivityLogTests(unittest.TestCase):

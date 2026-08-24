@@ -502,17 +502,15 @@ def test_rejects_project_exclusive_material_bundle_as_a_second_visible_card(
     assert not (tmp_path / "wiki/personal/aice-associate-학습-자료-묶음.md").exists()
 
 
-def test_interview_exchange_updates_one_question_under_one_project(
+def test_interview_exchange_updates_one_question_under_one_semantic_parent(
     tmp_path: Path,
 ) -> None:
     _settings(tmp_path)
-    project = tmp_path / "wiki/personal/interview/ai-engineer.md"
-    project.parent.mkdir(parents=True)
-    project.write_text(
-        "---\ntype: Wiki\ntitle: AI Engineer 면접 준비\n"
+    parent = tmp_path / "wiki/personal/projects/kubernetes-장애-복구-서비스.md"
+    parent.parent.mkdir(parents=True)
+    parent.write_text(
+        "---\ntype: Wiki\ntitle: Kubernetes 장애 복구 서비스\n"
         'facets: ["프로젝트", "커리어"]\n'
-        'interview_tracks: ["KRAFTON AI Engineer"]\n'
-        'interview_default_topic: "AI 자동화 설계"\n'
         'knowledge_state: "확인 필요"\n---\n',
         encoding="utf-8",
     )
@@ -520,15 +518,15 @@ def test_interview_exchange_updates_one_question_under_one_project(
         [
             {
                 "day": "2026-08-24",
-                "kind": "커리어",
-                "title": "Kyro에서 본인이 직접 한 일은 무엇입니까?",
+                "kind": "질문",
+                "title": "Kubernetes 장애 복구 서비스에서 본인이 직접 한 일은 무엇입니까?",
                 "summary": "개인 기여와 팀 결과를 구분해 설명한다.",
                 "wiki_update": True,
                 "new_wiki_reason": "기존 Wiki에 같은 질문 정본이 없다.",
                 "interview_answer": {
-                    "question": "Kyro에서 본인이 직접 한 일은 무엇입니까?",
+                    "question": "Kubernetes 장애 복구 서비스에서 본인이 직접 한 일은 무엇입니까?",
                     "answer": "관리 서버의 장애 판정 흐름을 설계하고 구현했다.",
-                    "project_path": "wiki/personal/interview/ai-engineer.md",
+                    "parent_wiki_path": "wiki/personal/projects/kubernetes-장애-복구-서비스.md",
                     "interview_tracks": ["KRAFTON AI Engineer"],
                     "question_topic": "Kubernetes 장애 복구 서비스",
                     "evidence": ["관리 서버 코드와 계약 테스트"],
@@ -547,19 +545,96 @@ def test_interview_exchange_updates_one_question_under_one_project(
     )
 
     assert result.wiki_page_count == 1
-    question = tmp_path / "wiki/personal/kyro에서-본인이-직접-한-일은-무엇입니까.md"
+    question = (
+        tmp_path / "wiki/personal/kubernetes-장애-복구-서비스에서-본인이-직접-한-일은-무엇입니까.md"
+    )
     text = question.read_text(encoding="utf-8")
     assert "## 현재 최선 답변" in text
     assert "관리 서버의 장애 판정 흐름을 설계하고 구현했다." in text
     assert (
-        'parent_topics: ["[[wiki/personal/interview/ai-engineer|AI Engineer 면접 준비]]"]' in text
+        'parent_topics: ["[[wiki/personal/projects/kubernetes-장애-복구-서비스|'
+        'Kubernetes 장애 복구 서비스]]"]' in text
     )
     assert "question_kind: interview" in text
     assert 'interview_tracks: ["KRAFTON AI Engineer"]' in text
     assert 'question_topic: "Kubernetes 장애 복구 서비스"' in text
     ledger = load_daily_entries(tmp_path, day=date(2026, 8, 24))
     assert ledger[0]["interview_answer"]["promote_current"] is True
-    assert "wiki/personal/interview/ai-engineer.md" in ledger[0]["related_documents"]
+    assert "wiki/personal/projects/kubernetes-장애-복구-서비스.md" in ledger[0]["related_documents"]
+
+
+def test_interview_exchange_rejects_job_track_as_question_parent(tmp_path: Path) -> None:
+    _settings(tmp_path)
+    parent = tmp_path / "wiki/personal/interview/ai-engineer/README.md"
+    parent.parent.mkdir(parents=True)
+    parent.write_text(
+        '---\ntype: Wiki\ntitle: AI Engineer 면접 준비\nknowledge_state: "확인 필요"\n---\n',
+        encoding="utf-8",
+    )
+    entries = entries_from_records(
+        [
+            {
+                "day": "2026-08-24",
+                "kind": "질문",
+                "title": "어려운 문제를 어떻게 선택했습니까?",
+                "summary": "문제 선택 기준을 설명한다.",
+                "wiki_update": True,
+                "new_wiki_reason": "기존 Wiki에 같은 질문 정본이 없다.",
+                "interview_answer": {
+                    "question": "어려운 문제를 어떻게 선택했습니까?",
+                    "answer": "영향과 검증 가능성을 함께 봤다.",
+                    "parent_wiki_path": "wiki/personal/interview/ai-engineer/README.md",
+                    "interview_tracks": ["KRAFTON AI Engineer"],
+                    "question_topic": "AI Engineer 면접 준비",
+                },
+            }
+        ]
+    )
+
+    with pytest.raises(WoonError, match="must not use a job track as their parent"):
+        record_codex_knowledge_entries(
+            tmp_path,
+            source_range="codex-scope-20260824-job-track-parent",
+            entries=entries,
+        )
+
+
+def test_interview_exchange_rejects_topic_that_differs_from_parent_title(
+    tmp_path: Path,
+) -> None:
+    _settings(tmp_path)
+    parent = tmp_path / "wiki/personal/interview/topics/문제-선택과-검증.md"
+    parent.parent.mkdir(parents=True)
+    parent.write_text(
+        '---\ntype: Wiki\ntitle: 문제 선택과 검증\nknowledge_state: "확인 필요"\n---\n',
+        encoding="utf-8",
+    )
+    entries = entries_from_records(
+        [
+            {
+                "day": "2026-08-24",
+                "kind": "질문",
+                "title": "어려운 문제를 어떻게 선택했습니까?",
+                "summary": "문제 선택 기준을 설명한다.",
+                "wiki_update": True,
+                "new_wiki_reason": "기존 Wiki에 같은 질문 정본이 없다.",
+                "interview_answer": {
+                    "question": "어려운 문제를 어떻게 선택했습니까?",
+                    "answer": "영향과 검증 가능성을 함께 봤다.",
+                    "parent_wiki_path": "wiki/personal/interview/topics/문제-선택과-검증.md",
+                    "interview_tracks": ["KRAFTON AI Engineer"],
+                    "question_topic": "AI 자동화 설계",
+                },
+            }
+        ]
+    )
+
+    with pytest.raises(WoonError, match="must match the semantic parent Wiki title"):
+        record_codex_knowledge_entries(
+            tmp_path,
+            source_range="codex-scope-20260824-topic-mismatch",
+            entries=entries,
+        )
 
 
 def test_wiki_upsert_does_not_depend_on_a_parallel_growth_index(tmp_path: Path) -> None:

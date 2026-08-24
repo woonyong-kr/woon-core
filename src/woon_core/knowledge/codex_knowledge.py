@@ -172,11 +172,11 @@ class ProjectMention:
 
 @dataclass(frozen=True, slots=True)
 class InterviewAnswerMention:
-    """A minimized revision tied to one existing interview project Wiki."""
+    """A minimized revision tied to one existing semantic parent Wiki."""
 
     question: str
     answer: str | None
-    project_path: str
+    parent_wiki_path: str
     interview_tracks: tuple[str, ...]
     question_topic: str
     context: str | None = None
@@ -688,12 +688,14 @@ def _validate_interview_answer_mention(vault: Path, entry: CodexKnowledgeEntry) 
     identity = _wiki_identity(vault, entry)
     if identity is None or mention.question.strip() != identity[1].strip():
         raise WoonError("Codex interview question must match the stable Wiki identity")
-    project = _related_document(vault, mention.project_path)
-    if not mention.project_path.startswith("wiki/"):
-        raise WoonError("Codex interview project_path must target the Wiki")
-    project_text = project.read_text(encoding="utf-8")
-    if "프로젝트" not in _frontmatter_list(project_text, "facets"):
-        raise WoonError("Codex interview project_path must target a project Wiki")
+    if not mention.parent_wiki_path.startswith("wiki/"):
+        raise WoonError("Codex interview parent_wiki_path must target the Wiki")
+    parent = _related_document(vault, mention.parent_wiki_path)
+    parent_text = parent.read_text(encoding="utf-8")
+    if _frontmatter_value(parent_text, "type") != "Wiki":
+        raise WoonError("Codex interview parent_wiki_path must target a Wiki document")
+    if re.fullmatch(r"wiki/personal/interview/[^/]+/README\.md", mention.parent_wiki_path):
+        raise WoonError("Codex interview questions must not use a job track as their parent")
     if not mention.interview_tracks or len(set(mention.interview_tracks)) != len(
         mention.interview_tracks
     ):
@@ -701,6 +703,8 @@ def _validate_interview_answer_mention(vault: Path, entry: CodexKnowledgeEntry) 
     for track in mention.interview_tracks:
         _visible(track, "interview track", 120)
     _visible(mention.question_topic, "interview question_topic", 120)
+    if _markdown_title(parent_text).strip() != mention.question_topic.strip():
+        raise WoonError("Codex interview question_topic must match the semantic parent Wiki title")
     InterviewAnswerRevision(
         question=mention.question,
         answer=mention.answer,
@@ -987,7 +991,7 @@ def _interview_answer_from_record(raw: object) -> InterviewAnswerMention | None:
     allowed = {
         "question",
         "answer",
-        "project_path",
+        "parent_wiki_path",
         "interview_tracks",
         "question_topic",
         "context",
@@ -999,12 +1003,12 @@ def _interview_answer_from_record(raw: object) -> InterviewAnswerMention | None:
         "source_label",
         "promote_current",
     }
-    required = {"question", "answer", "project_path", "interview_tracks", "question_topic"}
+    required = {"question", "answer", "parent_wiki_path", "interview_tracks", "question_topic"}
     if set(raw).difference(allowed) or not required.issubset(raw):
         raise WoonError("Codex knowledge interview_answer has unsupported fields")
     question = raw["question"]
     answer = raw["answer"]
-    project_path = raw["project_path"]
+    parent_wiki_path = raw["parent_wiki_path"]
     interview_tracks = raw["interview_tracks"]
     question_topic = raw["question_topic"]
     context = raw.get("context")
@@ -1017,10 +1021,10 @@ def _interview_answer_from_record(raw: object) -> InterviewAnswerMention | None:
     promote_current = raw.get("promote_current", True)
     if (
         not isinstance(question, str)
-        or not isinstance(project_path, str)
+        or not isinstance(parent_wiki_path, str)
         or not isinstance(question_topic, str)
     ):
-        raise WoonError("Codex knowledge interview question and project_path must be text")
+        raise WoonError("Codex knowledge interview question and parent_wiki_path must be text")
     if not isinstance(interview_tracks, list) or not all(
         isinstance(item, str) for item in interview_tracks
     ):
@@ -1046,7 +1050,7 @@ def _interview_answer_from_record(raw: object) -> InterviewAnswerMention | None:
     return InterviewAnswerMention(
         question=question,
         answer=answer,
-        project_path=project_path,
+        parent_wiki_path=parent_wiki_path,
         interview_tracks=tuple(interview_tracks),
         question_topic=question_topic,
         context=context,
@@ -1159,7 +1163,7 @@ def _entry_id(entry: CodexKnowledgeEntry) -> str:
                         (
                             entry.interview_answer.question,
                             entry.interview_answer.answer or "",
-                            entry.interview_answer.project_path,
+                            entry.interview_answer.parent_wiki_path,
                             *entry.interview_answer.interview_tracks,
                             entry.interview_answer.question_topic,
                             entry.interview_answer.context or "",
@@ -1257,7 +1261,7 @@ def _interview_answer_record(
     return {
         "question": mention.question,
         "answer": mention.answer,
-        "project_path": mention.project_path,
+        "parent_wiki_path": mention.parent_wiki_path,
         "interview_tracks": list(mention.interview_tracks),
         "question_topic": mention.question_topic,
         "context": mention.context,
@@ -1290,7 +1294,7 @@ def _wiki_related_documents(vault: Path, entry: CodexKnowledgeEntry) -> tuple[st
             (
                 *subject_paths,
                 *entry.related_documents,
-                *((entry.interview_answer.project_path,) if entry.interview_answer else ()),
+                *((entry.interview_answer.parent_wiki_path,) if entry.interview_answer else ()),
                 *(_wiki_relative_path(vault, item.title) for item in entry.contents),
                 *(_wiki_relative_path(vault, item.title) for item in entry.projects),
             )
@@ -1547,12 +1551,12 @@ def _wiki_deltas(vault: Path, entries: tuple[CodexKnowledgeEntry, ...]) -> tuple
         )
         if entry.wiki_update:
             interview = entry.interview_answer
-            interview_project_text = (
-                (vault / interview.project_path).read_text(encoding="utf-8")
+            interview_parent_text = (
+                (vault / interview.parent_wiki_path).read_text(encoding="utf-8")
                 if interview is not None
                 else ""
             )
-            interview_project_title = _markdown_title(interview_project_text)
+            interview_parent_title = _markdown_title(interview_parent_text)
             deltas.append(
                 WikiDelta(
                     title=subject_title,
@@ -1571,8 +1575,8 @@ def _wiki_deltas(vault: Path, entries: tuple[CodexKnowledgeEntry, ...]) -> tuple
                     parent_topics=(
                         (
                             "[["
-                            f"{Path(interview.project_path).with_suffix('').as_posix()}"
-                            f"|{interview_project_title}]]",
+                            f"{Path(interview.parent_wiki_path).with_suffix('').as_posix()}"
+                            f"|{interview_parent_title}]]",
                         )
                         if interview is not None
                         else ()

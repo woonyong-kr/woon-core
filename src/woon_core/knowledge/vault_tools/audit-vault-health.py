@@ -150,6 +150,7 @@ RETIRED_LEGACY_VIEW_ROOTS = (
     "maps/legacy",
     "maps/samples",
 )
+RETIRED_LEGACY_VIEW_PATHS = ("inbox/recently-touched.base",)
 RETIRED_AI_INSTRUCTION_LOCATORS = (
     "ai-reference/",
     "_quarantine/ai-reference-legacy",
@@ -291,6 +292,24 @@ def wiki_and_entity_policy_issues(
             wiki.append(
                 f"{relative}: interview question must use a semantic parent below Wiki root"
             )
+        if isinstance(parents, list) and len(parents) == 1 and isinstance(parents[0], str):
+            parent_match = re.fullmatch(
+                r"\[\[(?P<path>[^\]|#]+)(?:#[^\]|]+)?(?:\|(?P<title>[^\]]+))?\]\]",
+                parents[0].strip(),
+            )
+            if parent_match is not None:
+                parent_path = parent_match.group("path")
+                parent_title = parent_match.group("title") or Path(parent_path).name
+                if re.fullmatch(r"wiki/personal/interview/[^/]+/README", parent_path):
+                    wiki.append(
+                        f"{relative}: interview question must not use a job track as its parent"
+                    )
+                if (
+                    isinstance(question_topic, str)
+                    and question_topic.strip()
+                    and parent_title.strip() != question_topic.strip()
+                ):
+                    wiki.append(f"{relative}: question_topic must match the semantic parent title")
     if "프로젝트" in facets and (
         not isinstance(frontmatter.get("project_id"), str)
         or not isinstance(frontmatter.get("objective"), str)
@@ -897,11 +916,17 @@ def retired_ai_instruction_boundary_issues(vault: Path) -> list[str]:
 def retired_legacy_view_issues(vault: Path) -> list[str]:
     """Reject obsolete visualization copies and sample notes from the live Vault."""
 
-    return [
+    issues = [
         f"{root} is a retired visualization copy/sample root and must be absent"
         for root in RETIRED_LEGACY_VIEW_ROOTS
         if (vault / root).exists()
     ]
+    issues.extend(
+        f"{path} is a retired duplicate Base view and must be absent"
+        for path in RETIRED_LEGACY_VIEW_PATHS
+        if (vault / path).exists()
+    )
+    return issues
 
 
 def brain_activity_log_issues(log: Path) -> list[str]:
@@ -1286,9 +1311,7 @@ def mermaid_quality_issues(relative: str, text: str) -> tuple[list[str], list[st
             unsafe_edge_label = any(
                 not match.group("label").lstrip().startswith('"')
                 and re.search(r"[()\[\]]", match.group("label"))
-                for match in re.finditer(
-                    r"(?:-->|<-->|-.->|==>)\|(?P<label>[^|\n]+)\|", line
-                )
+                for match in re.finditer(r"(?:-->|<-->|-.->|==>)\|(?P<label>[^|\n]+)\|", line)
             )
             unsafe_node = bool(re.search(r"\b(?:call|end)\[", line))
             if (
