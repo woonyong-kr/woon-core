@@ -421,6 +421,76 @@ def test_resource_groups_inline_raw_links_below_topic_text(tmp_path: Path) -> No
     assert "[[wiki/resources/ai|AI 자료]]" not in catalog
 
 
+def test_resource_groups_merge_related_sources_into_bundle_links(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/resources/README.md",
+        title="리소스",
+        canonical_id="resources/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("리소스",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: AI\n"
+            "  children:\n"
+            "  - resources/ai\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/resources/ai.md",
+        title="AI 자료",
+        canonical_id="resources/ai",
+        node_kind="hub",
+        parent="[[wiki/resources/README|리소스]]",
+        keywords=("AI 자료",),
+    )
+    for relative, title, canonical_id, body in (
+        (
+            "wiki/resources/ai/aice.md",
+            "AICE Associate",
+            "resources/ai/aice",
+            "- [[assets/aice-guide.png|시험 안내]]\n"
+            "- [[assets/aice-schedule.png|시험 일정]]",
+        ),
+        (
+            "wiki/resources/ai/transformer.md",
+            "Transformer Explainer",
+            "resources/ai/transformer",
+            "- [[sources/transformer|Transformer 원자료]]",
+        ),
+    ):
+        _write_page(
+            tmp_path,
+            relative,
+            title=title,
+            canonical_id=canonical_id,
+            node_kind="topic",
+            parent="[[wiki/resources/ai|AI 자료]]",
+            keywords=(title,),
+            body=body,
+        )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    catalog = report.pages[tmp_path / "wiki/resources/README.md"].decode("utf-8")
+    assert "- AI\n  - [[wiki/resources/ai/aice|AICE Associate]]" in catalog
+    assert "  - [[wiki/resources/ai/transformer|Transformer Explainer]]" in catalog
+    assert "시험 안내" not in catalog
+    assert "Transformer 원자료" not in catalog
+
+
 def test_large_grouping_hub_stays_as_one_link(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
