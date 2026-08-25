@@ -155,8 +155,8 @@ Usage:
   woon knowledge obsidian-plugin <status|install|remove-detected-mindmaps|
     install-local-build|
     configure-prisma-calendar|configure-full-calendar-remastered|
-    configure-notion-bases-calendar|configure-context-calendar|
-    attest-context-calendar-runtime|retire>
+    configure-notion-bases-calendar|configure-link-calendar|
+    attest-link-calendar-runtime|retire>
     [--plugin <approved-plugin-id>...] [--source-dir <path>] [--version <semver>]
     [--attested-check <operator-confirmed-ui-check>...]
     [--vault <path>]
@@ -953,8 +953,8 @@ def _run_obsidian_plugin(arguments: list[str], output: TextIO) -> None:
             "knowledge obsidian-plugin requires status, install, install-local-build, "
             "remove-detected-mindmaps, "
             "configure-prisma-calendar, configure-full-calendar-remastered, "
-            "configure-notion-bases-calendar, configure-context-calendar, "
-            "attest-context-calendar-runtime, or retire"
+            "configure-notion-bases-calendar, configure-link-calendar, "
+            "attest-link-calendar-runtime, or retire"
         )
     action, *raw_options = arguments
     plugin_ids: list[str] = []
@@ -1021,16 +1021,16 @@ def _run_obsidian_plugin(arguments: list[str], output: TextIO) -> None:
         if plugin_ids or local_options or attested_checks:
             raise WoonError("configure-notion-bases-calendar does not accept --plugin")
         result = service.configure_notion_bases_calendar()
-    elif action == "configure-context-calendar":
+    elif action == "configure-link-calendar":
         if plugin_ids or local_options or attested_checks:
-            raise WoonError("configure-context-calendar does not accept --plugin")
-        result = service.configure_context_calendar()
-    elif action == "attest-context-calendar-runtime":
+            raise WoonError("configure-link-calendar does not accept --plugin")
+        result = service.configure_link_calendar()
+    elif action == "attest-link-calendar-runtime":
         if plugin_ids or local_options:
             raise WoonError(
-                "attest-context-calendar-runtime accepts only --attested-check and --vault"
+                "attest-link-calendar-runtime accepts only --attested-check and --vault"
             )
-        result = service.attest_context_calendar_runtime(attested_checks)
+        result = service.attest_link_calendar_runtime(attested_checks)
     elif action == "retire":
         if local_options or attested_checks:
             raise WoonError("obsidian-plugin retire does not accept local build options")

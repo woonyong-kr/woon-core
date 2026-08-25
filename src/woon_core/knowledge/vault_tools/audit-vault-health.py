@@ -12,9 +12,9 @@ from pathlib import Path
 import yaml
 
 from woon_core.calendar.constants import (
-    CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS,
-    CONTEXT_CALENDAR_PLUGIN_ID,
-    CONTEXT_CALENDAR_PROFILE_ID,
+    LINK_CALENDAR_DASHBOARD_CSS_CLASS,
+    LINK_CALENDAR_PLUGIN_ID,
+    LINK_CALENDAR_PROFILE_ID,
 )
 from woon_core.errors import WoonError
 from woon_core.knowledge.source_boundary import audit_source_boundary
@@ -606,13 +606,6 @@ def is_allowed_non_markdown_file(path: Path) -> bool:
         return is_core_calendar_ics_projection(path)
     if path.suffix == ".canvas" and r.startswith("maps/"):
         return is_noncanonical_map_archive(path) or is_valid_markdown_canvas(path)
-    if r.startswith("maps/linked-canvas/") and r.endswith(".linked-canvas.json"):
-        return is_valid_linked_canvas_state(path)
-    if path.suffix == ".context-graph" and r.startswith("maps/context-graph/"):
-        # Context Graph stores its layout next to the Markdown notes.  It is a
-        # local-only view setting, not knowledge content, and must not be
-        # treated as an unexpected source artifact.
-        return True
     if r == "catalog/source-audits/inflearn-java-course-materials.json":
         return True
     if r.startswith("wiki/private/_sources/knowledge/private/career/applications/") and path.suffix.casefold() in {
@@ -625,49 +618,6 @@ def is_allowed_non_markdown_file(path: Path) -> bool:
     if path.suffix != ".drawio":
         return False
     return r.startswith("wiki/ai/transformer/diagrams/")
-
-
-def is_valid_linked_canvas_state(path: Path) -> bool:
-    """Allow only Linked Canvas state that points to existing Vault files.
-
-    The sidecar is view state, not a second knowledge source.  Keeping the
-    validation here prevents a stale canvas from silently retaining deleted
-    document paths.
-    """
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if payload.get("schemaVersion") != 1:
-        return False
-    canvas_path = payload.get("canvasPath")
-    if not isinstance(canvas_path, str) or not canvas_path.startswith("maps/linked-canvas/"):
-        return False
-    canvas = (VAULT / canvas_path).resolve()
-    if not _resolves_within(VAULT, canvas) or not canvas.is_file():
-        return False
-    for key in ("rootPaths", "seedPaths"):
-        values = payload.get(key)
-        if not isinstance(values, list) or not values:
-            return False
-        for value in values:
-            if not isinstance(value, str) or Path(value).suffix not in {".md", ".base"}:
-                return False
-            candidate = (VAULT / value).resolve()
-            if not _resolves_within(VAULT, candidate) or not candidate.is_file():
-                return False
-    managed = payload.get("managed")
-    files_by_node = managed.get("filesByNodeId") if isinstance(managed, dict) else None
-    if not isinstance(files_by_node, dict):
-        return False
-    for value in files_by_node.values():
-        if not isinstance(value, str) or Path(value).suffix not in {".md", ".base"}:
-            return False
-        candidate = (VAULT / value).resolve()
-        if not _resolves_within(VAULT, candidate) or not candidate.is_file():
-            return False
-    return True
 
 
 def is_core_calendar_ics_projection(path: Path) -> bool:
@@ -803,15 +753,15 @@ def calendar_projection_issues(vault: Path) -> list[str]:
             if dashboard_path.stat().st_mode & 0o777 != CALENDAR_PROJECTION_FILE_MODE:
                 issues.append(f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must be read-only")
             required_dashboard = (
-                f"cssclasses: {CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS}\n"
+                f"cssclasses: {LINK_CALENDAR_DASHBOARD_CSS_CLASS}\n"
                 "---\n\n"
-                f"```{CONTEXT_CALENDAR_PLUGIN_ID}\n"
-                f"profile: {CONTEXT_CALENDAR_PROFILE_ID}\n"
+                f"```{LINK_CALENDAR_PLUGIN_ID}\n"
+                f"profile: {LINK_CALENDAR_PROFILE_ID}\n"
                 "```"
             )
             if required_dashboard not in dashboard_content:
                 issues.append(
-                    f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must embed Context Calendar"
+                    f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: dashboard must embed Link Calendar"
                 )
     elif directory_present or ics_present:
         issues.append(f"{CALENDAR_DASHBOARD_PROJECTION_PATH}: Core dashboard is required")
@@ -1139,32 +1089,6 @@ def h1(text: str) -> str | None:
         if line.startswith("# "):
             return line[2:].strip()
     return None
-
-
-def is_scoped_context_tree_title_collision(
-    paths: list[Path], metadata: dict[Path, dict[str, object]]
-) -> bool:
-    """Allow distinct Context Graph cards to reuse a display title.
-
-    A Context Graph card is addressed by its scoped path and parent, not by
-    frontmatter title alone.  The generic duplicate-content audit still rejects
-    copied bodies, and a regular map index may share the title of one scoped
-    card only when it declares itself as a subject index.
-    """
-
-    if len(paths) < 2:
-        return False
-    context_paths = [
-        path
-        for path in paths
-        if rel(path).startswith("maps/context-graph/")
-        and metadata.get(path, {}).get("context_tree") is True
-        and isinstance(metadata.get(path, {}).get("context_tree_parent"), str)
-        and str(metadata[path]["context_tree_parent"]).strip()
-    ]
-    if len(context_paths) == len(paths):
-        return len({rel(path.parent) for path in context_paths}) == len(context_paths)
-    return False
 
 
 def quartz_root(path: Path) -> str:
@@ -2173,9 +2097,7 @@ def main() -> int:
             title_index.setdefault(title.strip(), []).append(path)
     for title, paths in sorted(title_index.items()):
         unique_paths = sorted(set(paths))
-        if len(unique_paths) > 1 and not is_scoped_context_tree_title_collision(
-            unique_paths, metadata
-        ):
+        if len(unique_paths) > 1:
             issues["duplicate_titles"].append(f"{title!r}: {[rel(path) for path in unique_paths]}")
 
     canonical_id_index: dict[str, list[Path]] = {}

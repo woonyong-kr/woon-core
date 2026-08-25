@@ -331,10 +331,10 @@ def test_daily_digest_links_explicit_canonical_wiki_from_local_source(
     daily = tmp_path / "inbox/daily/2026-08-24.md"
     daily.parent.mkdir(parents=True)
     daily.write_text("# 2026-08-24\n", encoding="utf-8")
-    canonical = tmp_path / "wiki/personal/context-calendar.md"
+    canonical = tmp_path / "wiki/personal/link-calendar.md"
     canonical.parent.mkdir(parents=True)
     canonical.write_text(
-        '---\ntitle: "Context Calendar 사용 원칙"\n---\n\n# Context Calendar 사용 원칙\n',
+        '---\ntitle: "Link Calendar 사용 원칙"\n---\n\n# Link Calendar 사용 원칙\n',
         encoding="utf-8",
     )
     record_codex_source_bundle(
@@ -342,7 +342,7 @@ def test_daily_digest_links_explicit_canonical_wiki_from_local_source(
         CodexSourceBundle(
             day=date(2026, 8, 24),
             source_locator="thread-fixture:2026-08-24",
-            title="Context Calendar 사용 원칙을 정리했다",
+            title="Link Calendar 사용 원칙을 정리했다",
             messages=(
                 CodexSourceMessage(
                     role="assistant",
@@ -363,7 +363,7 @@ def test_daily_digest_links_explicit_canonical_wiki_from_local_source(
     rendered = daily.read_text(encoding="utf-8")
     assert "## 관련 문서" not in rendered
     assert "> - **연결** ·" in rendered
-    assert "[[../../wiki/personal/context-calendar|Context Calendar 사용 원칙]]" in rendered
+    assert "[[../../wiki/personal/link-calendar|Link Calendar 사용 원칙]]" in rendered
 
 
 def test_daily_digest_places_canonical_links_with_their_subject(tmp_path: Path) -> None:
@@ -371,11 +371,11 @@ def test_daily_digest_places_canonical_links_with_their_subject(tmp_path: Path) 
     daily = tmp_path / "inbox/daily/2026-08-24.md"
     daily.parent.mkdir(parents=True)
     daily.write_text("# 2026-08-24\n", encoding="utf-8")
-    subject = tmp_path / "wiki/personal/context-calendar.md"
+    subject = tmp_path / "wiki/personal/link-calendar.md"
     parent = tmp_path / "wiki/personal/wiki.md"
     subject.parent.mkdir(parents=True)
     subject.write_text(
-        '---\ntitle: "Context Calendar 사용 원칙"\n---\n\n# Context Calendar 사용 원칙\n',
+        '---\ntitle: "Link Calendar 사용 원칙"\n---\n\n# Link Calendar 사용 원칙\n',
         encoding="utf-8",
     )
     parent.write_text(
@@ -389,10 +389,10 @@ def test_daily_digest_places_canonical_links_with_their_subject(tmp_path: Path) 
         entries=(
             CodexDailyDigestEntry(
                 kind="결정",
-                title="Context Calendar 사용 원칙",
+                title="Link Calendar 사용 원칙",
                 summary="날짜 탐색과 일정 연결의 소유권을 정리했다.",
                 related_documents=(
-                    "wiki/personal/context-calendar.md",
+                    "wiki/personal/link-calendar.md",
                     "wiki/personal/wiki.md",
                 ),
             ),
@@ -400,10 +400,10 @@ def test_daily_digest_places_canonical_links_with_their_subject(tmp_path: Path) 
     )
 
     rendered = daily.read_text(encoding="utf-8")
-    assert "### [[../../wiki/personal/context-calendar|Context Calendar 사용 원칙]]" in rendered
+    assert "### [[../../wiki/personal/link-calendar|Link Calendar 사용 원칙]]" in rendered
     assert "**연결된 기준** — [[../../wiki/personal/wiki|Wiki]]" in rendered
     assert "## 관련 문서" not in rendered
-    assert rendered.count("[[../../wiki/personal/context-calendar") == 1
+    assert rendered.count("[[../../wiki/personal/link-calendar") == 1
 
 
 def test_daily_digest_populates_native_base_metadata(tmp_path: Path) -> None:

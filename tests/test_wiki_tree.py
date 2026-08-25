@@ -311,7 +311,7 @@ def test_hub_explicit_groups_render_text_labels_with_direct_child_links(
     )
     for relative, title, canonical_id in (
         ("wiki/projects/novel.md", "(미정)소설 집필", "projects/novel"),
-        ("wiki/projects/calendar.md", "Context Calendar", "projects/calendar"),
+        ("wiki/projects/calendar.md", "Link Calendar", "projects/calendar"),
     ):
         _write_page(
             tmp_path,
@@ -330,7 +330,7 @@ def test_hub_explicit_groups_render_text_labels_with_direct_child_links(
     assert report.issues == ()
     catalog = report.pages[tmp_path / "wiki/projects/README.md"].decode("utf-8")
     assert "- 창작\n  - [[wiki/projects/novel|(미정)소설 집필]]" in catalog
-    assert "- 시스템·도구\n  - [[wiki/projects/calendar|Context Calendar]]" in catalog
+    assert "- 시스템·도구\n  - [[wiki/projects/calendar|Link Calendar]]" in catalog
     assert "\n- [[wiki/projects/novel|(미정)소설 집필]]" not in catalog
 
 

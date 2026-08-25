@@ -17,11 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from woon_core.calendar.constants import (
-    CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS,
-    CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS,
-    CONTEXT_CALENDAR_PLUGIN_ID,
-    CONTEXT_CALENDAR_PROFILE_ID,
-    CONTEXT_CALENDAR_VERSION,
+    LINK_CALENDAR_DASHBOARD_CSS_CLASS,
+    LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS,
+    LINK_CALENDAR_PLUGIN_ID,
+    LINK_CALENDAR_PROFILE_ID,
+    LINK_CALENDAR_VERSION,
 )
 from woon_core.calendar.projection import (
     APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH,
@@ -45,25 +45,28 @@ PRISMA_READONLY_CONTEXT_MENU = ("preview", "goToSource", "openFile")
 FULL_CALENDAR_REMASTERED_ID = "full-calendar-remastered"
 FULL_CALENDAR_SOURCE_COLOR = "#687B86"
 NOTION_BASES_ID = "notion-bases"
-CONTEXT_CALENDAR_ID = CONTEXT_CALENDAR_PLUGIN_ID
-CONTEXT_CALENDAR_SOURCE = APPLE_CALENDAR_EVENTS_RELATIVE_PATH
-CONTEXT_CALENDAR_PROPERTY_FIELDS = (
+LINK_CALENDAR_ID = LINK_CALENDAR_PLUGIN_ID
+LINK_CALENDAR_SOURCE = APPLE_CALENDAR_EVENTS_RELATIVE_PATH
+LINK_CALENDAR_PROPERTY_FIELDS = (
     ("title", "title"),
     ("start", "Date"),
     ("end", "End Date"),
+    ("startTime", "Start Date"),
+    ("endTime", "End Date"),
+    ("allDay", "All Day"),
     ("category", "Category"),
-    ("people", "people"),
-    ("project", "projects"),
-    ("related", "related"),
 )
 LEGACY_SIMPLE_CALENDAR_ID = "woon-simple-calendar"
-CONTEXT_GRAPH_ID = "context-graph"
-LOCAL_DEVELOPMENT_PLUGINS = frozenset({CONTEXT_CALENDAR_ID, CONTEXT_GRAPH_ID})
-CONTEXT_CALENDAR_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/simple-calendar.git"
-CONTEXT_GRAPH_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/linked-canvas.git"
+LEGACY_CONTEXT_CALENDAR_ID = "context-calendar"
+LINKED_GRAPH_ID = "linked-graph"
+LEGACY_CONTEXT_GRAPH_ID = "context-graph"
+LINKED_GRAPH_VERSION = "1.0.0"
+LOCAL_DEVELOPMENT_PLUGINS = frozenset({LINK_CALENDAR_ID, LINKED_GRAPH_ID})
+LINK_CALENDAR_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/link-calendar.git"
+LINKED_GRAPH_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/linked-graph.git"
 LOCAL_PLUGIN_SOURCE_REPOSITORIES = {
-    CONTEXT_CALENDAR_ID: CONTEXT_CALENDAR_SOURCE_REPOSITORY,
-    CONTEXT_GRAPH_ID: CONTEXT_GRAPH_SOURCE_REPOSITORY,
+    LINK_CALENDAR_ID: LINK_CALENDAR_SOURCE_REPOSITORY,
+    LINKED_GRAPH_ID: LINKED_GRAPH_SOURCE_REPOSITORY,
 }
 
 
@@ -80,8 +83,8 @@ class GitSourceProvenance:
 
 
 OFFICIAL_PLUGINS = {
-    CONTEXT_GRAPH_ID: OfficialPlugin(
-        plugin_id=CONTEXT_GRAPH_ID, repository="woonyong-kr/linked-canvas"
+    LINKED_GRAPH_ID: OfficialPlugin(
+        plugin_id=LINKED_GRAPH_ID, repository="woonyong-kr/linked-graph"
     ),
     "light-mindmap": OfficialPlugin(plugin_id="light-mindmap", repository="ninglg/light-mindmap"),
     "markdown-mindmap": OfficialPlugin(
@@ -103,6 +106,8 @@ RETIRABLE_PLUGINS = {
     FULL_CALENDAR_REMASTERED_ID,
     NOTION_BASES_ID,
     LEGACY_SIMPLE_CALENDAR_ID,
+    LEGACY_CONTEXT_CALENDAR_ID,
+    LEGACY_CONTEXT_GRAPH_ID,
 }
 
 
@@ -811,12 +816,12 @@ class ObsidianPluginService:
         )
         return receipt
 
-    def configure_context_calendar(self) -> dict[str, Any]:
-        """Serialize Context Calendar settings changes for this Vault."""
+    def configure_link_calendar(self) -> dict[str, Any]:
+        """Serialize Link Calendar settings changes for this Vault."""
 
-        return self._mutate(self._configure_context_calendar_locked)
+        return self._mutate(self._configure_link_calendar_locked)
 
-    def _configure_context_calendar_locked(self) -> dict[str, Any]:
+    def _configure_link_calendar_locked(self) -> dict[str, Any]:
         """Upsert Woon's read-only source profile into an installed local build.
 
         The plugin remains independently configurable: unrelated settings and source
@@ -825,39 +830,50 @@ class ObsidianPluginService:
         """
 
         self._require_vault()
-        self._require_context_calendar_projection()
-        manifest = self._installed_manifest(CONTEXT_CALENDAR_ID)
-        if manifest["version"] != CONTEXT_CALENDAR_VERSION:
+        self._require_link_calendar_projection()
+        manifest = self._installed_manifest(LINK_CALENDAR_ID)
+        if manifest["version"] != LINK_CALENDAR_VERSION:
             raise WoonError(
-                "Context Calendar version must match the approved local development version"
+                "Link Calendar version must match the approved local development version"
             )
-        if CONTEXT_CALENDAR_ID not in self._enabled_ids():
-            raise WoonError("Context Calendar must be enabled before configuration")
-        self._require_verified_local_build(CONTEXT_CALENDAR_ID, CONTEXT_CALENDAR_VERSION)
+        if LINK_CALENDAR_ID not in self._enabled_ids():
+            raise WoonError("Link Calendar must be enabled before configuration")
+        self._require_verified_local_build(LINK_CALENDAR_ID, LINK_CALENDAR_VERSION)
 
         receipt_id = self._receipt_id()
         backup_root = self._local / "backups" / receipt_id
-        settings_path = self._plugins / CONTEXT_CALENDAR_ID / "data.json"
+        settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
         settings_before = settings_path.read_bytes() if settings_path.is_file() else None
-        existing = self._read_json_object(settings_path) if settings_before is not None else {}
-        configuration = _context_calendar_configuration(existing)
+        legacy_settings_path = self._plugins / LEGACY_CONTEXT_CALENDAR_ID / "data.json"
+        legacy_settings_before: bytes | None = None
+        if settings_before is not None:
+            existing = self._read_json_object(settings_path)
+        elif legacy_settings_path.exists():
+            _require_vault_local_file(
+                self._vault, legacy_settings_path, "legacy Context Calendar settings"
+            )
+            legacy_settings_before = legacy_settings_path.read_bytes()
+            existing = self._read_json_object(legacy_settings_path)
+        else:
+            existing = {}
+        configuration = _link_calendar_configuration(existing)
         content = (json.dumps(configuration, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        backup_path = backup_root / CONTEXT_CALENDAR_ID / "data.json"
+        backup_path = backup_root / LINK_CALENDAR_ID / "data.json"
         if settings_before is not None:
             _atomic_write(backup_path, settings_before)
-        _require_unchanged_file(settings_path, settings_before, "Context Calendar settings")
+        _require_unchanged_file(settings_path, settings_before, "Link Calendar settings")
 
         receipt_path = self._local / "receipts" / f"{receipt_id}.json"
         try:
             _atomic_write(settings_path, content)
             loaded = self._read_json_object(settings_path)
-            profile = _validate_context_calendar_configuration(loaded)
+            profile = _validate_link_calendar_configuration(loaded)
             receipt = {
                 "receipt_id": receipt_id,
-                "action": "configure-context-calendar",
+                "action": "configure-link-calendar",
                 "created_at": datetime.now(UTC).isoformat(),
                 "plugin": {
-                    "id": CONTEXT_CALENDAR_ID,
+                    "id": LINK_CALENDAR_ID,
                     "version": manifest["version"],
                 },
                 "settings": {
@@ -866,6 +882,14 @@ class ObsidianPluginService:
                     "backup": (
                         backup_path.relative_to(self._vault).as_posix()
                         if settings_before is not None
+                        else None
+                    ),
+                    "migrated_from": (
+                        {
+                            "path": legacy_settings_path.relative_to(self._vault).as_posix(),
+                            "sha256": _sha256(legacy_settings_before),
+                        }
+                        if legacy_settings_before is not None
                         else None
                     ),
                 },
@@ -883,20 +907,20 @@ class ObsidianPluginService:
                 settings_path,
                 expected_current=content,
                 previous=settings_before,
-                label="Context Calendar settings",
+                label="Link Calendar settings",
                 cause=error,
             )
             receipt_path.unlink(missing_ok=True)
             raise
         return receipt
 
-    def attest_context_calendar_runtime(self, checks: list[str]) -> dict[str, Any]:
+    def attest_link_calendar_runtime(self, checks: list[str]) -> dict[str, Any]:
         """Record a manual operator attestation bound to the current static evidence."""
 
-        return self._mutate(lambda: self._attest_context_calendar_runtime_locked(checks))
+        return self._mutate(lambda: self._attest_link_calendar_runtime_locked(checks))
 
-    def _attest_context_calendar_runtime_locked(self, checks: list[str]) -> dict[str, Any]:
-        required = set(CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS)
+    def _attest_link_calendar_runtime_locked(self, checks: list[str]) -> dict[str, Any]:
+        required = set(LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS)
         provided = set(checks)
         if len(checks) != len(provided) or provided != required:
             missing = sorted(required.difference(provided))
@@ -909,24 +933,24 @@ class ObsidianPluginService:
             if len(checks) != len(provided):
                 detail.append("duplicate-check")
             raise WoonError(
-                "Context Calendar manual runtime attestation requires the complete UI checklist"
+                "Link Calendar manual runtime attestation requires the complete UI checklist"
                 + (": " + "; ".join(detail) if detail else "")
             )
 
-        asset_hashes, settings_hash, dashboard_hash = self._context_calendar_static_evidence()
+        asset_hashes, settings_hash, dashboard_hash = self._link_calendar_static_evidence()
         receipt_id = self._receipt_id()
         receipt = {
             "receipt_id": receipt_id,
-            "action": "attest-context-calendar-runtime",
+            "action": "attest-link-calendar-runtime",
             "created_at": datetime.now(UTC).isoformat(),
             "plugin": {
-                "id": CONTEXT_CALENDAR_ID,
-                "version": CONTEXT_CALENDAR_VERSION,
+                "id": LINK_CALENDAR_ID,
+                "version": LINK_CALENDAR_VERSION,
                 "assets_sha256": asset_hashes,
             },
             "settings": {"sha256": settings_hash},
             "dashboard": {"sha256": dashboard_hash},
-            "operator_attested_checks": list(CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS),
+            "operator_attested_checks": list(LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS),
             "attestation": "manual-operator-confirmation-after-Obsidian-reload",
         }
         _atomic_write(
@@ -948,9 +972,13 @@ class ObsidianPluginService:
         if FULL_CALENDAR_REMASTERED_ID in requested:
             self._require_notion_bases_calendar_projection()
         if NOTION_BASES_ID in requested:
-            self._require_context_calendar_ready()
+            self._require_link_calendar_ready()
         if LEGACY_SIMPLE_CALENDAR_ID in requested:
-            self._require_context_calendar_ready()
+            self._require_link_calendar_ready()
+        if LEGACY_CONTEXT_CALENDAR_ID in requested:
+            self._require_link_calendar_ready()
+        if LEGACY_CONTEXT_GRAPH_ID in requested:
+            self._require_linked_graph_ready()
         before = self.status()
         receipt_id = self._receipt_id()
         backup_root = self._local / "backups" / receipt_id
@@ -1207,31 +1235,31 @@ class ObsidianPluginService:
             if "woon_projection: apple-calendar\n" not in content or "Date: " not in content:
                 raise WoonError("Notion Bases calendar rows must be Core-generated date-only notes")
 
-    def _require_context_calendar_projection(self) -> None:
-        """Require the exact read-only Markdown projection Context Calendar may read."""
+    def _require_link_calendar_projection(self) -> None:
+        """Require the exact read-only Markdown projection Link Calendar may read."""
 
-        directory = self._vault / CONTEXT_CALENDAR_SOURCE
+        directory = self._vault / LINK_CALENDAR_SOURCE
         dashboard_path = self._vault / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH
-        _require_vault_local_directory(self._vault, directory, "Context Calendar source directory")
+        _require_vault_local_directory(self._vault, directory, "Link Calendar source directory")
         if directory.stat().st_mode & 0o777 != 0o500:
-            raise WoonError("Context Calendar source directory must be Core-owned and read-only")
-        _require_vault_local_file(self._vault, dashboard_path, "Context Calendar dashboard")
+            raise WoonError("Link Calendar source directory must be Core-owned and read-only")
+        _require_vault_local_file(self._vault, dashboard_path, "Link Calendar dashboard")
         if not is_core_calendar_dashboard(dashboard_path):
-            raise WoonError("Context Calendar dashboard must be generated by the Core projection")
+            raise WoonError("Link Calendar dashboard must be generated by the Core projection")
         if dashboard_path.stat().st_mode & 0o777 != 0o400:
-            raise WoonError("Context Calendar dashboard must be read-only")
+            raise WoonError("Link Calendar dashboard must be read-only")
         dashboard = dashboard_path.read_text(encoding="utf-8")
         required_dashboard = (
-            f"cssclasses: {CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS}\n"
+            f"cssclasses: {LINK_CALENDAR_DASHBOARD_CSS_CLASS}\n"
             "---\n\n"
-            f"```{CONTEXT_CALENDAR_ID}\n"
-            f"profile: {CONTEXT_CALENDAR_PROFILE_ID}\n"
+            f"```{LINK_CALENDAR_ID}\n"
+            f"profile: {LINK_CALENDAR_PROFILE_ID}\n"
             "```\n"
         )
         if required_dashboard not in dashboard:
-            raise WoonError("Context Calendar dashboard must use the Core source profile")
+            raise WoonError("Link Calendar dashboard must use the Core source profile")
         for path in directory.glob("*.md"):
-            _require_vault_local_file(self._vault, path, "Context Calendar event")
+            _require_vault_local_file(self._vault, path, "Link Calendar event")
             content = path.read_text(encoding="utf-8")
             if (
                 "woon_projection: apple-calendar\n" not in content
@@ -1239,52 +1267,62 @@ class ObsidianPluginService:
                 or "Category: " not in content
                 or "Category ID: " not in content
             ):
-                raise WoonError("Context Calendar rows must be Core-generated categorized notes")
+                raise WoonError("Link Calendar rows must be Core-generated categorized notes")
             if path.stat().st_mode & 0o777 != 0o400:
-                raise WoonError("Context Calendar rows must be read-only")
+                raise WoonError("Link Calendar rows must be read-only")
 
-    def _require_context_calendar_ready(self) -> None:
+    def _require_link_calendar_ready(self) -> None:
         """Fail closed unless static evidence and a matching manual attestation exist."""
 
-        asset_hashes, settings_hash, dashboard_hash = self._context_calendar_static_evidence()
+        asset_hashes, settings_hash, dashboard_hash = self._link_calendar_static_evidence()
         if not self._matching_receipt(
-            "attest-context-calendar-runtime",
-            CONTEXT_CALENDAR_ID,
-            CONTEXT_CALENDAR_VERSION,
+            "attest-link-calendar-runtime",
+            LINK_CALENDAR_ID,
+            LINK_CALENDAR_VERSION,
             asset_hashes=asset_hashes,
             settings_hash=settings_hash,
             dashboard_hash=dashboard_hash,
-            attestation_checks=CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS,
+            attestation_checks=LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS,
         ):
             raise WoonError(
-                "Context Calendar runtime must have a manual operator attestation after reload"
+                "Link Calendar runtime must have a manual operator attestation after reload"
             )
 
-    def _context_calendar_static_evidence(self) -> tuple[dict[str, str], str, str]:
+    def _require_linked_graph_ready(self) -> None:
+        """Require the receipted read-only replacement before retiring the legacy ID."""
+
+        manifest = self._installed_manifest(LINKED_GRAPH_ID)
+        if manifest["version"] != LINKED_GRAPH_VERSION:
+            raise WoonError("Linked Graph version is not approved for legacy retirement")
+        if LINKED_GRAPH_ID not in self._enabled_ids():
+            raise WoonError("Linked Graph must be enabled before retiring Context Graph")
+        self._require_verified_local_build(LINKED_GRAPH_ID, LINKED_GRAPH_VERSION)
+
+    def _link_calendar_static_evidence(self) -> tuple[dict[str, str], str, str]:
         """Return hashes only after install, activation, settings, and projection verify."""
 
-        self._require_context_calendar_projection()
-        manifest = self._installed_manifest(CONTEXT_CALENDAR_ID)
-        if manifest["version"] != CONTEXT_CALENDAR_VERSION:
-            raise WoonError("Context Calendar version is not approved for legacy retirement")
-        if CONTEXT_CALENDAR_ID not in self._enabled_ids():
-            raise WoonError("Context Calendar must be enabled before retiring the legacy plugin")
+        self._require_link_calendar_projection()
+        manifest = self._installed_manifest(LINK_CALENDAR_ID)
+        if manifest["version"] != LINK_CALENDAR_VERSION:
+            raise WoonError("Link Calendar version is not approved for legacy retirement")
+        if LINK_CALENDAR_ID not in self._enabled_ids():
+            raise WoonError("Link Calendar must be enabled before retiring the legacy plugin")
         asset_hashes = self._require_verified_local_build(
-            CONTEXT_CALENDAR_ID, CONTEXT_CALENDAR_VERSION
+            LINK_CALENDAR_ID, LINK_CALENDAR_VERSION
         )
-        settings_path = self._plugins / CONTEXT_CALENDAR_ID / "data.json"
-        _require_vault_local_file(self._vault, settings_path, "Context Calendar settings")
+        settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
+        _require_vault_local_file(self._vault, settings_path, "Link Calendar settings")
         configuration = self._read_json_object(settings_path)
-        _validate_context_calendar_configuration(configuration)
+        _validate_link_calendar_configuration(configuration)
         settings_hash = _sha256(settings_path.read_bytes())
         if not self._matching_receipt(
-            "configure-context-calendar",
-            CONTEXT_CALENDAR_ID,
-            CONTEXT_CALENDAR_VERSION,
+            "configure-link-calendar",
+            LINK_CALENDAR_ID,
+            LINK_CALENDAR_VERSION,
             settings_hash=settings_hash,
         ):
             raise WoonError(
-                "Context Calendar configuration receipt does not match the installed settings"
+                "Link Calendar configuration receipt does not match the installed settings"
             )
         dashboard_hash = _sha256(
             (self._vault / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH).read_bytes()
@@ -1505,60 +1543,63 @@ class ObsidianPluginService:
         return datetime.now(UTC).strftime("obsidian-plugin-%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
 
 
-def _context_calendar_source_profile() -> dict[str, Any]:
-    """Return the single Woon-managed profile understood by Context Calendar 2.0."""
+def _link_calendar_source_profile() -> dict[str, Any]:
+    """Return the single Woon-managed profile understood by Link Calendar 2.0."""
 
     return {
-        "id": CONTEXT_CALENDAR_PROFILE_ID,
+        "id": LINK_CALENDAR_PROFILE_ID,
         "name": "Apple Calendar",
         "enabled": True,
         "source": {
             "type": "folder",
-            "path": CONTEXT_CALENDAR_SOURCE,
+            "path": LINK_CALENDAR_SOURCE,
             "recursive": False,
             "tag": "",
         },
         "editable": False,
-        "properties": dict(CONTEXT_CALENDAR_PROPERTY_FIELDS),
+        "properties": dict(LINK_CALENDAR_PROPERTY_FIELDS),
     }
 
 
-def _context_calendar_configuration(existing: Mapping[str, Any]) -> dict[str, Any]:
+def _link_calendar_configuration(existing: Mapping[str, Any]) -> dict[str, Any]:
     """Preserve user settings while deterministically upserting Woon's source profile."""
 
     configuration = dict(existing)
+    if "showAgenda" not in configuration and "showContext" in configuration:
+        configuration["showAgenda"] = configuration["showContext"] is not False
+    configuration.pop("showContext", None)
     raw_profiles = configuration.get("sourceProfiles", [])
     if not isinstance(raw_profiles, list) or not all(
         isinstance(profile, dict) for profile in raw_profiles
     ):
-        raise WoonError("Context Calendar sourceProfiles must be a list of objects")
+        raise WoonError("Link Calendar sourceProfiles must be a list of objects")
     profile_ids = [profile.get("id") for profile in raw_profiles]
     if any(not isinstance(profile_id, str) or not profile_id for profile_id in profile_ids):
-        raise WoonError("Context Calendar source profile IDs must be non-empty strings")
+        raise WoonError("Link Calendar source profile IDs must be non-empty strings")
     if len(profile_ids) != len(set(profile_ids)):
-        raise WoonError("Context Calendar source profile IDs must be unique")
+        raise WoonError("Link Calendar source profile IDs must be unique")
 
-    managed_profile = _context_calendar_source_profile()
+    managed_profile = _link_calendar_source_profile()
     configuration["schemaVersion"] = 1
     configuration["sourceProfiles"] = [
-        *(profile for profile in raw_profiles if profile["id"] != CONTEXT_CALENDAR_PROFILE_ID),
+        *(profile for profile in raw_profiles if profile["id"] != LINK_CALENDAR_PROFILE_ID),
         managed_profile,
     ]
     return configuration
 
 
-def _validate_context_calendar_configuration(configuration: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_link_calendar_configuration(configuration: Mapping[str, Any]) -> dict[str, Any]:
     """Return the verified Woon profile or fail closed on a writable/drifted source."""
 
     profiles = configuration.get("sourceProfiles")
     matching = (
-        [profile for profile in profiles if profile.get("id") == CONTEXT_CALENDAR_PROFILE_ID]
+        [profile for profile in profiles if profile.get("id") == LINK_CALENDAR_PROFILE_ID]
         if isinstance(profiles, list) and all(isinstance(profile, dict) for profile in profiles)
         else []
     )
-    expected = _context_calendar_source_profile()
+    expected = _link_calendar_source_profile()
     if configuration.get("schemaVersion") != 1 or matching != [expected]:
-        raise WoonError("Context Calendar read-only source profile could not be verified")
+        raise WoonError("Link Calendar read-only source profile could not be verified")
     return expected
 
 

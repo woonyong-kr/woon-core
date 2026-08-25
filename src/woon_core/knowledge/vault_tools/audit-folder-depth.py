@@ -34,7 +34,6 @@ PREFIX_MAX_PARTS = {
     # A goal is the explicit stop condition for a routine, so it is a
     # canonical task source rather than accidental nesting.
     ("inbox", "tasks", "goals"): 4,
-    ("maps", "context-graph"): 4,
     # The single Wiki keeps personal material under semantic collections.  The
     # extra level is deliberate ownership, not ad-hoc nesting.
     ("wiki", "personal", "projects"): 4,

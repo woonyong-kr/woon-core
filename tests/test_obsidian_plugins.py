@@ -16,16 +16,19 @@ from woon_core.calendar.projection import (
 from woon_core.errors import WoonError
 from woon_core.knowledge import obsidian_plugins
 from woon_core.knowledge.obsidian_plugins import (
-    CONTEXT_CALENDAR_ID,
-    CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS,
-    CONTEXT_CALENDAR_PROFILE_ID,
-    CONTEXT_CALENDAR_PROPERTY_FIELDS,
-    CONTEXT_CALENDAR_SOURCE,
-    CONTEXT_CALENDAR_VERSION,
-    CONTEXT_GRAPH_ID,
+    LINK_CALENDAR_ID,
+    LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS,
+    LINK_CALENDAR_PROFILE_ID,
+    LINK_CALENDAR_PROPERTY_FIELDS,
+    LINK_CALENDAR_SOURCE,
+    LINK_CALENDAR_VERSION,
+    LINKED_GRAPH_ID,
     FULL_CALENDAR_REMASTERED_ID,
     FULL_CALENDAR_SOURCE_COLOR,
+    LEGACY_CONTEXT_CALENDAR_ID,
+    LEGACY_CONTEXT_GRAPH_ID,
     LEGACY_SIMPLE_CALENDAR_ID,
+    LINKED_GRAPH_VERSION,
     NOTION_BASES_ID,
     PRISMA_CALENDAR_EVENTS_DIRECTORY,
     PRISMA_CALENDAR_ID,
@@ -125,8 +128,8 @@ type: calendar
     events.chmod(0o500)
 
 
-def _write_core_context_calendar_projection(vault: Path) -> None:
-    events = vault / CONTEXT_CALENDAR_SOURCE
+def _write_core_link_calendar_projection(vault: Path) -> None:
+    events = vault / LINK_CALENDAR_SOURCE
     events.mkdir(parents=True)
     (events / "일정.md").write_text(
         """---
@@ -157,10 +160,10 @@ access: local-only
 status: Generated
 source: apple-calendar-readonly
 woon_projection: apple-calendar-dashboard
-cssclasses: context-calendar-dashboard
+cssclasses: link-calendar-dashboard
 ---
 
-```context-calendar
+```link-calendar
 profile: woon-apple-calendar
 ```
 """,
@@ -175,7 +178,7 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
     vault = _vault(tmp_path)
     releases: dict[str, bytes] = {}
     for plugin_id, version, repository in (
-        (CONTEXT_GRAPH_ID, "0.5.6", "woonyong-kr/linked-canvas"),
+        (LINKED_GRAPH_ID, "0.5.6", "woonyong-kr/linked-graph"),
         ("light-mindmap", "1.5.0", "ninglg/light-mindmap"),
         ("markdown-mindmap", "1.4.2", "kikocastro/markdown-mindmap"),
         (PRISMA_CALENDAR_ID, "2.22.0", "Real1tyy/Prisma-Calendar"),
@@ -194,7 +197,7 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
 
     receipt = ObsidianPluginService(vault, download=releases.__getitem__).install(
         [
-            CONTEXT_GRAPH_ID,
+            LINKED_GRAPH_ID,
             "light-mindmap",
             "markdown-mindmap",
             PRISMA_CALENDAR_ID,
@@ -203,7 +206,7 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
     )
 
     assert [item["id"] for item in receipt["plugins"]] == [
-        CONTEXT_GRAPH_ID,
+        LINKED_GRAPH_ID,
         "light-mindmap",
         "markdown-mindmap",
         PRISMA_CALENDAR_ID,
@@ -211,7 +214,7 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
     ]
     status = ObsidianPluginService(vault, download=releases.__getitem__).status()
     assert {item["id"] for item in status["plugins"]} == {
-        CONTEXT_GRAPH_ID,
+        LINKED_GRAPH_ID,
         "light-mindmap",
         "markdown-mindmap",
         PRISMA_CALENDAR_ID,
@@ -225,30 +228,30 @@ def test_install_verifies_release_manifest_assets_and_enabled_config(tmp_path: P
 
 def test_official_install_preserves_existing_plugin_settings(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination = vault / ".obsidian/plugins" / LINKED_GRAPH_ID
     destination.mkdir()
     for name, content in {
         "main.js": b"old runtime\n",
-        "manifest.json": json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.5.5"}).encode(),
+        "manifest.json": json.dumps({"id": LINKED_GRAPH_ID, "version": "0.5.5"}).encode(),
         "styles.css": b"old styles\n",
         "data.json": b'{"defaultGraphId":"interview"}\n',
     }.items():
         (destination / name).write_bytes(content)
     release, assets = _release(
-        CONTEXT_GRAPH_ID, "0.5.12", "https://github.com/woonyong-kr/linked-canvas"
+        LINKED_GRAPH_ID, "0.5.12", "https://github.com/woonyong-kr/linked-graph"
     )
     downloads = {
-        "https://api.github.com/repos/woonyong-kr/linked-canvas/releases/latest": json.dumps(
+        "https://api.github.com/repos/woonyong-kr/linked-graph/releases/latest": json.dumps(
             release
         ).encode(),
         **{
-            f"https://github.com/example/{CONTEXT_GRAPH_ID}/{name}": content
+            f"https://github.com/example/{LINKED_GRAPH_ID}/{name}": content
             for name, content in assets.items()
         },
     }
 
     receipt = ObsidianPluginService(vault, download=downloads.__getitem__).install(
-        [CONTEXT_GRAPH_ID]
+        [LINKED_GRAPH_ID]
     )
 
     assert receipt["plugins"][0]["preserved_settings"] == ["data.json"]
@@ -257,12 +260,12 @@ def test_official_install_preserves_existing_plugin_settings(tmp_path: Path) -> 
 
 def test_recover_settings_restores_only_non_runtime_files_from_exact_backup(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination = vault / ".obsidian/plugins" / LINKED_GRAPH_ID
     destination.mkdir()
     for name in ("main.js", "styles.css"):
         (destination / name).write_text("current runtime\n", encoding="utf-8")
     (destination / "manifest.json").write_text(
-        json.dumps({"id": CONTEXT_GRAPH_ID, "name": "Linked Canvas", "version": "0.5.12"}),
+        json.dumps({"id": LINKED_GRAPH_ID, "name": "Linked Graph", "version": "0.5.12"}),
         encoding="utf-8",
     )
     source_receipt_id = "obsidian-plugin-20260824T000000Z-example"
@@ -273,7 +276,7 @@ def test_recover_settings_restores_only_non_runtime_files_from_exact_backup(tmp_
             {
                 "receipt_id": source_receipt_id,
                 "action": "install",
-                "plugins": [{"id": CONTEXT_GRAPH_ID}],
+                "plugins": [{"id": LINKED_GRAPH_ID}],
             }
         ),
         encoding="utf-8",
@@ -282,14 +285,14 @@ def test_recover_settings_restores_only_non_runtime_files_from_exact_backup(tmp_
         vault
         / ".local/woon-knowledge/obsidian-plugins/backups"
         / source_receipt_id
-        / CONTEXT_GRAPH_ID
+        / LINKED_GRAPH_ID
     )
     backup.mkdir(parents=True)
     (backup / "main.js").write_text("old runtime\n", encoding="utf-8")
     (backup / "data.json").write_text('{"defaultGraphId":"interview"}\n', encoding="utf-8")
 
     receipt = ObsidianPluginService(vault).recover_settings_from_backup(
-        CONTEXT_GRAPH_ID, source_receipt_id
+        LINKED_GRAPH_ID, source_receipt_id
     )
 
     assert receipt["action"] == "recover-settings"
@@ -369,21 +372,21 @@ def test_install_restores_existing_plugin_if_stage_replace_fails(
 
 
 def _local_context_graph_build(root: Path, version: str = "0.4.1") -> Path:
-    source = root / "context-graph-build"
+    source = root / "linked-graph-build"
     source.mkdir()
     (source / "main.js").write_text("module.exports = { version: 'new' };\n", encoding="utf-8")
     (source / "manifest.json").write_text(
         json.dumps(
             {
-                "id": CONTEXT_GRAPH_ID,
-                "name": "Context Graph",
+                "id": LINKED_GRAPH_ID,
+                "name": "Linked Graph",
                 "version": version,
                 "minAppVersion": "1.8.0",
             }
         ),
         encoding="utf-8",
     )
-    (source / "styles.css").write_text(".context-graph { display: block; }\n", encoding="utf-8")
+    (source / "styles.css").write_text(".linked-graph { display: block; }\n", encoding="utf-8")
     subprocess.run(("git", "init", "-q", str(source)), check=True)
     subprocess.run(("git", "-C", str(source), "config", "user.name", "Woon Test"), check=True)
     subprocess.run(
@@ -398,7 +401,7 @@ def _local_context_graph_build(root: Path, version: str = "0.4.1") -> Path:
             "remote",
             "add",
             "origin",
-            "https://github.com/woonyong-kr/linked-canvas.git",
+            "https://github.com/woonyong-kr/linked-graph.git",
         ),
         check=True,
     )
@@ -407,22 +410,22 @@ def _local_context_graph_build(root: Path, version: str = "0.4.1") -> Path:
     return source
 
 
-def _local_context_calendar_build(root: Path, version: str = CONTEXT_CALENDAR_VERSION) -> Path:
-    source = root / "context-calendar-build"
+def _local_link_calendar_build(root: Path, version: str = LINK_CALENDAR_VERSION) -> Path:
+    source = root / "link-calendar-build"
     source.mkdir()
     (source / "main.js").write_text("module.exports = { version: 'new' };\n", encoding="utf-8")
     (source / "manifest.json").write_text(
         json.dumps(
             {
-                "id": CONTEXT_CALENDAR_ID,
-                "name": "Context Calendar",
+                "id": LINK_CALENDAR_ID,
+                "name": "Link Calendar",
                 "version": version,
                 "minAppVersion": "1.10.0",
             }
         ),
         encoding="utf-8",
     )
-    (source / "styles.css").write_text(".context-calendar { display: block; }\n", encoding="utf-8")
+    (source / "styles.css").write_text(".link-calendar { display: block; }\n", encoding="utf-8")
     subprocess.run(("git", "init", "-q", str(source)), check=True)
     subprocess.run(("git", "-C", str(source), "config", "user.name", "Woon Test"), check=True)
     subprocess.run(
@@ -437,7 +440,7 @@ def _local_context_calendar_build(root: Path, version: str = CONTEXT_CALENDAR_VE
             "remote",
             "add",
             "origin",
-            "https://github.com/woonyong-kr/simple-calendar.git",
+            "https://github.com/woonyong-kr/link-calendar.git",
         ),
         check=True,
     )
@@ -446,39 +449,39 @@ def _local_context_calendar_build(root: Path, version: str = CONTEXT_CALENDAR_VE
     return source
 
 
-def _install_context_calendar(vault: Path, build_root: Path) -> ObsidianPluginService:
+def _install_link_calendar(vault: Path, build_root: Path) -> ObsidianPluginService:
     service = ObsidianPluginService(vault)
     service.install_local_build(
-        CONTEXT_CALENDAR_ID,
-        _local_context_calendar_build(build_root),
-        CONTEXT_CALENDAR_VERSION,
+        LINK_CALENDAR_ID,
+        _local_link_calendar_build(build_root),
+        LINK_CALENDAR_VERSION,
     )
     return service
 
 
-def _attest_context_calendar_runtime(service: ObsidianPluginService) -> dict[str, object]:
-    return service.attest_context_calendar_runtime(list(CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS))
+def _attest_link_calendar_runtime(service: ObsidianPluginService) -> dict[str, object]:
+    return service.attest_link_calendar_runtime(list(LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS))
 
 
 def test_install_local_build_preserves_settings_backup_hashes_and_enabled_config(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination = vault / ".obsidian/plugins" / LINKED_GRAPH_ID
     destination.mkdir()
     (destination / "main.js").write_text("old runtime\n", encoding="utf-8")
     (destination / "manifest.json").write_text(
-        json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
+        json.dumps({"id": LINKED_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
     )
     (destination / "styles.css").write_text("old styles\n", encoding="utf-8")
     settings = b'{"defaultGraphId":"interview"}\n'
     (destination / "data.json").write_bytes(settings)
     source = _local_context_graph_build(tmp_path)
 
-    receipt = ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+    receipt = ObsidianPluginService(vault).install_local_build(LINKED_GRAPH_ID, source, "0.4.1")
 
     assert receipt["action"] == "install-local-build"
-    assert receipt["plugin"]["id"] == CONTEXT_GRAPH_ID
+    assert receipt["plugin"]["id"] == LINKED_GRAPH_ID
     assert receipt["plugin"]["version"] == "0.4.1"
     assert receipt["plugin"]["preserved_settings"] == ["data.json"]
     assert (
@@ -489,7 +492,7 @@ def test_install_local_build_preserves_settings_backup_hashes_and_enabled_config
     assert (destination / "data.json").read_bytes() == settings
     backup = vault / str(receipt["backup"])
     assert (backup / "main.js").read_text(encoding="utf-8") == "old runtime\n"
-    assert CONTEXT_GRAPH_ID in json.loads(
+    assert LINKED_GRAPH_ID in json.loads(
         (vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")
     )
     assert list((vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json"))
@@ -499,7 +502,7 @@ def test_install_local_build_keeps_plugin_runtime_state_user_only(tmp_path: Path
     vault = _vault(tmp_path)
     source = _local_context_graph_build(tmp_path)
 
-    ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+    ObsidianPluginService(vault).install_local_build(LINKED_GRAPH_ID, source, "0.4.1")
 
     runtime = vault / ".local/woon-knowledge/obsidian-plugins"
     for path in (runtime, *runtime.rglob("*")):
@@ -514,9 +517,9 @@ def test_install_local_build_rejects_a_version_mismatch_before_mutating_the_vaul
     source = _local_context_graph_build(tmp_path, version="0.4.0")
 
     with pytest.raises(WoonError, match="version does not match"):
-        ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+        ObsidianPluginService(vault).install_local_build(LINKED_GRAPH_ID, source, "0.4.1")
 
-    assert not (vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID).exists()
+    assert not (vault / ".obsidian/plugins" / LINKED_GRAPH_ID).exists()
     assert json.loads((vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")) == [
         "homepage"
     ]
@@ -526,11 +529,11 @@ def test_install_local_build_preserves_destination_when_preflight_rejects_settin
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    destination = vault / ".obsidian/plugins" / CONTEXT_CALENDAR_ID
+    destination = vault / ".obsidian/plugins" / LINK_CALENDAR_ID
     destination.mkdir()
     (destination / "main.js").write_text("old runtime\n", encoding="utf-8")
     (destination / "manifest.json").write_text(
-        json.dumps({"id": CONTEXT_CALENDAR_ID, "version": "1.0.0"}), encoding="utf-8"
+        json.dumps({"id": LINK_CALENDAR_ID, "version": "1.0.0"}), encoding="utf-8"
     )
     (destination / "styles.css").write_text("old styles\n", encoding="utf-8")
     nested_settings = destination / "nested-settings"
@@ -540,9 +543,9 @@ def test_install_local_build_preserves_destination_when_preflight_rejects_settin
 
     with pytest.raises(WoonError, match="unsupported settings entry"):
         ObsidianPluginService(vault).install_local_build(
-            CONTEXT_CALENDAR_ID,
-            _local_context_calendar_build(tmp_path),
-            CONTEXT_CALENDAR_VERSION,
+            LINK_CALENDAR_ID,
+            _local_link_calendar_build(tmp_path),
+            LINK_CALENDAR_VERSION,
         )
 
     assert (destination / "main.js").read_text(encoding="utf-8") == "old runtime\n"
@@ -550,35 +553,35 @@ def test_install_local_build_preserves_destination_when_preflight_rejects_settin
     assert (vault / ".obsidian/community-plugins.json").read_bytes() == enabled_before
 
 
-def test_install_local_build_accepts_context_calendar_at_the_pinned_version(
+def test_install_local_build_accepts_link_calendar_at_the_pinned_version(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
 
     receipt = ObsidianPluginService(vault).install_local_build(
-        CONTEXT_CALENDAR_ID,
-        _local_context_calendar_build(tmp_path),
-        CONTEXT_CALENDAR_VERSION,
+        LINK_CALENDAR_ID,
+        _local_link_calendar_build(tmp_path),
+        LINK_CALENDAR_VERSION,
     )
 
-    assert receipt["plugin"]["id"] == CONTEXT_CALENDAR_ID
-    assert receipt["plugin"]["version"] == CONTEXT_CALENDAR_VERSION
+    assert receipt["plugin"]["id"] == LINK_CALENDAR_ID
+    assert receipt["plugin"]["version"] == LINK_CALENDAR_VERSION
     assert receipt["plugin"]["source"]["repository"] == (
-        "https://github.com/woonyong-kr/simple-calendar.git"
+        "https://github.com/woonyong-kr/link-calendar.git"
     )
     assert len(receipt["plugin"]["source"]["head_commit"]) == 40
     assert receipt["plugin"]["source"]["clean"] is True
-    assert CONTEXT_CALENDAR_ID in json.loads(
+    assert LINK_CALENDAR_ID in json.loads(
         (vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")
     )
 
 
 @pytest.mark.parametrize("failure", ["dirty", "wrong-origin", "not-git"])
-def test_context_calendar_local_build_requires_approved_clean_git_provenance(
+def test_link_calendar_local_build_requires_approved_clean_git_provenance(
     tmp_path: Path, failure: str
 ) -> None:
     vault = _vault(tmp_path)
-    source = _local_context_calendar_build(tmp_path)
+    source = _local_link_calendar_build(tmp_path)
     if failure == "dirty":
         (source / "main.js").write_text("dirty runtime\n", encoding="utf-8")
         expected = "must be clean"
@@ -594,19 +597,19 @@ def test_context_calendar_local_build_requires_approved_clean_git_provenance(
 
     with pytest.raises(WoonError, match=expected):
         ObsidianPluginService(vault).install_local_build(
-            CONTEXT_CALENDAR_ID,
+            LINK_CALENDAR_ID,
             source,
-            CONTEXT_CALENDAR_VERSION,
+            LINK_CALENDAR_VERSION,
         )
 
-    assert not (vault / ".obsidian/plugins" / CONTEXT_CALENDAR_ID).exists()
+    assert not (vault / ".obsidian/plugins" / LINK_CALENDAR_ID).exists()
 
 
-def test_context_calendar_git_origin_accepts_the_normalized_url_without_git_suffix(
+def test_link_calendar_git_origin_accepts_the_normalized_url_without_git_suffix(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    source = _local_context_calendar_build(tmp_path)
+    source = _local_link_calendar_build(tmp_path)
     subprocess.run(
         (
             "git",
@@ -615,18 +618,18 @@ def test_context_calendar_git_origin_accepts_the_normalized_url_without_git_suff
             "remote",
             "set-url",
             "origin",
-            "https://github.com/woonyong-kr/simple-calendar",
+            "https://github.com/woonyong-kr/link-calendar",
         ),
         check=True,
     )
 
     receipt = ObsidianPluginService(vault).install_local_build(
-        CONTEXT_CALENDAR_ID,
+        LINK_CALENDAR_ID,
         source,
-        CONTEXT_CALENDAR_VERSION,
+        LINK_CALENDAR_VERSION,
     )
 
-    assert receipt["plugin"]["source"]["repository"].endswith("simple-calendar.git")
+    assert receipt["plugin"]["source"]["repository"].endswith("link-calendar.git")
 
 
 @pytest.mark.parametrize("failure", ["dirty", "wrong-origin", "not-git"])
@@ -649,9 +652,9 @@ def test_context_graph_local_build_requires_approved_clean_git_provenance(
         expected = "Git provenance is invalid"
 
     with pytest.raises(WoonError, match=expected):
-        ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+        ObsidianPluginService(vault).install_local_build(LINKED_GRAPH_ID, source, "0.4.1")
 
-    assert not (vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID).exists()
+    assert not (vault / ".obsidian/plugins" / LINKED_GRAPH_ID).exists()
 
 
 @pytest.mark.parametrize("linked_root", ["obsidian", "plugins", "local", "receipts"])
@@ -680,12 +683,12 @@ def test_plugin_mutations_reject_control_path_symlinks_before_lock_or_write(
 
     with pytest.raises(WoonError, match="regular Vault directory"):
         ObsidianPluginService(vault).install_local_build(
-            CONTEXT_GRAPH_ID,
+            LINKED_GRAPH_ID,
             _local_context_graph_build(tmp_path),
             "0.4.1",
         )
 
-    assert not (outside / CONTEXT_GRAPH_ID).exists()
+    assert not (outside / LINKED_GRAPH_ID).exists()
     assert not (outside / "woon-knowledge/obsidian-plugins/mutation.lock").exists()
     assert not (vault / ".local/woon-knowledge/obsidian-plugins/mutation.lock").exists()
 
@@ -694,11 +697,11 @@ def test_install_local_build_restores_runtime_settings_and_enabled_config_on_fai
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = _vault(tmp_path)
-    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination = vault / ".obsidian/plugins" / LINKED_GRAPH_ID
     destination.mkdir()
     (destination / "main.js").write_text("old runtime\n", encoding="utf-8")
     (destination / "manifest.json").write_text(
-        json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
+        json.dumps({"id": LINKED_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
     )
     (destination / "styles.css").write_text("old styles\n", encoding="utf-8")
     (destination / "data.json").write_text('{"kept":true}\n', encoding="utf-8")
@@ -712,7 +715,7 @@ def test_install_local_build_restores_runtime_settings_and_enabled_config_on_fai
     monkeypatch.setattr(service, "_write_enabled_ids", fail_enabled_write)
 
     with pytest.raises(OSError, match="simulated enabled config failure"):
-        service.install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+        service.install_local_build(LINKED_GRAPH_ID, source, "0.4.1")
 
     assert (destination / "main.js").read_text(encoding="utf-8") == "old runtime\n"
     assert (destination / "data.json").read_text(encoding="utf-8") == '{"kept":true}\n'
@@ -723,11 +726,11 @@ def test_install_local_build_rolls_back_if_receipt_cannot_be_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = _vault(tmp_path)
-    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination = vault / ".obsidian/plugins" / LINKED_GRAPH_ID
     destination.mkdir()
     (destination / "main.js").write_text("old runtime\n", encoding="utf-8")
     (destination / "manifest.json").write_text(
-        json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
+        json.dumps({"id": LINKED_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
     )
     (destination / "styles.css").write_text("old styles\n", encoding="utf-8")
     (destination / "data.json").write_text('{"kept":true}\n', encoding="utf-8")
@@ -743,7 +746,7 @@ def test_install_local_build_rolls_back_if_receipt_cannot_be_written(
     monkeypatch.setattr(obsidian_plugins, "_atomic_write", fail_receipt_write)
 
     with pytest.raises(OSError, match="simulated receipt failure"):
-        ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+        ObsidianPluginService(vault).install_local_build(LINKED_GRAPH_ID, source, "0.4.1")
 
     assert (destination / "main.js").read_text(encoding="utf-8") == "old runtime\n"
     assert (destination / "data.json").read_text(encoding="utf-8") == '{"kept":true}\n'
@@ -754,11 +757,11 @@ def test_install_local_build_refuses_destructive_rollback_after_plugin_tree_drif
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = _vault(tmp_path)
-    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination = vault / ".obsidian/plugins" / LINKED_GRAPH_ID
     destination.mkdir()
     (destination / "main.js").write_text("old runtime\n", encoding="utf-8")
     (destination / "manifest.json").write_text(
-        json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
+        json.dumps({"id": LINKED_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
     )
     (destination / "styles.css").write_text("old styles\n", encoding="utf-8")
     atomic_write = obsidian_plugins._atomic_write
@@ -773,7 +776,7 @@ def test_install_local_build_refuses_destructive_rollback_after_plugin_tree_drif
 
     with pytest.raises(WoonError, match="destructive rollback refused"):
         ObsidianPluginService(vault).install_local_build(
-            CONTEXT_GRAPH_ID,
+            LINKED_GRAPH_ID,
             _local_context_graph_build(tmp_path),
             "0.4.1",
         )
@@ -786,11 +789,11 @@ def test_install_local_build_preserves_concurrent_enabled_config_during_rollback
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = _vault(tmp_path)
-    destination = vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID
+    destination = vault / ".obsidian/plugins" / LINKED_GRAPH_ID
     destination.mkdir()
     (destination / "main.js").write_text("old runtime\n", encoding="utf-8")
     (destination / "manifest.json").write_text(
-        json.dumps({"id": CONTEXT_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
+        json.dumps({"id": LINKED_GRAPH_ID, "version": "0.4.0"}), encoding="utf-8"
     )
     (destination / "styles.css").write_text("old styles\n", encoding="utf-8")
     enabled_path = vault / ".obsidian/community-plugins.json"
@@ -807,7 +810,7 @@ def test_install_local_build_preserves_concurrent_enabled_config_during_rollback
 
     with pytest.raises(WoonError, match="rollback refused"):
         ObsidianPluginService(vault).install_local_build(
-            CONTEXT_GRAPH_ID,
+            LINKED_GRAPH_ID,
             _local_context_graph_build(tmp_path),
             "0.4.1",
         )
@@ -969,13 +972,13 @@ def test_configure_notion_bases_requires_the_core_owned_month_projection(tmp_pat
     assert receipt["projection_write"] == "core-only"
 
 
-def test_configure_context_calendar_preserves_user_settings_and_receipts_readonly_profile(
+def test_configure_link_calendar_preserves_user_settings_and_receipts_readonly_profile(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    settings = vault / ".obsidian/plugins" / CONTEXT_CALENDAR_ID / "data.json"
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
     settings.write_text(
         json.dumps(
             {
@@ -996,26 +999,26 @@ def test_configure_context_calendar_preserves_user_settings_and_receipts_readonl
     )
     settings_before = settings.read_bytes()
 
-    receipt = service.configure_context_calendar()
+    receipt = service.configure_link_calendar()
     configured = json.loads(settings.read_text(encoding="utf-8"))
 
-    assert receipt["action"] == "configure-context-calendar"
+    assert receipt["action"] == "configure-link-calendar"
     assert receipt["plugin"] == {
-        "id": CONTEXT_CALENDAR_ID,
-        "version": CONTEXT_CALENDAR_VERSION,
+        "id": LINK_CALENDAR_ID,
+        "version": LINK_CALENDAR_VERSION,
     }
     assert receipt["source_profile"] == {
-        "id": CONTEXT_CALENDAR_PROFILE_ID,
+        "id": LINK_CALENDAR_PROFILE_ID,
         "name": "Apple Calendar",
         "enabled": True,
         "source": {
             "type": "folder",
-            "path": CONTEXT_CALENDAR_SOURCE,
+            "path": LINK_CALENDAR_SOURCE,
             "recursive": False,
             "tag": "",
         },
         "editable": False,
-        "properties": dict(CONTEXT_CALENDAR_PROPERTY_FIELDS),
+        "properties": dict(LINK_CALENDAR_PROPERTY_FIELDS),
     }
     assert configured["locale"] == "ko"
     assert configured["sourceProfiles"][0]["id"] == "personal-notes"
@@ -1026,13 +1029,58 @@ def test_configure_context_calendar_preserves_user_settings_and_receipts_readonl
     assert receipt["settings"]["sha256"] == hashlib.sha256(settings.read_bytes()).hexdigest()
 
 
+def test_configure_link_calendar_migrates_legacy_context_calendar_settings_once(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    legacy = vault / ".obsidian/plugins" / LEGACY_CONTEXT_CALENDAR_ID
+    legacy.mkdir()
+    legacy_settings = legacy / "data.json"
+    legacy_settings.write_text(
+        json.dumps(
+            {
+                "locale": "ko",
+                "showContext": False,
+                "sourceProfiles": [
+                    {
+                        "id": "personal-notes",
+                        "name": "Personal notes",
+                        "enabled": True,
+                        "source": {"type": "folder", "path": "notes", "recursive": True},
+                        "editable": True,
+                        "properties": {"start": "date", "title": "title"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_before = legacy_settings.read_bytes()
+
+    receipt = service.configure_link_calendar()
+    configured_path = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
+    configured = json.loads(configured_path.read_text(encoding="utf-8"))
+
+    assert configured["locale"] == "ko"
+    assert configured["showAgenda"] is False
+    assert "showContext" not in configured
+    assert configured["sourceProfiles"][0]["id"] == "personal-notes"
+    assert receipt["settings"]["migrated_from"] == {
+        "path": ".obsidian/plugins/context-calendar/data.json",
+        "sha256": hashlib.sha256(legacy_before).hexdigest(),
+    }
+    assert legacy_settings.read_bytes() == legacy_before
+
+
 @pytest.mark.parametrize("linked_path", ["directory", "dashboard", "event"])
-def test_configure_context_calendar_rejects_symlinked_projection_paths(
+def test_configure_link_calendar_rejects_symlinked_projection_paths(
     tmp_path: Path, linked_path: str
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
-    events = vault / CONTEXT_CALENDAR_SOURCE
+    _write_core_link_calendar_projection(vault)
+    events = vault / LINK_CALENDAR_SOURCE
     dashboard = vault / "inbox/calendar/apple-calendar.md"
     if linked_path == "directory":
         outside = tmp_path / "outside-events"
@@ -1050,11 +1098,11 @@ def test_configure_context_calendar_rejects_symlinked_projection_paths(
         os.replace(event, outside)
         event.symlink_to(outside)
         events.chmod(0o500)
-    service = _install_context_calendar(vault, tmp_path)
+    service = _install_link_calendar(vault, tmp_path)
 
     try:
         with pytest.raises(WoonError, match="regular Vault"):
-            service.configure_context_calendar()
+            service.configure_link_calendar()
     finally:
         if events.is_symlink():
             events.unlink()
@@ -1074,40 +1122,40 @@ def test_configure_context_calendar_rejects_symlinked_projection_paths(
             outside.chmod(0o600)
 
 
-def test_configure_context_calendar_restores_settings_when_receipt_write_fails(
+def test_configure_link_calendar_restores_settings_when_receipt_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    settings = vault / ".obsidian/plugins" / CONTEXT_CALENDAR_ID / "data.json"
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
     settings_before = b'{"locale":"en"}\n'
     settings.write_bytes(settings_before)
     original_atomic_write = obsidian_plugins._atomic_write
 
     def fail_receipt(path: Path, content: bytes) -> None:
-        if path.parent.name == "receipts" and b'"configure-context-calendar"' in content:
+        if path.parent.name == "receipts" and b'"configure-link-calendar"' in content:
             raise OSError("simulated receipt failure")
         original_atomic_write(path, content)
 
     monkeypatch.setattr(obsidian_plugins, "_atomic_write", fail_receipt)
 
     with pytest.raises(OSError, match="simulated receipt failure"):
-        service.configure_context_calendar()
+        service.configure_link_calendar()
 
     assert settings.read_bytes() == settings_before
 
 
-def test_configure_context_calendar_rejects_concurrent_settings_drift_without_overwriting(
+def test_configure_link_calendar_rejects_concurrent_settings_drift_without_overwriting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    settings = vault / ".obsidian/plugins" / CONTEXT_CALENDAR_ID / "data.json"
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
     settings.write_text('{"locale":"en"}\n', encoding="utf-8")
     concurrent = b'{"locale":"ko","changedBy":"Obsidian"}\n'
-    original_configuration = obsidian_plugins._context_calendar_configuration
+    original_configuration = obsidian_plugins._link_calendar_configuration
 
     def drift_after_read(existing: dict[str, object]) -> dict[str, object]:
         configuration = original_configuration(existing)
@@ -1116,43 +1164,43 @@ def test_configure_context_calendar_rejects_concurrent_settings_drift_without_ov
 
     monkeypatch.setattr(
         obsidian_plugins,
-        "_context_calendar_configuration",
+        "_link_calendar_configuration",
         drift_after_read,
     )
 
     with pytest.raises(WoonError, match="changed concurrently"):
-        service.configure_context_calendar()
+        service.configure_link_calendar()
 
     assert settings.read_bytes() == concurrent
 
 
-def test_configure_context_calendar_requires_enabled_verified_local_build(
+def test_configure_link_calendar_requires_enabled_verified_local_build(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
     (vault / ".obsidian/community-plugins.json").write_text('["homepage"]\n', encoding="utf-8")
 
     with pytest.raises(WoonError, match="must be enabled"):
-        service.configure_context_calendar()
+        service.configure_link_calendar()
 
     (vault / ".obsidian/community-plugins.json").write_text(
-        json.dumps(["homepage", CONTEXT_CALENDAR_ID]), encoding="utf-8"
+        json.dumps(["homepage", LINK_CALENDAR_ID]), encoding="utf-8"
     )
     for receipt in (vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json"):
         receipt.unlink()
 
     with pytest.raises(WoonError, match="verified local-build adapter"):
-        service.configure_context_calendar()
+        service.configure_link_calendar()
 
 
-def test_context_calendar_static_gate_rejects_install_receipt_without_git_provenance(
+def test_link_calendar_static_gate_rejects_install_receipt_without_git_provenance(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
     receipt_root = vault / ".local/woon-knowledge/obsidian-plugins/receipts"
     install_receipt = next(
         path
@@ -1164,20 +1212,20 @@ def test_context_calendar_static_gate_rejects_install_receipt_without_git_proven
     install_receipt.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(WoonError, match="verified local-build adapter"):
-        service.configure_context_calendar()
+        service.configure_link_calendar()
 
 
-def test_configure_context_calendar_is_deterministic_and_does_not_duplicate_profile(
+def test_configure_link_calendar_is_deterministic_and_does_not_duplicate_profile(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    settings = vault / ".obsidian/plugins" / CONTEXT_CALENDAR_ID / "data.json"
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
 
-    service.configure_context_calendar()
+    service.configure_link_calendar()
     first = settings.read_bytes()
-    service.configure_context_calendar()
+    service.configure_link_calendar()
     second = settings.read_bytes()
     configuration = json.loads(second)
 
@@ -1185,53 +1233,53 @@ def test_configure_context_calendar_is_deterministic_and_does_not_duplicate_prof
     assert [
         profile["id"]
         for profile in configuration["sourceProfiles"]
-        if profile["id"] == CONTEXT_CALENDAR_PROFILE_ID
-    ] == [CONTEXT_CALENDAR_PROFILE_ID]
+        if profile["id"] == LINK_CALENDAR_PROFILE_ID
+    ] == [LINK_CALENDAR_PROFILE_ID]
 
 
-def test_configure_context_calendar_rejects_an_unapproved_local_version(tmp_path: Path) -> None:
+def test_configure_link_calendar_rejects_an_unapproved_local_version(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
+    _write_core_link_calendar_projection(vault)
     ObsidianPluginService(vault).install_local_build(
-        CONTEXT_CALENDAR_ID,
-        _local_context_calendar_build(tmp_path, version="2.0.4"),
+        LINK_CALENDAR_ID,
+        _local_link_calendar_build(tmp_path, version="2.0.4"),
         "2.0.4",
     )
 
     with pytest.raises(WoonError, match="version must match"):
-        ObsidianPluginService(vault).configure_context_calendar()
+        ObsidianPluginService(vault).configure_link_calendar()
 
 
-def test_attest_context_calendar_runtime_requires_complete_explicit_checklist(
+def test_attest_link_calendar_runtime_requires_complete_explicit_checklist(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    service.configure_context_calendar()
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
 
     with pytest.raises(WoonError, match="complete UI checklist"):
-        service.attest_context_calendar_runtime(["ribbon", "month-view"])
+        service.attest_link_calendar_runtime(["ribbon", "month-view"])
 
     assert not any(
         json.loads(path.read_text(encoding="utf-8")).get("action")
-        == "attest-context-calendar-runtime"
+        == "attest-link-calendar-runtime"
         for path in (vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json")
     )
 
 
-def test_attest_context_calendar_runtime_receipt_binds_current_static_evidence(
+def test_attest_link_calendar_runtime_receipt_binds_current_static_evidence(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    service.configure_context_calendar()
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
 
-    receipt = _attest_context_calendar_runtime(service)
+    receipt = _attest_link_calendar_runtime(service)
 
-    assert receipt["action"] == "attest-context-calendar-runtime"
-    assert receipt["operator_attested_checks"] == list(CONTEXT_CALENDAR_MANUAL_ATTESTATION_CHECKS)
+    assert receipt["action"] == "attest-link-calendar-runtime"
+    assert receipt["operator_attested_checks"] == list(LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS)
     assert receipt["attestation"] == "manual-operator-confirmation-after-Obsidian-reload"
     assert receipt["plugin"]["assets_sha256"]
     assert receipt["settings"]["sha256"]
@@ -1247,12 +1295,14 @@ def test_retire_legacy_simple_calendar_requires_manual_runtime_attestation(
     (legacy / "manifest.json").write_text(
         json.dumps({"id": LEGACY_SIMPLE_CALENDAR_ID, "version": "1.1.1"}), encoding="utf-8"
     )
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    service.configure_context_calendar()
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
 
     with pytest.raises(WoonError, match="manual operator attestation after reload"):
         service.retire([LEGACY_SIMPLE_CALENDAR_ID])
+
+    assert legacy.is_dir()
 
     assert legacy.is_dir()
 
@@ -1264,10 +1314,10 @@ def test_retire_rejects_stale_runtime_receipt_after_dashboard_changes(tmp_path: 
     (legacy / "manifest.json").write_text(
         json.dumps({"id": LEGACY_SIMPLE_CALENDAR_ID, "version": "1.1.1"}), encoding="utf-8"
     )
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    service.configure_context_calendar()
-    _attest_context_calendar_runtime(service)
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
+    _attest_link_calendar_runtime(service)
     dashboard = vault / "inbox/calendar/apple-calendar.md"
     dashboard.chmod(0o600)
     dashboard.write_text(dashboard.read_text(encoding="utf-8") + "\n", encoding="utf-8")
@@ -1276,10 +1326,50 @@ def test_retire_rejects_stale_runtime_receipt_after_dashboard_changes(tmp_path: 
     with pytest.raises(WoonError, match="manual operator attestation after reload"):
         service.retire([LEGACY_SIMPLE_CALENDAR_ID])
 
+
+def test_retire_context_graph_requires_receipted_linked_graph(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    legacy = vault / ".obsidian/plugins" / LEGACY_CONTEXT_GRAPH_ID
+    legacy.mkdir()
+    (legacy / "manifest.json").write_text(
+        json.dumps({"id": LEGACY_CONTEXT_GRAPH_ID, "version": "0.5.14"}), encoding="utf-8"
+    )
+
+    with pytest.raises(WoonError, match="linked-graph"):
+        ObsidianPluginService(vault).retire([LEGACY_CONTEXT_GRAPH_ID])
+
     assert legacy.is_dir()
 
 
-def test_retire_notion_bases_requires_context_calendar_projection_and_plugin(
+def test_retire_context_graph_keeps_backup_after_linked_graph_validates(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    legacy = vault / ".obsidian/plugins" / LEGACY_CONTEXT_GRAPH_ID
+    legacy.mkdir()
+    (legacy / "manifest.json").write_text(
+        json.dumps({"id": LEGACY_CONTEXT_GRAPH_ID, "version": "0.5.14"}), encoding="utf-8"
+    )
+    (legacy / "main.js").write_text("legacy runtime\n", encoding="utf-8")
+    service = ObsidianPluginService(vault)
+    service.install_local_build(
+        LINKED_GRAPH_ID,
+        _local_context_graph_build(tmp_path, version=LINKED_GRAPH_VERSION),
+        LINKED_GRAPH_VERSION,
+    )
+
+    receipt = service.retire([LEGACY_CONTEXT_GRAPH_ID])
+
+    assert receipt["retired"] == [LEGACY_CONTEXT_GRAPH_ID]
+    assert not legacy.exists()
+    backup = (
+        vault
+        / ".local/woon-knowledge/obsidian-plugins/backups"
+        / receipt["receipt_id"]
+        / LEGACY_CONTEXT_GRAPH_ID
+    )
+    assert (backup / "main.js").read_text(encoding="utf-8") == "legacy runtime\n"
+
+
+def test_retire_notion_bases_requires_link_calendar_projection_and_plugin(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
@@ -1292,11 +1382,11 @@ def test_retire_notion_bases_requires_context_calendar_projection_and_plugin(
         json.dumps([NOTION_BASES_ID]), encoding="utf-8"
     )
 
-    with pytest.raises(WoonError, match="Context Calendar source directory"):
+    with pytest.raises(WoonError, match="Link Calendar source directory"):
         ObsidianPluginService(vault).retire([NOTION_BASES_ID])
 
 
-def test_retire_notion_bases_keeps_a_backup_after_context_calendar_validates(
+def test_retire_notion_bases_keeps_a_backup_after_link_calendar_validates(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
@@ -1305,10 +1395,10 @@ def test_retire_notion_bases_keeps_a_backup_after_context_calendar_validates(
     (notion_bases / "manifest.json").write_text(
         json.dumps({"id": NOTION_BASES_ID, "version": "1.12.0"}), encoding="utf-8"
     )
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    service.configure_context_calendar()
-    _attest_context_calendar_runtime(service)
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
+    _attest_link_calendar_runtime(service)
 
     receipt = service.retire([NOTION_BASES_ID])
 
@@ -1317,7 +1407,7 @@ def test_retire_notion_bases_keeps_a_backup_after_context_calendar_validates(
     assert list((vault / ".local/woon-knowledge/obsidian-plugins/backups").rglob(NOTION_BASES_ID))
 
 
-def test_retire_legacy_simple_calendar_requires_verified_context_calendar(
+def test_retire_legacy_simple_calendar_requires_verified_link_calendar(
     tmp_path: Path,
 ) -> None:
     vault = _vault(tmp_path)
@@ -1327,7 +1417,7 @@ def test_retire_legacy_simple_calendar_requires_verified_context_calendar(
         json.dumps({"id": LEGACY_SIMPLE_CALENDAR_ID, "version": "1.1.1"}), encoding="utf-8"
     )
 
-    with pytest.raises(WoonError, match="Context Calendar source directory"):
+    with pytest.raises(WoonError, match="Link Calendar source directory"):
         ObsidianPluginService(vault).retire([LEGACY_SIMPLE_CALENDAR_ID])
 
     assert legacy.is_dir()
@@ -1342,11 +1432,11 @@ def test_retire_legacy_simple_calendar_rejects_settings_drift_after_configuratio
     (legacy / "manifest.json").write_text(
         json.dumps({"id": LEGACY_SIMPLE_CALENDAR_ID, "version": "1.1.1"}), encoding="utf-8"
     )
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    service.configure_context_calendar()
-    _attest_context_calendar_runtime(service)
-    settings = vault / ".obsidian/plugins" / CONTEXT_CALENDAR_ID / "data.json"
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
+    _attest_link_calendar_runtime(service)
+    settings = vault / ".obsidian/plugins" / LINK_CALENDAR_ID / "data.json"
     configuration = json.loads(settings.read_text(encoding="utf-8"))
     configuration["sourceProfiles"][-1]["editable"] = True
     settings.write_text(json.dumps(configuration), encoding="utf-8")
@@ -1369,10 +1459,10 @@ def test_retire_legacy_simple_calendar_keeps_backup_after_all_guards_pass(
     (vault / ".obsidian/community-plugins.json").write_text(
         json.dumps(["homepage", LEGACY_SIMPLE_CALENDAR_ID]), encoding="utf-8"
     )
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    service.configure_context_calendar()
-    _attest_context_calendar_runtime(service)
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
+    _attest_link_calendar_runtime(service)
 
     receipt = service.retire([LEGACY_SIMPLE_CALENDAR_ID])
 
@@ -1386,6 +1476,35 @@ def test_retire_legacy_simple_calendar_keeps_backup_after_all_guards_pass(
     )
 
 
+def test_retire_context_calendar_keeps_backup_after_link_calendar_is_verified(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    legacy = vault / ".obsidian/plugins" / LEGACY_CONTEXT_CALENDAR_ID
+    legacy.mkdir()
+    (legacy / "manifest.json").write_text(
+        json.dumps({"id": LEGACY_CONTEXT_CALENDAR_ID, "version": "2.1.3"}), encoding="utf-8"
+    )
+    (legacy / "data.json").write_text('{"showContext":true}\n', encoding="utf-8")
+    (vault / ".obsidian/community-plugins.json").write_text(
+        json.dumps(["homepage", LEGACY_CONTEXT_CALENDAR_ID]), encoding="utf-8"
+    )
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
+    _attest_link_calendar_runtime(service)
+
+    receipt = service.retire([LEGACY_CONTEXT_CALENDAR_ID])
+
+    assert receipt["retired"] == [LEGACY_CONTEXT_CALENDAR_ID]
+    assert not legacy.exists()
+    assert LEGACY_CONTEXT_CALENDAR_ID not in json.loads(
+        (vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")
+    )
+    backup_root = vault / ".local/woon-knowledge/obsidian-plugins/backups"
+    assert list(backup_root.rglob(LEGACY_CONTEXT_CALENDAR_ID))
+
+
 def test_retire_rolls_back_plugin_and_enabled_config_when_receipt_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1396,10 +1515,10 @@ def test_retire_rolls_back_plugin_and_enabled_config_when_receipt_write_fails(
     (legacy / "manifest.json").write_text(manifest, encoding="utf-8")
     enabled_path = vault / ".obsidian/community-plugins.json"
     enabled_path.write_text(json.dumps(["homepage", LEGACY_SIMPLE_CALENDAR_ID]), encoding="utf-8")
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    service.configure_context_calendar()
-    _attest_context_calendar_runtime(service)
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
+    _attest_link_calendar_runtime(service)
     enabled_before = enabled_path.read_bytes()
     atomic_write = obsidian_plugins._atomic_write
 
@@ -1430,10 +1549,10 @@ def test_retire_rejects_a_directory_whose_manifest_id_does_not_match(
     (legacy / "manifest.json").write_text(
         json.dumps({"id": "unrelated-plugin", "version": "1.0.0"}), encoding="utf-8"
     )
-    _write_core_context_calendar_projection(vault)
-    service = _install_context_calendar(vault, tmp_path)
-    service.configure_context_calendar()
-    _attest_context_calendar_runtime(service)
+    _write_core_link_calendar_projection(vault)
+    service = _install_link_calendar(vault, tmp_path)
+    service.configure_link_calendar()
+    _attest_link_calendar_runtime(service)
 
     with pytest.raises(WoonError, match="manifest is invalid"):
         service.retire([LEGACY_SIMPLE_CALENDAR_ID])

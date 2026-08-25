@@ -17,9 +17,9 @@ from woon_core.calendar.categories import (
     calendar_category_title,
 )
 from woon_core.calendar.constants import (
-    CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS,
-    CONTEXT_CALENDAR_PLUGIN_ID,
-    CONTEXT_CALENDAR_PROFILE_ID,
+    LINK_CALENDAR_DASHBOARD_CSS_CLASS,
+    LINK_CALENDAR_PLUGIN_ID,
+    LINK_CALENDAR_PROFILE_ID,
     OWNED_CALENDAR_NAME,
 )
 from woon_core.errors import WoonError
@@ -220,7 +220,7 @@ class CalendarProjectionService:
             self._markdown_directory.chmod(_PROJECTION_DIRECTORY_READONLY_MODE)
 
     def _refresh_dashboard(self) -> bool:
-        """Expose the Core-owned Simple Calendar month view as the user entrypoint."""
+        """Expose the Core-owned Link Calendar month view as the user entrypoint."""
 
         if self._dashboard_path.exists() and not is_core_calendar_dashboard(self._dashboard_path):
             raise WoonError("calendar dashboard path is not a Core-generated projection")
@@ -340,7 +340,7 @@ def _validate_events(
 def _markdown_filenames(
     events: tuple[CalendarProjectionEvent, ...],
 ) -> tuple[tuple[CalendarProjectionEvent, str], ...]:
-    """Use a readable title because Simple Calendar renders the Markdown basename.
+    """Use a readable title because Link Calendar renders the Markdown basename.
 
     A date suffix is added only when two projected events would otherwise have the
     same visible title.  The source event ID stays out of both the note name and body.
@@ -497,7 +497,7 @@ def _render_markdown(
 
 
 def _render_dashboard() -> str:
-    """Render the Context Calendar entrypoint for the managed read-only profile."""
+    """Render the Link Calendar entrypoint for the managed read-only profile."""
 
     return (
         "\n".join(
@@ -510,11 +510,11 @@ def _render_dashboard() -> str:
                 "status: Generated",
                 "source: apple-calendar-readonly",
                 "woon_projection: apple-calendar-dashboard",
-                f"cssclasses: {CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS}",
+                f"cssclasses: {LINK_CALENDAR_DASHBOARD_CSS_CLASS}",
                 "---",
                 "",
-                f"```{CONTEXT_CALENDAR_PLUGIN_ID}",
-                f"profile: {CONTEXT_CALENDAR_PROFILE_ID}",
+                f"```{LINK_CALENDAR_PLUGIN_ID}",
+                f"profile: {LINK_CALENDAR_PROFILE_ID}",
                 "```",
             )
         )

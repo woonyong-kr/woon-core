@@ -164,42 +164,6 @@ class RetiredExternalVideoBoundaryTests(unittest.TestCase):
             self.assertIn("retired", issues[0])
 
 
-class ScopedContextTreeTitleTests(unittest.TestCase):
-    def test_allows_distinct_context_graph_cards_with_the_same_display_title(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            basic = root / "maps/context-graph/basic/PintOS.md"
-            interview = root / "maps/context-graph/interview/PintOS.md"
-            for path in (basic, interview):
-                path.parent.mkdir(parents=True, exist_ok=True)
-            metadata = {
-                basic: {"context_tree": True, "context_tree_parent": "[[기본]]"},
-                interview: {"context_tree": True, "context_tree_parent": "[[면접]]"},
-            }
-
-            with mock.patch.object(AUDIT, "VAULT", root):
-                self.assertTrue(
-                    AUDIT.is_scoped_context_tree_title_collision([basic, interview], metadata)
-                )
-
-    def test_rejects_same_title_when_a_non_index_document_is_mixed_in(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            scoped = root / "maps/context-graph/basic/PintOS.md"
-            unrelated = root / "maps/pintos-note.md"
-            for path in (scoped, unrelated):
-                path.parent.mkdir(parents=True, exist_ok=True)
-            metadata = {
-                scoped: {"context_tree": True, "context_tree_parent": "[[기본]]"},
-                unrelated: {},
-            }
-
-            with mock.patch.object(AUDIT, "VAULT", root):
-                self.assertFalse(
-                    AUDIT.is_scoped_context_tree_title_collision([scoped, unrelated], metadata)
-                )
-
-
 class GlobalGraphRootTests(unittest.TestCase):
     def test_requires_project_cards_to_connect_through_the_single_wiki_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -681,7 +645,7 @@ class ManagedNonMarkdownFileTests(unittest.TestCase):
                 self.assertTrue(AUDIT.is_allowed_non_markdown_file(canvas))
                 self.assertFalse(AUDIT.is_allowed_non_markdown_file(invalid))
 
-    def test_allows_linked_canvas_state_only_when_all_targets_exist(self) -> None:
+    def test_rejects_retired_linked_canvas_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             note = root / "wiki/example.md"
@@ -702,14 +666,9 @@ class ManagedNonMarkdownFileTests(unittest.TestCase):
             )
 
             with mock.patch.object(AUDIT, "VAULT", root):
-                self.assertTrue(AUDIT.is_allowed_non_markdown_file(state))
-                state.write_text(
-                    state.read_text(encoding="utf-8").replace("wiki/example.md", "wiki/missing.md"),
-                    encoding="utf-8",
-                )
                 self.assertFalse(AUDIT.is_allowed_non_markdown_file(state))
 
-    def test_allows_context_graph_layout_only_beside_context_map_notes(self) -> None:
+    def test_rejects_retired_context_graph_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             layout = root / "maps/context-graph/example.context-graph"
@@ -719,7 +678,7 @@ class ManagedNonMarkdownFileTests(unittest.TestCase):
             unrelated.write_text("{}\n", encoding="utf-8")
 
             with mock.patch.object(AUDIT, "VAULT", root):
-                self.assertTrue(AUDIT.is_allowed_non_markdown_file(layout))
+                self.assertFalse(AUDIT.is_allowed_non_markdown_file(layout))
                 self.assertFalse(AUDIT.is_allowed_non_markdown_file(unrelated))
 
 
@@ -799,10 +758,10 @@ access: local-only
 status: Generated
 source: apple-calendar-readonly
 woon_projection: apple-calendar-dashboard
-cssclasses: context-calendar-dashboard
+cssclasses: link-calendar-dashboard
 ---
 
-```context-calendar
+```link-calendar
 profile: woon-apple-calendar
 ```
 """,
