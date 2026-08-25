@@ -60,7 +60,7 @@ def prepare_novel_wiki_projection(
             "Novel source must live at wiki/private/_sources/novel inside the Wiki vault"
         )
     navigation = novel_root / "work/navigation"
-    project_relative = "wiki/personal/projects/비공개-소설-집필.md"
+    project_relative = "wiki/personal/projects/(미정)소설-집필.md"
     project_path = root / project_relative
     if not project_path.is_file() or not navigation.is_dir():
         raise WoonError("Novel Wiki projection requires the project entity and navigation tree")
@@ -68,6 +68,7 @@ def prepare_novel_wiki_projection(
     project_title = str(project_metadata.get("title", "")).strip()
     if not project_title:
         raise WoonError("Novel project entity has no title")
+    project_subject = project_title.removesuffix(" 집필").strip() or project_title
 
     category_files = tuple(
         path for path in sorted(navigation.glob("*.md")) if path.name != "README.md"
@@ -93,7 +94,7 @@ def prepare_novel_wiki_projection(
             canonical_id=f"private/novel/{category_slug}",
             parent=parent_link(project_relative, project_title),
             keyword=f"소설 · {category}",
-            summary=f"비공개 소설의 {category} 키워드다.",
+            summary=f"{project_subject}의 {category} 키워드다.",
             day=effective_day,
             node_kind="hub",
             view_mode="tree",
@@ -149,7 +150,12 @@ def prepare_novel_wiki_projection(
         root, novel_root, pages, category_paths, projection_day=effective_day
     )
     judgment_count = _add_judgment_pages(
-        root, novel_root, pages, category_paths, projection_day=effective_day
+        root,
+        novel_root,
+        pages,
+        category_paths,
+        project_subject=project_subject,
+        projection_day=effective_day,
     )
     relation_count = _add_relation_pages(
         root,
@@ -157,6 +163,7 @@ def prepare_novel_wiki_projection(
         pages,
         category_paths,
         source_receipts,
+        project_subject=project_subject,
         projection_day=effective_day,
     )
 
@@ -278,6 +285,7 @@ def _add_judgment_pages(
     pages: dict[Path, bytes],
     categories: dict[str, str],
     *,
+    project_subject: str,
     projection_day: date,
 ) -> int:
     source = novel / "work/planning/corpus-reading-2026-08-07.md"
@@ -297,7 +305,7 @@ def _add_judgment_pages(
             canonical_id=f"private/novel/judgments/{index + 1:02d}-{_slug(heading)}",
             parent=parent_link(parent, "소설 · 집필 계획"),
             keyword=title,
-            summary=f"비공개 소설의 {heading} 판단이다.",
+            summary=f"{project_subject}의 {heading} 판단이다.",
             day=projection_day,
             node_kind="decision",
             view_mode="article",
@@ -320,6 +328,7 @@ def _add_relation_pages(
     categories: dict[str, str],
     source_receipts: dict[str, dict[str, str]],
     *,
+    project_subject: str,
     projection_day: date,
 ) -> int:
     source = novel / "work/people/person-link-ledger.yaml"
@@ -350,7 +359,7 @@ def _add_relation_pages(
             canonical_id=f"private/novel/people/{person_id}",
             parent=parent_link(parent, "소설 · 인물"),
             keyword=title,
-            summary=f"비공개 소설과 {label}의 확인된 연결이다.",
+            summary=f"{project_subject}과 {label}의 확인된 연결이다.",
             day=projection_day,
             node_kind="detail",
             view_mode="article",
