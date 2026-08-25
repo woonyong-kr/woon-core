@@ -577,40 +577,14 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
             issues.append(f"{resources_path}: resources root must use the visible keyword '리소스'")
         for keyword in children.get(resources_path, ()):
             grouped = children.get(keyword.relative_path, ())
-            if keyword.node_kind == "hub":
-                if not grouped:
-                    issues.append(
-                        f"{keyword.relative_path}: resource category hubs must own bundle topics"
-                    )
-                if _resource_link_rows(texts[keyword.relative_path]):
-                    issues.append(
-                        f"{keyword.relative_path}: resource category hubs must not link raw "
-                        "sources directly"
-                    )
-                for bundle in grouped:
-                    if bundle.node_kind != "topic":
-                        issues.append(
-                            f"{bundle.relative_path}: children of resource category hubs "
-                            "must be bundle topics"
-                        )
-                    if children.get(bundle.relative_path):
-                        issues.append(
-                            f"{bundle.relative_path}: resource bundle topics must link raw "
-                            "sources directly and must not own Wiki children"
-                        )
-                    issues.extend(
-                        _resource_link_index_issues(bundle, texts[bundle.relative_path])
-                    )
-                continue
             if keyword.node_kind != "topic":
                 issues.append(
-                    f"{keyword.relative_path}: direct children of resources must be category "
-                    "hubs or bundle topics"
+                    f"{keyword.relative_path}: direct children of resources must be category topics"
                 )
             if grouped:
                 issues.append(
-                    f"{keyword.relative_path}: resource topics must link raw sources directly "
-                    "and must not own Wiki child entities"
+                    f"{keyword.relative_path}: resource category topics must link raw sources "
+                    "directly and must not own intermediate Wiki children"
                 )
             issues.extend(_resource_link_index_issues(keyword, texts[keyword.relative_path]))
 
@@ -684,8 +658,6 @@ def _navigation_group_issues(
                     continue
                 if parent.canonical_id == "resources/README" and child.node_kind == "topic":
                     link_count += len(_resource_link_rows(texts[child.relative_path]))
-                elif parent.canonical_id == "resources/README" and child.node_kind == "hub":
-                    link_count += len(children.get(child.relative_path, ()))
                 else:
                     link_count += 1
             if link_count > FLATTEN_GROUP_MAX_CHILDREN:
@@ -958,11 +930,6 @@ def _render_explicit_navigation_groups(
             child = direct_by_id[child_id]
             if parent.canonical_id == "resources/README" and child.node_kind == "topic":
                 rows.extend("  " + row for row in _resource_link_rows(texts[child.relative_path]))
-            elif parent.canonical_id == "resources/README" and child.node_kind == "hub":
-                rows.extend(
-                    "  " + _render_keyword_link(item, include_sequence=False)
-                    for item in children.get(child.relative_path, ())
-                )
             else:
                 rows.append(
                     "  " + _render_keyword_link(child, include_sequence=include_sequence)

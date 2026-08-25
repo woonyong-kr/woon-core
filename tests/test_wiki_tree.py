@@ -421,7 +421,7 @@ def test_resource_groups_inline_raw_links_below_topic_text(tmp_path: Path) -> No
     assert "[[wiki/resources/ai|AI 자료]]" not in catalog
 
 
-def test_resource_groups_merge_related_sources_into_bundle_links(tmp_path: Path) -> None:
+def test_resource_groups_reject_intermediate_bundle_topics(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -483,12 +483,13 @@ def test_resource_groups_merge_related_sources_into_bundle_links(tmp_path: Path)
 
     report = prepare_wiki_tree_refresh(tmp_path)
 
-    assert report.issues == ()
-    catalog = report.pages[tmp_path / "wiki/resources/README.md"].decode("utf-8")
-    assert "- AI\n  - [[wiki/resources/ai/aice|AICE Associate]]" in catalog
-    assert "  - [[wiki/resources/ai/transformer|Transformer Explainer]]" in catalog
-    assert "시험 안내" not in catalog
-    assert "Transformer 원자료" not in catalog
+    assert "wiki/resources/ai.md: direct children of resources must be category topics" in (
+        report.issues
+    )
+    assert (
+        "wiki/resources/ai.md: resource category topics must link raw sources directly "
+        "and must not own intermediate Wiki children"
+    ) in report.issues
 
 
 def test_large_grouping_hub_stays_as_one_link(tmp_path: Path) -> None:
@@ -739,5 +740,5 @@ def test_resource_topic_rejects_prose_and_child_entity_cards(tmp_path: Path) -> 
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert any("must contain only hyperlink rows" in issue for issue in report.issues)
-    assert any("must not own Wiki child entities" in issue for issue in report.issues)
+    assert any("must not own intermediate Wiki children" in issue for issue in report.issues)
     assert any("resource entity cards are retired" in issue for issue in report.issues)
