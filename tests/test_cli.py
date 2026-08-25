@@ -24,7 +24,7 @@ from woon_core.skills import RoutingCaseResult, RoutingEvalResult
 def test_version() -> None:
     output = StringIO()
     run(["version"], output)
-    assert output.getvalue().strip() == "0.5.4"
+    assert output.getvalue().strip() == "0.5.5"
 
 
 def test_unknown_command_fails() -> None:
