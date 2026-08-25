@@ -279,6 +279,148 @@ def test_books_are_separate_genre_catalog_with_link_only_book_contents(tmp_path:
     assert "최신 관련 문서" not in rendered
 
 
+def test_hub_explicit_groups_render_text_labels_with_direct_child_links(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/projects/README.md",
+        title="프로젝트",
+        canonical_id="projects/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("프로젝트",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: 창작\n"
+            "  children:\n"
+            "  - projects/novel\n"
+            "- label: 시스템·도구\n"
+            "  children:\n"
+            "  - projects/calendar\n"
+        ),
+    )
+    for relative, title, canonical_id in (
+        ("wiki/projects/novel.md", "(미정)소설 집필", "projects/novel"),
+        ("wiki/projects/calendar.md", "Context Calendar", "projects/calendar"),
+    ):
+        _write_page(
+            tmp_path,
+            relative,
+            title=title,
+            canonical_id=canonical_id,
+            node_kind="entity",
+            parent="[[wiki/projects/README|프로젝트]]",
+            keywords=(title,),
+            view_mode="project",
+            extra="entity_kind: project\n",
+        )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    catalog = report.pages[tmp_path / "wiki/projects/README.md"].decode("utf-8")
+    assert "- 창작\n  - [[wiki/projects/novel|(미정)소설 집필]]" in catalog
+    assert "- 시스템·도구\n  - [[wiki/projects/calendar|Context Calendar]]" in catalog
+    assert "\n- [[wiki/projects/novel|(미정)소설 집필]]" not in catalog
+
+
+def test_explicit_groups_must_cover_each_direct_child_exactly_once(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/projects/README.md",
+        title="프로젝트",
+        canonical_id="projects/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("프로젝트",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: 창작\n"
+            "  children:\n"
+            "  - projects/missing\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/projects/novel.md",
+        title="(미정)소설 집필",
+        canonical_id="projects/novel",
+        node_kind="entity",
+        parent="[[wiki/projects/README|프로젝트]]",
+        keywords=("(미정)소설 집필",),
+        view_mode="project",
+        extra="entity_kind: project\n",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert any("contain non-direct children: projects/missing" in issue for issue in report.issues)
+    assert any("omit direct children: projects/novel" in issue for issue in report.issues)
+
+
+def test_resource_groups_inline_raw_links_below_topic_text(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/resources/README.md",
+        title="리소스",
+        canonical_id="resources/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("리소스",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: AI\n"
+            "  children:\n"
+            "  - resources/ai\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/resources/ai.md",
+        title="AI 자료",
+        canonical_id="resources/ai",
+        node_kind="topic",
+        parent="[[wiki/resources/README|리소스]]",
+        keywords=("AI 자료",),
+        body="- [[assets/transformer.pdf|Transformer PDF]]",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    catalog = report.pages[tmp_path / "wiki/resources/README.md"].decode("utf-8")
+    assert "- AI\n  - [[assets/transformer.pdf|Transformer PDF]]" in catalog
+    assert "[[wiki/resources/ai|AI 자료]]" not in catalog
+
+
 def test_large_grouping_hub_stays_as_one_link(tmp_path: Path) -> None:
     _write_page(
         tmp_path,

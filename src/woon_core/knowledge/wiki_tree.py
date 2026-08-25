@@ -39,6 +39,12 @@ WIKI_SOURCE_ARCHIVE_PARTS = ("private", "_sources")
 
 
 @dataclass(frozen=True, slots=True)
+class WikiNavigationGroup:
+    label: str
+    child_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class WikiTreeNode:
     path: Path
     relative_path: str
@@ -54,6 +60,7 @@ class WikiTreeNode:
     updated: date
     sequence: float | None
     knowledge_state: str
+    navigation_groups: tuple[WikiNavigationGroup, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +130,7 @@ def prepare_wiki_tree_refresh(vault: Path) -> WikiTreeReport:
             node=node,
             nodes=by_path,
             children=children,
+            texts=texts,
             related=related,
         )
         encoded = refreshed.encode("utf-8")
@@ -189,6 +197,9 @@ def load_wiki_tree(
         entity_kind = _optional_text(metadata.get("entity_kind"), "entity_kind", relative, issues)
         keywords = _string_list(metadata.get("keywords"), "keywords", relative, issues)
         aliases = _string_list(metadata.get("aliases", []), "aliases", relative, issues)
+        navigation_groups = _navigation_groups(
+            metadata.get("navigation_groups"), relative, issues
+        )
         state = _required_text(metadata, "knowledge_state", relative, issues)
         updated = _date_value(metadata.get("updated"), "updated", relative, issues)
         if node_kind and node_kind not in NODE_KINDS:
@@ -247,6 +258,7 @@ def load_wiki_tree(
                 updated=updated,
                 sequence=sequence,
                 knowledge_state=state,
+                navigation_groups=navigation_groups,
             )
         )
     by_path = {node.relative_path: node for node in nodes}
@@ -254,6 +266,7 @@ def load_wiki_tree(
         if node.parent_path is not None and node.parent_path not in by_path:
             issues.append(f"{node.relative_path}: parent is missing: {node.parent_path}")
     issues.extend(_cycle_and_reachability_issues(nodes))
+    issues.extend(_navigation_group_issues(nodes, texts))
     issues.extend(_domain_tree_issues(nodes, texts))
     return tuple(nodes), texts, tuple(dict.fromkeys(issues))
 
@@ -264,6 +277,7 @@ def render_wiki_tree_view(
     node: WikiTreeNode,
     nodes: dict[str, WikiTreeNode],
     children: dict[str, tuple[WikiTreeNode, ...]],
+    texts: dict[str, str],
     related: dict[str, tuple[WikiTreeNode, ...]] | None = None,
 ) -> str:
     """Render all Core-owned navigation blocks for one already validated node."""
@@ -309,6 +323,7 @@ def render_wiki_tree_view(
                 node,
                 direct,
                 children,
+                texts,
                 include_sequence=node.view_mode == "linear",
             ),
             CHILDREN_END,
@@ -459,6 +474,44 @@ def _string_list(value: object, key: str, relative: str, issues: list[str]) -> t
     return normalized
 
 
+def _navigation_groups(
+    value: object, relative: str, issues: list[str]
+) -> tuple[WikiNavigationGroup, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        issues.append(f"{relative}: navigation_groups must be a list")
+        return ()
+    groups: list[WikiNavigationGroup] = []
+    labels: set[str] = set()
+    for index, item in enumerate(value, start=1):
+        location = f"{relative}: navigation_groups[{index}]"
+        if not isinstance(item, dict):
+            issues.append(f"{location} must be a mapping")
+            continue
+        label = item.get("label")
+        child_ids = item.get("children")
+        if not isinstance(label, str) or not label.strip():
+            issues.append(f"{location}.label must be a non-empty string")
+            continue
+        normalized_label = label.strip().casefold()
+        if normalized_label in labels:
+            issues.append(f"{relative}: navigation_groups labels must not repeat")
+            continue
+        labels.add(normalized_label)
+        if not isinstance(child_ids, list) or not child_ids or not all(
+            isinstance(child_id, str) and child_id.strip() for child_id in child_ids
+        ):
+            issues.append(f"{location}.children must be a non-empty canonical_id list")
+            continue
+        normalized_ids = tuple(child_id.strip() for child_id in child_ids)
+        if len(set(normalized_ids)) != len(normalized_ids):
+            issues.append(f"{location}.children must not contain duplicates")
+            continue
+        groups.append(WikiNavigationGroup(label=label.strip(), child_ids=normalized_ids))
+    return tuple(groups)
+
+
 def _date_value(value: object, key: str, relative: str, issues: list[str]) -> date:
     if isinstance(value, date):
         return value
@@ -556,6 +609,64 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
     return issues
 
 
+def _navigation_group_issues(
+    nodes: list[WikiTreeNode], texts: dict[str, str]
+) -> list[str]:
+    """Keep explicit display groups complete and anchored to the canonical parent tree."""
+
+    children = _children_by_parent(tuple(nodes))
+    issues: list[str] = []
+    for parent in nodes:
+        if not parent.navigation_groups:
+            continue
+        if parent.node_kind != "hub":
+            issues.append(
+                f"{parent.relative_path}: navigation_groups are allowed only on hub pages"
+            )
+            continue
+        direct = children.get(parent.relative_path, ())
+        direct_by_id = {child.canonical_id: child for child in direct}
+        listed = [
+            child_id for group in parent.navigation_groups for child_id in group.child_ids
+        ]
+        duplicates = sorted(
+            {child_id for child_id in listed if listed.count(child_id) > 1}, key=str.casefold
+        )
+        if duplicates:
+            issues.append(
+                f"{parent.relative_path}: navigation_groups repeat direct children: "
+                + ", ".join(duplicates)
+            )
+        unknown = sorted(set(listed) - set(direct_by_id), key=str.casefold)
+        if unknown:
+            issues.append(
+                f"{parent.relative_path}: navigation_groups contain non-direct children: "
+                + ", ".join(unknown)
+            )
+        missing = sorted(set(direct_by_id) - set(listed), key=str.casefold)
+        if missing:
+            issues.append(
+                f"{parent.relative_path}: navigation_groups omit direct children: "
+                + ", ".join(missing)
+            )
+        for group in parent.navigation_groups:
+            link_count = 0
+            for child_id in group.child_ids:
+                child = direct_by_id.get(child_id)
+                if child is None:
+                    continue
+                if parent.canonical_id == "resources/README" and child.node_kind == "topic":
+                    link_count += len(_resource_link_rows(texts[child.relative_path]))
+                else:
+                    link_count += 1
+            if link_count > FLATTEN_GROUP_MAX_CHILDREN:
+                issues.append(
+                    f"{parent.relative_path}: navigation group {group.label!r} has "
+                    f"{link_count} links; maximum is {FLATTEN_GROUP_MAX_CHILDREN}"
+                )
+    return issues
+
+
 def _has_ancestor(node: WikiTreeNode, ancestor: str, by_path: dict[str, WikiTreeNode]) -> bool:
     current = node
     while current.parent_path is not None:
@@ -604,6 +715,15 @@ def _resource_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
             continue
         return [f"{node.relative_path}: resource topic body must contain only hyperlink rows"]
     return []
+
+
+def _resource_link_rows(text: str) -> tuple[str, ...]:
+    """Return validated resource rows for projection under a topic label."""
+
+    _, body = split_markdown(strip_generated_wiki_views(text))
+    body = re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
+    body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    return tuple(line.strip() for line in body.splitlines() if line.strip())
 
 
 def _entity_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
@@ -758,10 +878,16 @@ def _render_navigation_children(
     parent: WikiTreeNode,
     direct: tuple[WikiTreeNode, ...],
     children: dict[str, tuple[WikiTreeNode, ...]],
+    texts: dict[str, str],
     *,
     include_sequence: bool,
 ) -> tuple[str, ...]:
     """Flatten small, link-only grouping hubs into one scannable index."""
+
+    if parent.navigation_groups:
+        return _render_explicit_navigation_groups(
+            parent, direct, texts, include_sequence=include_sequence
+        )
 
     rows: list[str] = []
     for child in direct:
@@ -778,6 +904,30 @@ def _render_navigation_children(
         rows.extend(
             "  " + _render_keyword_link(item, include_sequence=include_sequence) for item in grouped
         )
+    return tuple(rows)
+
+
+def _render_explicit_navigation_groups(
+    parent: WikiTreeNode,
+    direct: tuple[WikiTreeNode, ...],
+    texts: dict[str, str],
+    *,
+    include_sequence: bool,
+) -> tuple[str, ...]:
+    """Render hub-owned text labels without changing canonical parent relations."""
+
+    direct_by_id = {child.canonical_id: child for child in direct}
+    rows: list[str] = []
+    for group in parent.navigation_groups:
+        rows.append(f"- {group.label}")
+        for child_id in group.child_ids:
+            child = direct_by_id[child_id]
+            if parent.canonical_id == "resources/README" and child.node_kind == "topic":
+                rows.extend("  " + row for row in _resource_link_rows(texts[child.relative_path]))
+            else:
+                rows.append(
+                    "  " + _render_keyword_link(child, include_sequence=include_sequence)
+                )
     return tuple(rows)
 
 
