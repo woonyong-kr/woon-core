@@ -10,6 +10,7 @@ import yaml
 from woon_core.errors import WoonError
 from woon_core.knowledge.content_quality_evaluation import (
     _reason_denies_anchor,
+    criterion_anchor_candidates,
     evaluate_content_quality,
 )
 
@@ -44,6 +45,44 @@ purpose: 현재 학습에 재사용할 목적을 기록한다.
 현재 학습에 재사용할 목적을 기록한다.
 """
 SECOND = FIRST.replace("첫 문서", "둘째 문서")
+
+
+LINK_ONLY_HUB = """---
+node_kind: hub
+purpose: 설명을 훑지 않고 직접 하위 키워드로 이동할 때 사용한다.
+---
+
+# 운영체제
+
+## 하위 키워드
+
+- [[wiki/os/process|프로세스]]
+- [[wiki/os/virtual-memory|가상 메모리]]
+"""
+
+
+def test_accepts_link_labels_as_evidence_for_link_only_navigation_surface() -> None:
+    natural = criterion_anchor_candidates(LINK_ONLY_HUB, "natural_korean")
+    evidence = criterion_anchor_candidates(LINK_ONLY_HUB, "evidence_boundary")
+    current = criterion_anchor_candidates(LINK_ONLY_HUB, "current_use")
+
+    assert "프로세스" in natural
+    assert "가상 메모리" in evidence
+    assert current == ["purpose: 설명을 훑지 않고 직접 하위 키워드로 이동할 때 사용한다."]
+
+
+def test_accepts_explicit_scope_note_as_evidence_boundary_anchor() -> None:
+    markdown = FIRST.replace(
+        "# 첫 문서\n",
+        "# 첫 문서\n\n"
+        "> 확인 범위: 이 문서는 일반 원리를 설명하며 실제 실행 결과는 별도 검증한다.\n",
+    )
+
+    candidates = criterion_anchor_candidates(markdown, "evidence_boundary")
+
+    assert candidates[0] == (
+        "확인 범위: 이 문서는 일반 원리를 설명하며 실제 실행 결과는 별도 검증한다."
+    )
 
 
 def _write_catalogs(vault: Path) -> None:

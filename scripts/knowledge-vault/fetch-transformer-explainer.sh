@@ -2,7 +2,7 @@
 set -euo pipefail
 
 VAULT_DIR="${VAULT_DIR:?set by 'woon knowledge vault-tool fetch-transformer-explainer'}"
-CACHE_DIR="${TRANSFORMER_EXPLAINER_CACHE_DIR:-${VAULT_DIR}/sources/.cache/transformer-explainer}"
+CACHE_DIR="${TRANSFORMER_EXPLAINER_CACHE_DIR:-${VAULT_DIR}/wiki/private/_sources/knowledge/.cache/transformer-explainer}"
 
 REPO_COMMIT="bfe50afba10b9b560b84143ee1107d977defa74f"
 SOURCE_ARCHIVE_URL="https://github.com/poloclub/transformer-explainer/archive/${REPO_COMMIT}.tar.gz"

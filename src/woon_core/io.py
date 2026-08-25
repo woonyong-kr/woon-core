@@ -58,6 +58,7 @@ def exclusive_file_lock(path: Path) -> Iterator[None]:
     with process_lock:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         with resolved.open("a+b") as stream:
+            resolved.chmod(0o600)
             if os.name == "nt":
                 msvcrt: Any = importlib.import_module("msvcrt")
 

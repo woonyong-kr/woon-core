@@ -133,9 +133,12 @@ def main() -> int:
                         errors, f"{category} {record['sha256']}: source bytes drift"
                     )
 
-    for document in list((VAULT / "wiki").rglob("*.md")) + list(
-        (VAULT / "maps").rglob("*.md")
-    ):
+    wiki_documents = [
+        path
+        for path in (VAULT / "wiki").rglob("*.md")
+        if "_sources" not in path.relative_to(VAULT / "wiki").parts
+    ]
+    for document in wiki_documents + list((VAULT / "maps").rglob("*.md")):
         text = document.read_text(encoding="utf-8")
         for alt, href in IMAGE_RE.findall(text):
             clean_href = href.split()[0].split("#")[0].split("?")[0]

@@ -14,6 +14,7 @@ from typing import TextIO
 
 from woon_core import __version__
 from woon_core.calendar.cli import run_calendar
+from woon_core.career.cli import run_career
 from woon_core.context import Compiler
 from woon_core.environment import apply as apply_environment
 from woon_core.environment import check as check_environment
@@ -28,6 +29,7 @@ from woon_core.environment.python_ide import doctor as doctor_python_ide
 from woon_core.environment.python_ide import plan as plan_python_ide
 from woon_core.environment.python_ide import verify as verify_python_ide
 from woon_core.errors import WoonError
+from woon_core.io import atomic_write
 from woon_core.knowledge.answer_citation_evaluation import evaluate_answer_citations
 from woon_core.knowledge.codex_daily_digest import (
     entries_from_records as daily_digest_entries_from_records,
@@ -46,6 +48,10 @@ from woon_core.knowledge.codex_quality_revision import (
     apply_codex_quality_revisions,
     create_codex_quality_revision_proposals,
 )
+from woon_core.knowledge.codex_source_archive import (
+    bundle_from_record as codex_source_bundle_from_record,
+)
+from woon_core.knowledge.codex_source_archive import record_codex_source_bundle
 from woon_core.knowledge.content_quality_evaluation import evaluate_content_quality
 from woon_core.knowledge.content_quality_review_plan import (
     assemble_content_quality_reviews,
@@ -57,6 +63,10 @@ from woon_core.knowledge.factory import build_knowledge_service, resolve_knowled
 from woon_core.knowledge.mail_schedule_automation import (
     record_mail_schedule_candidates,
     submissions_from_records,
+)
+from woon_core.knowledge.novel_wiki_projection import (
+    apply_novel_wiki_projection,
+    prepare_novel_wiki_projection,
 )
 from woon_core.knowledge.obsidian_plugins import ObsidianPluginService
 from woon_core.knowledge.ollama_quality_review import run_ollama_quality_reviews
@@ -135,6 +145,8 @@ Usage:
   woon calendar upsert --id <stable-id> --title <text> --start <ISO8601>
     --end <ISO8601> --category <career|learning|creative|life|relationship|health|admin>
     [--location <text>] [--notes <text>] [--vault <path>]
+  woon career <create|analyze|evaluate|approve-draft|attach-pdf|mark-reviewed|
+    mark-ready|reopen|outcome|context|show> [options]
   woon knowledge index [--vault <path>]
   woon knowledge search <query> [--limit <1..20>] [--vault <path>]
   woon knowledge get <canonical-id> [--vault <path>]
@@ -155,6 +167,7 @@ Usage:
   woon knowledge reconcile-superseded-revisions [--vault <path>]
   woon knowledge compile [--force] [--vault <path>]
   woon knowledge compile-audit [--vault <path>]
+  woon knowledge project-novel [--day <YYYY-MM-DD>] [--vault <path>]
   woon knowledge evaluate --cases <path> [--output <path>] [--vault <path>]
   woon knowledge evaluate-answers --cases <path> --answers <path>
     [--output <path>] [--vault <path>]
@@ -211,6 +224,7 @@ Usage:
     [--vault <path>]
   woon knowledge record-codex-knowledge-entries --source-range <safe-token> --day <YYYY-MM-DD>
     --entries-json <json-array> [--vault <path>]
+  woon knowledge record-codex-source --bundle-file <local-JSON> [--vault <path>]
   woon knowledge materialize-codex-daily-record --day <YYYY-MM-DD> [--vault <path>]
   woon knowledge migrate-legacy-daily-digests [--vault <path>]
   woon knowledge schedule-apply --candidate <local-JSON>
@@ -300,6 +314,8 @@ def run(raw_arguments: list[str], output: TextIO) -> None:
         run_people(remaining, output)
     elif command == "calendar":
         run_calendar(remaining, output)
+    elif command == "career":
+        run_career(remaining, output)
     elif command == "knowledge":
         _run_knowledge(remaining, output)
     else:
@@ -535,6 +551,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "source-verify-private":
         _run_knowledge_private_source_verification(raw_options, output)
         return
+    if command == "project-novel":
+        _run_novel_wiki_projection(raw_options, output)
+        return
     if command in {
         "migrate-compiled",
         "initialize-curation",
@@ -595,6 +614,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "record-codex-knowledge-entries":
         _run_codex_knowledge_entry_recording(raw_options, output)
+        return
+    if command == "record-codex-source":
+        _run_codex_source_recording(raw_options, output)
         return
     if command == "materialize-codex-daily-record":
         _run_codex_daily_digest_materialization(raw_options, output)
@@ -867,9 +889,7 @@ def _governance_skill_inventory(
 
 
 _VAULT_TOOL_SCRIPTS = {
-    "apply-breadcrumbs": "apply-breadcrumbs.py",
     "assess-document-cohesion": "assess-document-cohesion.py",
-    "audit-canonical-map-tree": "audit-canonical-map-tree.py",
     "audit-folder-depth": "audit-folder-depth.py",
     "audit-source-assets": "audit-source-assets.py",
     "audit-vault-health": "audit-vault-health.py",
@@ -1145,6 +1165,41 @@ def _run_codex_knowledge_entry_recording(arguments: list[str], output: TextIO) -
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
 
 
+def _run_codex_source_recording(arguments: list[str], output: TextIO) -> None:
+    """Archive one allowed conversation bundle from a private local JSON file."""
+
+    values: dict[str, str] = {}
+    raw_options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option != "--bundle-file":
+            raw_options.append(option)
+            index += 1
+            continue
+        if option in values or index + 1 >= len(arguments):
+            raise WoonError("--bundle-file requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault, options = _parse_knowledge_options(raw_options)
+    if options or set(values) != {"--bundle-file"}:
+        raise WoonError("knowledge record-codex-source requires --bundle-file")
+    bundle_file = Path(values["--bundle-file"]).expanduser().resolve()
+    if not bundle_file.is_file() or bundle_file.is_symlink():
+        raise WoonError("Codex source bundle file is missing or unsafe")
+    try:
+        parsed = json.loads(bundle_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WoonError("Codex source bundle file is unreadable") from error
+    if not isinstance(parsed, dict):
+        raise WoonError("Codex source bundle must be a JSON object")
+    result = record_codex_source_bundle(
+        vault or resolve_knowledge_vault(),
+        codex_source_bundle_from_record(parsed),
+    )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
+
+
 def _run_codex_daily_digest_materialization(arguments: list[str], output: TextIO) -> None:
     """Materialize one daily record block from the local minimized ledger."""
 
@@ -1206,6 +1261,47 @@ def _run_schedule_apply(arguments: list[str], output: TextIO) -> None:
         vault or resolve_knowledge_vault(), Path(values["--candidate"])
     )
     print(json.dumps(receipt_record(receipt), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_novel_wiki_projection(arguments: list[str], output: TextIO) -> None:
+    """Project the Wiki-internal Novel source archive into one keyword tree."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--vault", "--day"}:
+            raise WoonError(f"unexpected knowledge project-novel argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault = Path(values.get("--vault", resolve_knowledge_vault())).expanduser().resolve()
+    try:
+        projection_day = date.fromisoformat(values.get("--day", date.today().isoformat()))
+    except ValueError as error:
+        raise WoonError("knowledge project-novel --day must be YYYY-MM-DD") from error
+    source = vault / "wiki/private/_sources/novel"
+    report = prepare_novel_wiki_projection(vault, source, projection_day=projection_day)
+    apply_novel_wiki_projection(vault, report)
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "source_root": source.relative_to(vault).as_posix(),
+                "category_count": report.category_count,
+                "source_count": report.source_count,
+                "event_count": report.event_count,
+                "judgment_count": report.judgment_count,
+                "relation_count": report.relation_count,
+                "changed_count": report.changed_count,
+                "retired_stale_pages": len(report.stale_pages),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
 
 
 def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) -> None:
@@ -1347,7 +1443,7 @@ def _run_knowledge_evaluation(arguments: list[str], output: TextIO) -> None:
     if "--output" in values:
         destination = Path(values["--output"]).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(rendered + "\n", encoding="utf-8")
+        atomic_write(destination, (rendered + "\n").encode("utf-8"), mode=0o600)
     print(rendered, file=output)
     if not result["passed"]:
         raise WoonError("knowledge retrieval evaluation did not meet thresholds")
@@ -1376,7 +1472,7 @@ def _run_answer_citation_evaluation(arguments: list[str], output: TextIO) -> Non
     if "--output" in values:
         destination = Path(values["--output"]).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(rendered + "\n", encoding="utf-8")
+        atomic_write(destination, (rendered + "\n").encode("utf-8"), mode=0o600)
     print(rendered, file=output)
     if not result["passed"]:
         raise WoonError("knowledge answer/citation evaluation did not meet all checks")
@@ -1406,7 +1502,7 @@ def _run_content_quality_evaluation(arguments: list[str], output: TextIO) -> Non
     if "--output" in values:
         destination = Path(values["--output"]).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(rendered + "\n", encoding="utf-8")
+        atomic_write(destination, (rendered + "\n").encode("utf-8"), mode=0o600)
     print(rendered, file=output)
     if not result["passed"]:
         raise WoonError("knowledge content quality evaluation did not meet all checks")
@@ -1695,6 +1791,7 @@ def _run_codex_quality_revision(arguments: list[str], output: TextIO) -> None:
 def _run_codex_quality_revision_apply(arguments: list[str], output: TextIO) -> None:
     values: dict[str, str] = {}
     proposal_dirs: list[str] = []
+    page_ids: list[str] = []
     index = 0
     while index < len(arguments):
         option = arguments[index]
@@ -1704,12 +1801,15 @@ def _run_codex_quality_revision_apply(arguments: list[str], output: TextIO) -> N
             "--reviews",
             "--proposals",
             "--duplicate-policy",
+            "--page",
         }:
             raise WoonError(f"unexpected knowledge apply-quality-revisions argument: {option}")
         if index + 1 >= len(arguments):
             raise WoonError(f"{option} requires exactly one value")
         if option == "--proposals":
             proposal_dirs.append(arguments[index + 1])
+        elif option == "--page":
+            page_ids.append(arguments[index + 1])
         elif option in values:
             raise WoonError(f"{option} requires exactly one value")
         else:
@@ -1727,6 +1827,7 @@ def _run_codex_quality_revision_apply(arguments: list[str], output: TextIO) -> N
         Path(values["--reviews"]).expanduser().resolve(),
         tuple(Path(path).expanduser().resolve() for path in proposal_dirs),
         duplicate_policy=values.get("--duplicate-policy", "error"),
+        page_ids=tuple(page_ids),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
 

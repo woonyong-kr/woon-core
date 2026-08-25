@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
@@ -23,9 +23,16 @@ import yaml
 
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
+from woon_core.knowledge.wiki_tree import (
+    is_wiki_source_archive,
+    iter_wiki_pages,
+    preserve_generated_wiki_views,
+    strip_generated_wiki_views,
+)
 
 WIKI_ROOT = "wiki"
 WIKI_PERSONAL_ROOT = "wiki/personal"
+WIKI_NODES_ROOT = "wiki/nodes"
 WIKI_PRIVATE_ROOT = "wiki/private"
 WIKI_CURRENT_START = "<!-- woon-wiki-current:start -->"
 WIKI_CURRENT_END = "<!-- woon-wiki-current:end -->"
@@ -33,6 +40,8 @@ WIKI_TIMELINE_START = "<!-- woon-wiki-timeline:start -->"
 WIKI_TIMELINE_END = "<!-- woon-wiki-timeline:end -->"
 WIKI_NAVIGATION_START = "<!-- woon-wiki-navigation:start -->"
 WIKI_NAVIGATION_END = "<!-- woon-wiki-navigation:end -->"
+WIKI_OVERVIEW_START = "<!-- woon-wiki-overview:start -->"
+WIKI_OVERVIEW_END = "<!-- woon-wiki-overview:end -->"
 INTERVIEW_CURRENT_START = "<!-- woon-interview-current:start -->"
 INTERVIEW_CURRENT_END = "<!-- woon-interview-current:end -->"
 INTERVIEW_HISTORY_START = "<!-- woon-interview-history:start -->"
@@ -43,13 +52,14 @@ INTERVIEW_ARCHIVE_END = "<!-- woon-interview-archive:end -->"
 ALLOWED_FACETS = {
     "개념",
     "프로젝트",
-    "콘텐츠",
+    "리소스",
     "인물",
     "커리어",
     "학습",
     "생활",
 }
-FACET_ORDER = ("개념", "프로젝트", "콘텐츠", "인물", "커리어", "학습", "생활")
+FACET_ORDER = ("개념", "프로젝트", "리소스", "인물", "커리어", "학습", "생활")
+FACET_LABELS = frozenset(FACET_ORDER)
 COMPILED_SECTION_ROOTS = {
     "ai",
     "algorithm",
@@ -112,7 +122,16 @@ class WikiDelta:
     project_status: str | None = None
     objective: str | None = None
     materials: tuple[str, ...] = ()
-    parent_topics: tuple[str, ...] = ()
+    wiki_subject_path: str | None = None
+    parent: str | None = None
+    keywords: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    central_question: str | None = None
+    node_kind: str = "topic"
+    view_mode: str = "tree"
+    entity_kind: str | None = None
+    entity_section: str | None = None
+    sequence: float | None = None
     interview_tracks: tuple[str, ...] = ()
     question_topic: str | None = None
     interview_answer: InterviewAnswerRevision | None = None
@@ -176,7 +195,7 @@ def apply_prepared_wiki_pages(vault: Path, pages: dict[Path, bytes]) -> tuple[Pa
 def wiki_relative_path(title: str) -> str:
     """Return the deterministic path used when no existing subject matches."""
 
-    return f"{WIKI_PERSONAL_ROOT}/{_slug(title)}.md"
+    return f"{WIKI_NODES_ROOT}/{_slug(title)}.md"
 
 
 def resolve_wiki_path(vault: Path, title: str) -> Path:
@@ -187,7 +206,7 @@ def resolve_wiki_path(vault: Path, title: str) -> Path:
     matches: list[Path] = []
     if wiki_root.is_dir():
         wanted = title.strip().casefold()
-        for path in wiki_root.rglob("*.md"):
+        for path in iter_wiki_pages(wiki_root):
             if _frontmatter_text(path.read_text(encoding="utf-8"), "title").casefold() == wanted:
                 matches.append(path)
     if len(matches) > 1:
@@ -197,11 +216,32 @@ def resolve_wiki_path(vault: Path, title: str) -> Path:
     return root / wiki_relative_path(title)
 
 
+def _delta_path(vault: Path, delta: WikiDelta) -> Path:
+    if delta.wiki_subject_path is None:
+        return resolve_wiki_path(vault, delta.title)
+    candidate = Path(delta.wiki_subject_path)
+    if (
+        candidate.is_absolute()
+        or ".." in candidate.parts
+        or candidate.suffix != ".md"
+        or not candidate.as_posix().startswith("wiki/")
+        or candidate.parts[:3] == ("wiki", "private", "_sources")
+    ):
+        raise WoonError("Wiki delta subject path must target a canonical wiki/**/*.md page")
+    return (vault / candidate).resolve()
+
+
 def prepare_wiki_pages(vault: Path, deltas: tuple[WikiDelta, ...]) -> dict[Path, bytes]:
     """Return all Wiki writes for a batch without mutating the Vault."""
 
     root = vault.expanduser().resolve()
-    resolved = tuple((resolve_wiki_path(root, delta.title), delta) for delta in deltas)
+    resolved: list[tuple[Path, WikiDelta]] = []
+    for delta in deltas:
+        path = _delta_path(root, delta)
+        if delta.node_kind == "entity" and delta.entity_kind != "book":
+            resolved.extend(_expanded_entity_deltas(root, path, delta))
+        else:
+            resolved.append((path, delta))
     planned_paths = {path.relative_to(root).as_posix() for path, _ in resolved}
     grouped: dict[Path, list[WikiDelta]] = {}
     for path, delta in resolved:
@@ -218,6 +258,72 @@ def prepare_wiki_pages(vault: Path, deltas: tuple[WikiDelta, ...]) -> dict[Path,
             text = _merge_delta(text, delta)
         pages[path] = text.encode("utf-8")
     return pages
+
+
+def _expanded_entity_deltas(
+    root: Path, path: Path, landing: WikiDelta
+) -> tuple[tuple[Path, WikiDelta], ...]:
+    """Route entity facts and dates below a link-only landing page."""
+
+    relative = path.relative_to(root).as_posix()
+    entity_path = Path(relative)
+    stem = entity_path.stem
+    title = landing.title.strip()
+    parent = f"[[{entity_path.with_suffix('').as_posix()}|{title}]]"
+    information_title = f"{title} 정보"
+    history_title = f"{title} 히스토리"
+    information_path = entity_path.with_name(f"{stem}-정보.md")
+    history_path = entity_path.with_name(f"{stem}-히스토리.md")
+    information = replace(
+        landing,
+        title=information_title,
+        wiki_subject_path=information_path.as_posix(),
+        parent=parent,
+        keywords=(information_title,),
+        aliases=(),
+        node_kind="detail",
+        view_mode="article",
+        entity_kind=None,
+        entity_section="information",
+        sequence=1,
+    )
+    history = replace(
+        landing,
+        title=history_title,
+        summary=f"{title}의 날짜별 변경과 판단을 기록한다.",
+        wiki_subject_path=history_path.as_posix(),
+        parent=parent,
+        keywords=(history_title,),
+        aliases=(),
+        central_question=None,
+        node_kind="detail",
+        view_mode="topic-timeline",
+        entity_kind=None,
+        entity_section="history",
+        sequence=999,
+        intent=None,
+        next_question=None,
+        related_documents=(),
+        content_kind=None,
+        creators=(),
+        official_url=None,
+        project_id=None,
+        project_status=None,
+        objective=None,
+        materials=(),
+    )
+    index = replace(
+        landing,
+        wiki_subject_path=relative,
+        related_documents=(),
+        intent=None,
+        next_question=None,
+    )
+    return (
+        (path, index),
+        (root / information_path, information),
+        (root / history_path, history),
+    )
 
 
 def prepare_wiki_corpus_migration(vault: Path, *, migration_day: date) -> WikiMigrationReport:
@@ -237,7 +343,7 @@ def prepare_wiki_corpus_migration(vault: Path, *, migration_day: date) -> WikiMi
     identities: dict[str, Path] = {}
     document_count = 0
     changed_count = 0
-    for path in sorted(wiki_root.rglob("*.md")):
+    for path in iter_wiki_pages(wiki_root):
         relative = path.relative_to(root)
         document_count += 1
         text = path.read_text(encoding="utf-8")
@@ -256,7 +362,7 @@ def prepare_wiki_corpus_migration(vault: Path, *, migration_day: date) -> WikiMi
             facets=_infer_facets(relative, text),
             knowledge_state=_infer_knowledge_state(text),
             migration_day=migration_day,
-            parent_topics=_parent_topics(root, relative),
+            parent=_migration_parent(root, relative),
         )
         encoded = normalized.encode("utf-8")
         pages[path] = encoded
@@ -265,6 +371,32 @@ def prepare_wiki_corpus_migration(vault: Path, *, migration_day: date) -> WikiMi
     if document_count == 0:
         raise WoonError("Wiki migration found no documents")
     return WikiMigrationReport(document_count, changed_count, pages)
+
+
+def prepare_wiki_article_view_refresh(vault: Path) -> WikiMigrationReport:
+    """Refresh only the human article view without touching canonical metadata.
+
+    Compiler-owned pages already carry receipt-bound frontmatter.  A display
+    refresh must therefore leave every YAML property and all free-form prose
+    byte-for-byte intact except for the Core-owned overview and timeline title.
+    """
+
+    root = vault.expanduser().resolve()
+    wiki_root = root / WIKI_ROOT
+    if not wiki_root.is_dir():
+        raise WoonError("Wiki root is missing")
+    pages: dict[Path, bytes] = {}
+    changed_count = 0
+    for path in iter_wiki_pages(wiki_root):
+        current = path.read_text(encoding="utf-8")
+        refreshed = _normalize_article_view(current)
+        encoded = refreshed.encode("utf-8")
+        pages[path] = encoded
+        if encoded != path.read_bytes():
+            changed_count += 1
+    if not pages:
+        raise WoonError("Wiki article view refresh found no documents")
+    return WikiMigrationReport(len(pages), changed_count, pages)
 
 
 def prepare_legacy_wiki_merge(vault: Path, *, migration_day: date) -> LegacyWikiMergeReport:
@@ -312,7 +444,7 @@ def prepare_legacy_wiki_merge(vault: Path, *, migration_day: date) -> LegacyWiki
             facets=facets,
             knowledge_state=state,
             migration_day=migration_day,
-            parent_topics=_parent_topics(root, Path(new_relative)),
+            parent=_migration_parent(root, Path(new_relative)),
         )
         pages[target] = normalized.encode("utf-8")
         subject_count += 1
@@ -320,7 +452,11 @@ def prepare_legacy_wiki_merge(vault: Path, *, migration_day: date) -> LegacyWiki
     rewritten: dict[Path, bytes] = {}
     projections_to_refresh: list[Path] = []
     for path in sorted(root.rglob("*.md")):
-        if ".local" in path.relative_to(root).parts or path in sources:
+        if (
+            ".local" in path.relative_to(root).parts
+            or path in sources
+            or is_wiki_source_archive(path, root / WIKI_ROOT)
+        ):
             continue
         original = pages.get(path, path.read_bytes()).decode("utf-8")
         updated = _rewrite_legacy_paths(original, mapping)
@@ -387,6 +523,12 @@ def _legacy_target_path(root: Path, relative: str, text: str, title: str) -> Pat
         and _frontmatter_text(text, "person_scope") == "novel-local-only"
     ):
         return root / WIKI_PRIVATE_ROOT / f"{_slug(title)}.md"
+    if relative.startswith("projects/"):
+        return root / "wiki/personal/projects" / f"{_slug(title)}.md"
+    if relative.startswith("content/"):
+        return root / "wiki/resources" / f"{_slug(title)}.md"
+    if relative.startswith("users/"):
+        return root / "wiki/personal" / f"{_slug(title)}.md"
     return resolve_wiki_path(root, title)
 
 
@@ -406,10 +548,12 @@ def _legacy_facets(relative: str, text: str) -> tuple[str, ...]:
         return ("프로젝트",)
     if relative.startswith("content/") or page_type == "content":
         content_kind = _frontmatter_text(text, "content_kind")
+        if content_kind == "book":
+            return ("학습",)
         return (
-            ("콘텐츠", "학습")
-            if content_kind in {"book", "lecture", "course", "article", "learning-material-bundle"}
-            else ("콘텐츠",)
+            ("리소스", "학습")
+            if content_kind in {"lecture", "course", "article", "learning-material-bundle"}
+            else ("리소스",)
         )
     if relative.startswith("users/") and page_type != "project":
         return ("인물",)
@@ -451,14 +595,24 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
     )
     merged = _strip_managed_section(merged, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END)
     merged = _strip_managed_section(merged, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END)
+    merged = strip_generated_wiki_views(merged)
+    merged = _remove_frontmatter_keys(
+        merged, ("parent_topics", "parent_moc", "map_role", "mindmap_role")
+    )
     merged = _upsert_frontmatter_value(merged, "type", "Wiki")
     existing_identity = _frontmatter_value(existing, "canonical_id") if existing else None
     if existing_identity is not None and not _frontmatter_raw(merged, "canonical_id"):
         merged = _set_frontmatter_object(merged, "canonical_id", existing_identity)
-    existing_parent = _frontmatter_value(existing, "parent_topics") if existing else None
-    if existing_parent is not None and _frontmatter_value(merged, "parent_topics") is None:
-        merged = _set_frontmatter_object(merged, "parent_topics", existing_parent)
     for key in (
+        "node_kind",
+        "parent",
+        "keywords",
+        "aliases",
+        "view_mode",
+        "updated",
+        "entity_kind",
+        "sequence",
+        "central_question",
         "facets",
         "summary",
         "state_updated",
@@ -480,7 +634,7 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
     )
     merged = _upsert_frontmatter_value(merged, "state_reason", "accepted-evidence-receipt")
     if not existing:
-        return merged
+        return _normalize_article_view(merged)
     current = _optional_marker_block(existing, WIKI_CURRENT_START, WIKI_CURRENT_END)
     timeline = _optional_marker_block(existing, WIKI_TIMELINE_START, WIKI_TIMELINE_END)
     if timeline is not None:
@@ -498,7 +652,7 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
         )
     navigation = _optional_marker_block(existing, WIKI_NAVIGATION_START, WIKI_NAVIGATION_END)
     if current is None and timeline is None and navigation is None:
-        return merged
+        return preserve_generated_wiki_views(existing, _normalize_article_view(merged))
     blocks: list[str] = []
     if navigation is not None:
         blocks.extend(("## 주제 연결", "", navigation, ""))
@@ -506,7 +660,8 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
         blocks.extend(("## 현재 이해", "", current))
     if timeline is not None:
         blocks.extend(("", "## 시간 이력", "", timeline))
-    return merged.rstrip() + "\n\n" + "\n".join(blocks).rstrip() + "\n"
+    merged = merged.rstrip() + "\n\n" + "\n".join(blocks).rstrip() + "\n"
+    return preserve_generated_wiki_views(existing, _normalize_article_view(merged))
 
 
 def _normalize_existing_wiki(
@@ -516,53 +671,81 @@ def _normalize_existing_wiki(
     facets: tuple[str, ...],
     knowledge_state: str,
     migration_day: date,
-    parent_topics: tuple[str, ...] = (),
+    parent: str | None = None,
 ) -> str:
-    updated = _upsert_frontmatter_value(text, "type", "Wiki")
-    updated = _upsert_frontmatter_value(
-        updated, "canonical_id", json.dumps(canonical_id, ensure_ascii=False)
+    match = re.match(r"\A---\s*\n(?P<yaml>.*?)\n---\s*\n?", text, flags=re.DOTALL)
+    if match is None:
+        raise WoonError("Wiki migration requires YAML frontmatter")
+    metadata = yaml.safe_load(match.group("yaml")) or {}
+    if not isinstance(metadata, dict):
+        raise WoonError("Wiki migration frontmatter must be a mapping")
+    existing_parent = metadata.get("parent")
+    legacy_parents = metadata.get("parent_topics")
+    legacy_parent = (
+        legacy_parents[0]
+        if isinstance(legacy_parents, list)
+        and len(legacy_parents) == 1
+        and isinstance(legacy_parents[0], str)
+        else None
     )
-    updated = _upsert_frontmatter_value(updated, "facets", json.dumps(facets, ensure_ascii=False))
-    updated = _upsert_frontmatter_value(
-        updated, "knowledge_state", json.dumps(knowledge_state, ensure_ascii=False)
+    for legacy in ("parent_topics", "parent_moc", "map_role", "mindmap_role"):
+        metadata.pop(legacy, None)
+    title = str(metadata.get("title", "")).strip()
+    entity_kind = str(metadata.get("entity_kind", "")).strip()
+    if not entity_kind:
+        if metadata.get("entity_type") == "person" or metadata.get("person_id"):
+            entity_kind = "person"
+        elif metadata.get("content_kind"):
+            entity_kind = str(metadata["content_kind"])
+        elif metadata.get("project_id"):
+            entity_kind = "project"
+    default_node_kind = (
+        "root"
+        if canonical_id == "README"
+        else "hub"
+        if canonical_id.endswith("/README")
+        else "entity"
+        if entity_kind
+        else "topic"
     )
-    updated = _upsert_frontmatter_value(
-        updated,
-        "status",
-        "Archived" if knowledge_state in {"오래됨", "폐기됨"} else "Active",
-    )
-    updated = _upsert_frontmatter_value(
-        updated, "parent_topics", json.dumps(parent_topics, ensure_ascii=False)
-    )
-    if not _frontmatter_text(updated, "summary"):
-        updated = _upsert_frontmatter_value(
-            updated,
-            "summary",
-            json.dumps(_summary_from_document(updated), ensure_ascii=False),
-        )
-    updated = _upsert_frontmatter_value(
-        updated,
-        "state_reason",
+    node_kind = str(metadata.get("node_kind", "")).strip() or default_node_kind
+    default_view_mode = {
+        "person": "topic-timeline",
+        "project": "project",
+        "book": "linear",
+    }.get(entity_kind, "tree")
+    metadata.update(
         {
-            "근거 확인됨": "accepted-evidence-receipt",
-            "오래됨": "legacy-lifecycle",
-        }.get(knowledge_state, "legacy-normalization"),
+            "type": "Wiki",
+            "canonical_id": canonical_id,
+            "node_kind": node_kind,
+            "keywords": metadata.get("keywords") or [title],
+            "aliases": metadata.get("aliases") or [],
+            "view_mode": metadata.get("view_mode") or default_view_mode,
+            "updated": metadata.get("updated") or migration_day.isoformat(),
+            "facets": list(facets),
+            "knowledge_state": knowledge_state,
+            "status": "Archived" if knowledge_state in {"오래됨", "폐기됨"} else "Active",
+            "summary": metadata.get("summary") or _summary_from_document(text),
+            "state_reason": {
+                "근거 확인됨": "accepted-evidence-receipt",
+                "오래됨": "legacy-lifecycle",
+            }.get(knowledge_state, "legacy-normalization"),
+            "state_updated": migration_day.isoformat(),
+            "record_owner": metadata.get("record_owner") or "choi-woonyoung",
+        }
     )
-    updated = _upsert_frontmatter_value(updated, "state_updated", migration_day.isoformat())
-    if not _frontmatter_raw(updated, "record_owner"):
-        updated = _insert_frontmatter_value(updated, "record_owner", "choi-woonyoung")
-
-    if parent_topics:
-        navigation = "\n".join(
-            (WIKI_NAVIGATION_START, *(f"- {link}" for link in parent_topics), WIKI_NAVIGATION_END)
-        )
-        updated = _replace_or_append_managed_section(
-            updated,
-            "주제 연결",
-            WIKI_NAVIGATION_START,
-            WIKI_NAVIGATION_END,
-            navigation,
-        )
+    if entity_kind:
+        metadata["entity_kind"] = entity_kind
+    effective_parent = (
+        existing_parent if isinstance(existing_parent, str) and existing_parent else legacy_parent
+    ) or parent
+    if effective_parent is None:
+        metadata.pop("parent", None)
+    else:
+        metadata["parent"] = effective_parent
+    yaml_text = yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False)
+    updated = f"---\n{yaml_text}---\n\n{text[match.end() :].lstrip()}"
 
     timeline_body = _optional_marker_body(updated, WIKI_TIMELINE_START, WIKI_TIMELINE_END)
     rows = [
@@ -572,19 +755,23 @@ def _normalize_existing_wiki(
     ]
     if not rows:
         if timeline_body is None:
-            return updated
-        return _strip_managed_section(updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END)
+            return _normalize_article_view(updated)
+        updated = _strip_managed_section(
+            updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END
+        )
+        return _normalize_article_view(updated)
     timeline = "\n".join((WIKI_TIMELINE_START, *rows, WIKI_TIMELINE_END))
-    return _replace_or_append_managed_section(
+    updated = _replace_or_append_managed_section(
         updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END, timeline
     )
+    return _normalize_article_view(updated)
 
 
-def _parent_topics(root: Path, relative: Path) -> tuple[str, ...]:
-    """Return one deterministic parent edge so every visible Wiki reaches the root."""
+def _migration_parent(root: Path, relative: Path) -> str | None:
+    """Infer one provisional parent only for the retired corpus migration."""
 
     if relative.as_posix() == "wiki/README.md":
-        return ()
+        return None
     parts = relative.parts
     parent = root / "wiki/README.md"
     if len(parts) >= 3 and relative.name != "README.md":
@@ -597,7 +784,7 @@ def _parent_topics(root: Path, relative: Path) -> tuple[str, ...]:
         else "Wiki"
     )
     link = parent.relative_to(root).with_suffix("").as_posix()
-    return (f"[[{link}|{title or 'Wiki'}]]",)
+    return f"[[{link}|{title or 'Wiki'}]]"
 
 
 def _summary_from_document(text: str) -> str:
@@ -645,7 +832,8 @@ def _infer_facets(relative: Path, text: str) -> tuple[str, ...]:
     """
 
     raw_tags = _yaml_block_list(text, "tags")
-    facets = [item for item in _frontmatter_list(text, "facets") if item in ALLOWED_FACETS]
+    raw_facets = _frontmatter_list(text, "facets")
+    facets = [item for item in raw_facets if item in ALLOWED_FACETS]
     is_person = (
         "인물" in facets
         or _frontmatter_text(text, "entity_type").casefold() == "person"
@@ -660,14 +848,19 @@ def _infer_facets(relative: Path, text: str) -> tuple[str, ...]:
         or any(tag == "topic:project" or tag.startswith("topic:project-") for tag in raw_tags)
     )
     content_kind = _frontmatter_text(text, "content_kind")
-    is_content = "콘텐츠" in facets or bool(content_kind)
+    is_book = content_kind == "book"
+    is_resource = (
+        "리소스" in facets
+        or (bool(content_kind) and not is_book)
+        or ("콘텐츠" in raw_facets and not is_book)
+    )
 
     # The first unified migration temporarily gave every page the generic
     # concept/learning pair.  Strong entity properties are authoritative and
     # must remove that fallback so Facet filters retain their meaning.
     if is_person:
         facets = [item for item in facets if item not in {"개념", "학습"}]
-    elif is_project or is_content:
+    elif is_project or is_resource or is_book:
         facets = [item for item in facets if item != "개념"]
 
     if any(tag == "domain:career" for tag in raw_tags):
@@ -676,21 +869,22 @@ def _infer_facets(relative: Path, text: str) -> tuple[str, ...]:
         facets.append("인물")
     if is_project:
         facets.append("프로젝트")
-    if is_content:
-        facets.append("콘텐츠")
+    if is_resource:
+        facets.append("리소스")
         if content_kind in {
-            "book",
             "lecture",
             "course",
             "article",
             "learning-material-bundle",
         }:
             facets.append("학습")
+    if is_book:
+        facets.append("학습")
     if any(
         tag.startswith("domain:") or tag.startswith("topic:") or tag.startswith("book:")
         for tag in raw_tags
     ):
-        if not (is_person or is_project or is_content):
+        if not (is_person or is_project or is_resource or is_book):
             facets.append("개념")
         if not is_person:
             facets.append("학습")
@@ -712,32 +906,49 @@ def compiled_wiki_contract(relative: Path, text: str) -> dict[str, object]:
     vault_relative = Path(WIKI_ROOT) / relative
     path_identity = relative.with_suffix("").as_posix()
     canonical_id = _frontmatter_text(text, "canonical_id") or path_identity
-    explicit_parent_topics = _frontmatter_value(text, "parent_topics")
-    if explicit_parent_topics is not None:
-        if not isinstance(explicit_parent_topics, list) or not all(
-            isinstance(item, str) and item.strip() for item in explicit_parent_topics
-        ):
-            raise WoonError("compiled Wiki parent_topics must be a non-empty string list")
-        parent_topics = tuple(item.strip() for item in explicit_parent_topics)
-    elif path_identity == "README":
-        parent_topics = ()
+    explicit_parent = _frontmatter_value(text, "parent")
+    if explicit_parent is not None and not isinstance(explicit_parent, str):
+        raise WoonError("compiled Wiki parent must be one wikilink")
+    if path_identity == "README":
+        parent = None
+    elif isinstance(explicit_parent, str) and explicit_parent.strip():
+        parent = explicit_parent.strip()
     elif (
         len(relative.parts) > 1
         and relative.name != "README.md"
         and relative.parts[0] in COMPILED_SECTION_ROOTS
     ):
-        parent_topics = (f"[[wiki/{relative.parts[0]}/README|{relative.parts[0]}]]",)
+        parent = f"[[wiki/{relative.parts[0]}/README|{relative.parts[0]}]]"
     else:
-        parent_topics = ("[[wiki/README|Wiki]]",)
+        parent = "[[wiki/README|Wiki]]"
+    title = _frontmatter_text(text, "title") or relative.stem
+    node_kind = _frontmatter_text(text, "node_kind") or (
+        "root" if path_identity == "README" else "hub" if relative.name == "README.md" else "topic"
+    )
+    view_mode = _frontmatter_text(text, "view_mode") or (
+        "tree" if node_kind in {"root", "hub", "topic", "entity"} else "article"
+    )
+    keywords = _frontmatter_list(text, "keywords") or (title,)
+    aliases = _frontmatter_list(text, "aliases")
+    updated = (
+        _frontmatter_text(text, "updated")
+        or _frontmatter_text(text, "state_updated")
+        or "1970-01-01"
+    )
     return {
         "type": "Wiki",
         "canonical_id": canonical_id,
+        "node_kind": node_kind,
+        **({"parent": parent} if parent is not None else {}),
+        "keywords": list(keywords),
+        "aliases": list(aliases),
+        "view_mode": view_mode,
+        "updated": updated,
         "facets": list(_infer_facets(vault_relative, text)),
         "knowledge_state": "근거 확인됨",
         "state_reason": "accepted-evidence-receipt",
         "status": "Active",
         "record_owner": "choi-woonyoung",
-        "parent_topics": list(parent_topics),
         "summary": _summary_from_document(text),
     }
 
@@ -792,18 +1003,33 @@ def _merge_delta(text: str, delta: WikiDelta) -> str:
     updated = _upsert_frontmatter_value(
         text, "facets", json.dumps(merged_facets, ensure_ascii=False)
     )
-    if delta.parent_topics:
+    parent = delta.parent
+    if parent is not None:
         updated = _upsert_frontmatter_value(
-            updated,
-            "parent_topics",
-            json.dumps(delta.parent_topics, ensure_ascii=False),
+            updated, "parent", json.dumps(parent, ensure_ascii=False)
         )
-    elif not _frontmatter_raw(updated, "parent_topics"):
-        updated = _insert_frontmatter_value(
-            updated,
-            "parent_topics",
-            json.dumps(("[[wiki/README|Wiki]]",), ensure_ascii=False),
+    updated = _upsert_frontmatter_value(updated, "node_kind", delta.node_kind)
+    updated = _upsert_frontmatter_value(updated, "view_mode", delta.view_mode)
+    if delta.keywords:
+        updated = _upsert_frontmatter_value(
+            updated, "keywords", json.dumps(delta.keywords, ensure_ascii=False)
         )
+    if delta.aliases:
+        updated = _upsert_frontmatter_value(
+            updated, "aliases", json.dumps(delta.aliases, ensure_ascii=False)
+        )
+    elif not _frontmatter_raw(updated, "aliases"):
+        updated = _insert_frontmatter_value(updated, "aliases", "[]")
+    if delta.central_question is not None:
+        updated = _upsert_frontmatter_value(
+            updated, "central_question", json.dumps(delta.central_question, ensure_ascii=False)
+        )
+    if delta.entity_kind is not None:
+        updated = _upsert_frontmatter_value(updated, "entity_kind", delta.entity_kind)
+    if delta.entity_section is not None:
+        updated = _upsert_frontmatter_value(updated, "entity_section", delta.entity_section)
+    if delta.sequence is not None:
+        updated = _upsert_frontmatter_value(updated, "sequence", f"{delta.sequence:g}")
     if delta.interview_answer is not None:
         updated = _upsert_frontmatter_value(updated, "question_kind", "interview")
         updated = _upsert_frontmatter_value(
@@ -827,23 +1053,43 @@ def _merge_delta(text: str, delta: WikiDelta) -> str:
     )
     updated = _merge_facet_properties(updated, delta)
 
-    current = "\n".join((WIKI_CURRENT_START, delta.summary.strip(), WIKI_CURRENT_END))
-    updated = _replace_or_append_managed_section(
-        updated, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END, current
-    )
+    if delta.node_kind == "entity":
+        updated = _strip_managed_section(updated, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END)
+        updated = _strip_managed_section(
+            updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END
+        )
+        if delta.related_documents:
+            rows = [
+                f"- [[{Path(path).with_suffix('').as_posix()}]]" for path in delta.related_documents
+            ]
+            updated = _merge_h2_rows(updated, "관련 키워드", rows)
+        return _normalize_article_view(updated)
+
+    if delta.entity_section == "history":
+        updated = _strip_managed_section(updated, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END)
+    else:
+        current = "\n".join((WIKI_CURRENT_START, delta.summary.strip(), WIKI_CURRENT_END))
+        updated = _replace_or_append_managed_section(
+            updated, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END, current
+        )
 
     row = f"- {delta.day.isoformat()} · {delta.event_kind} — {delta.summary.strip()}"
-    previous_timeline = _optional_marker_body(updated, WIKI_TIMELINE_START, WIKI_TIMELINE_END)
-    rows = [line for line in (previous_timeline or "").splitlines() if line.strip()]
-    if row not in rows:
-        rows.append(row)
-    timeline = "\n".join((WIKI_TIMELINE_START, *rows, WIKI_TIMELINE_END))
-    updated = _replace_or_append_managed_section(
-        updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END, timeline
-    )
-    if delta.intent:
+    if delta.entity_section == "information":
+        updated = _strip_managed_section(
+            updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END
+        )
+    else:
+        previous_timeline = _optional_marker_body(updated, WIKI_TIMELINE_START, WIKI_TIMELINE_END)
+        rows = [line for line in (previous_timeline or "").splitlines() if line.strip()]
+        if row not in rows:
+            rows.append(row)
+        timeline = "\n".join((WIKI_TIMELINE_START, *rows, WIKI_TIMELINE_END))
+        updated = _replace_or_append_managed_section(
+            updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END, timeline
+        )
+    if delta.intent and delta.entity_section != "history":
         updated = _replace_or_append_h2(updated, "남긴 의도", f"추정 의도: {delta.intent.strip()}")
-    if delta.next_question:
+    if delta.next_question and delta.entity_section != "history":
         updated = _replace_or_append_h2(updated, "다음 질문", delta.next_question.strip())
     if delta.related_documents:
         rows = [
@@ -852,7 +1098,7 @@ def _merge_delta(text: str, delta: WikiDelta) -> str:
         updated = _merge_h2_rows(updated, "연결", rows)
     if delta.interview_answer is not None:
         updated = _merge_interview_answer(updated, delta)
-    return updated
+    return _normalize_article_view(updated)
 
 
 def _render_new(delta: WikiDelta) -> str:
@@ -864,23 +1110,31 @@ def _render_new(delta: WikiDelta) -> str:
             WIKI_TIMELINE_END,
         )
     )
+    canonical_path = Path(delta.wiki_subject_path or wiki_relative_path(delta.title))
+    canonical_id = canonical_path.with_suffix("").relative_to("wiki").as_posix()
     lines = [
         "---",
         "type: Wiki",
         f"title: {json.dumps(delta.title.strip(), ensure_ascii=False)}",
-        f"canonical_id: {json.dumps(f'personal/{_slug(delta.title)}', ensure_ascii=False)}",
+        f"canonical_id: {json.dumps(canonical_id, ensure_ascii=False)}",
+        f"node_kind: {delta.node_kind}",
+        f"parent: {json.dumps(delta.parent, ensure_ascii=False)}",
+        f"keywords: {json.dumps(delta.keywords, ensure_ascii=False)}",
+        f"aliases: {json.dumps(delta.aliases, ensure_ascii=False)}",
+        f"view_mode: {delta.view_mode}",
+        *((f"entity_kind: {delta.entity_kind}",) if delta.entity_kind is not None else ()),
+        *((f"entity_section: {delta.entity_section}",) if delta.entity_section is not None else ()),
+        *((f"sequence: {delta.sequence:g}",) if delta.sequence is not None else ()),
+        *(
+            (f"central_question: {json.dumps(delta.central_question, ensure_ascii=False)}",)
+            if delta.central_question is not None
+            else ()
+        ),
         "record_owner: choi-woonyoung",
         "publish: false",
         "access: local-only",
         "status: Active",
         f"facets: {json.dumps(delta.facets, ensure_ascii=False)}",
-        (
-            "parent_topics: "
-            + json.dumps(
-                delta.parent_topics or ("[[wiki/README|Wiki]]",),
-                ensure_ascii=False,
-            )
-        ),
         *(
             (
                 "question_kind: interview",
@@ -898,19 +1152,31 @@ def _render_new(delta: WikiDelta) -> str:
         "---",
         "",
         f"# {delta.title.strip()}",
-        "",
-        "## 현재 이해",
-        "",
-        current,
-        "",
-        "## 시간 이력",
-        "",
-        timeline,
     ]
+    if delta.node_kind == "entity":
+        if delta.entity_kind == "book":
+            lines.extend(("", "## 목차"))
+    elif delta.entity_section == "information":
+        lines.extend(("", "## 현재 이해", "", current))
+    elif delta.entity_section == "history":
+        lines.extend(("", "## 시간 이력", "", timeline))
+    else:
+        lines.extend(
+            (
+                "",
+                "## 현재 이해",
+                "",
+                current,
+                "",
+                "## 시간 이력",
+                "",
+                timeline,
+            )
+        )
     lines = _insert_new_facet_properties(lines, delta)
-    if delta.intent:
+    if delta.intent and delta.entity_kind != "book" and delta.entity_section != "history":
         lines.extend(("", "## 남긴 의도", "", f"추정 의도: {delta.intent.strip()}"))
-    if delta.next_question:
+    if delta.next_question and delta.entity_kind != "book" and delta.entity_section != "history":
         lines.extend(("", "## 다음 질문", "", delta.next_question.strip()))
     if delta.related_documents:
         lines.extend(("", "## 연결", ""))
@@ -919,7 +1185,7 @@ def _render_new(delta: WikiDelta) -> str:
         )
     if delta.interview_answer is not None:
         lines.extend(_new_interview_sections(delta))
-    return "\n".join((*lines, ""))
+    return _normalize_article_view("\n".join((*lines, "")))
 
 
 def _validate_delta(vault: Path, delta: WikiDelta, *, planned_paths: set[str]) -> None:
@@ -933,6 +1199,26 @@ def _validate_delta(vault: Path, delta: WikiDelta, *, planned_paths: set[str]) -
         raise WoonError("Wiki delta contains an unsupported knowledge state")
     if delta.state_authority not in ALLOWED_STATE_AUTHORITIES:
         raise WoonError("Wiki delta contains an unsupported state authority")
+    if delta.node_kind not in {"hub", "topic", "entity", "detail", "decision"}:
+        raise WoonError("Wiki delta contains an unsupported node_kind")
+    if delta.view_mode not in {"tree", "linear", "project", "topic-timeline", "article"}:
+        raise WoonError("Wiki delta contains an unsupported view_mode")
+    if delta.entity_section not in {None, "information", "history"}:
+        raise WoonError("Wiki delta contains an unsupported entity_section")
+    if delta.entity_section is not None and delta.node_kind != "detail":
+        raise WoonError("Wiki entity_section requires node_kind detail")
+    if not delta.keywords or len(set(item.casefold() for item in delta.keywords)) != len(
+        delta.keywords
+    ):
+        raise WoonError("Wiki delta requires unique representative keywords")
+    for keyword in delta.keywords:
+        _bounded_line(keyword, "keyword", 120)
+    if len(set(item.casefold() for item in delta.aliases)) != len(delta.aliases):
+        raise WoonError("Wiki aliases must be unique")
+    for alias in delta.aliases:
+        _bounded_line(alias, "alias", 120)
+    if delta.central_question is not None:
+        _bounded_line(delta.central_question, "central_question", 240)
     transition_knowledge_state(
         current_state="",
         requested_state=delta.knowledge_state,
@@ -970,20 +1256,22 @@ def _validate_delta(vault: Path, delta: WikiDelta, *, planned_paths: set[str]) -
             candidate.is_absolute()
             or ".." in candidate.parts
             or not relative.endswith(".md")
-            or not relative.startswith(("wiki/", "maps/"))
+            or not relative.startswith("wiki/")
             or (relative not in planned_paths and not (vault / candidate).is_file())
         ):
-            raise WoonError("Wiki relation must point to an existing Wiki or Map")
-    for parent in delta.parent_topics:
-        target = _wikilink_target(parent)
-        candidate = Path(f"{target}.md") if not target.endswith(".md") else Path(target)
-        if (
-            not target.startswith("wiki/")
-            or candidate.is_absolute()
-            or ".." in candidate.parts
-            or (candidate.as_posix() not in planned_paths and not (vault / candidate).is_file())
-        ):
-            raise WoonError("Wiki parent topic must point to an existing Wiki")
+            raise WoonError("Wiki relation must point to an existing Wiki")
+    parent = delta.parent
+    if parent is None:
+        raise WoonError("Wiki delta requires one semantic parent")
+    target = _wikilink_target(parent)
+    candidate = Path(f"{target}.md") if not target.endswith(".md") else Path(target)
+    if (
+        not target.startswith("wiki/")
+        or candidate.is_absolute()
+        or ".." in candidate.parts
+        or (candidate.as_posix() not in planned_paths and not (vault / candidate).is_file())
+    ):
+        raise WoonError("Wiki parent must point to an existing Wiki")
     if delta.interview_answer is not None:
         if not delta.interview_tracks or len(set(delta.interview_tracks)) != len(
             delta.interview_tracks
@@ -1286,6 +1574,26 @@ def _set_frontmatter_object(text: str, key: str, value: object) -> str:
     return f"---\n{rendered}---{match.group('body')}"
 
 
+def _remove_frontmatter_keys(text: str, keys: tuple[str, ...]) -> str:
+    """Remove retired root properties without touching the Markdown body."""
+
+    match = re.match(r"\A---\n(?P<yaml>[\s\S]*?)\n---(?P<body>[\s\S]*)\Z", text)
+    if match is None:
+        raise WoonError("Wiki document requires YAML frontmatter")
+    data = yaml.safe_load(match.group("yaml")) or {}
+    if not isinstance(data, dict):
+        raise WoonError("Wiki frontmatter is malformed")
+    changed = False
+    for key in keys:
+        if key in data:
+            del data[key]
+            changed = True
+    if not changed:
+        return text
+    rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    return f"---\n{rendered}---{match.group('body')}"
+
+
 def _frontmatter_text(text: str, key: str) -> str:
     raw = _frontmatter_raw(text, key)
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
@@ -1302,10 +1610,102 @@ def _frontmatter_list(text: str, key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _normalize_article_view(text: str) -> str:
+    """Render one compact, NamuWiki-style index from canonical metadata.
+
+    The callout is a view inside the same Markdown file, not another source of
+    truth.  It is regenerated from frontmatter on every compile or Wiki update
+    so the visible summary cannot drift from the canonical properties.
+    """
+
+    title = _frontmatter_text(text, "title")
+    summary = re.sub(r"\s+", " ", _frontmatter_text(text, "summary")).strip()
+    state = _frontmatter_text(text, "knowledge_state")
+    node_kind = _frontmatter_text(text, "node_kind")
+    view_mode = _frontmatter_text(text, "view_mode")
+    parent = _frontmatter_text(text, "parent")
+    if not title or not summary or not state:
+        return _normalize_timeline_heading(text)
+
+    rows = [
+        WIKI_OVERVIEW_START,
+        "> [!info] 한눈에 보기",
+        f"> **한 줄 정리** · {summary}",
+        f"> **종류** · {node_kind or 'topic'} · {view_mode or 'tree'}",
+        f"> **상태** · {state}",
+    ]
+    if parent:
+        rows.append("> **상위 키워드** · " + parent)
+    rows.append(WIKI_OVERVIEW_END)
+    overview = "\n".join(rows)
+
+    start_count = text.count(WIKI_OVERVIEW_START)
+    end_count = text.count(WIKI_OVERVIEW_END)
+    if start_count != end_count or start_count > 1:
+        raise WoonError("Wiki article overview markers are malformed")
+    if start_count == 1:
+        pattern = re.compile(
+            re.escape(WIKI_OVERVIEW_START) + r".*?" + re.escape(WIKI_OVERVIEW_END),
+            re.DOTALL,
+        )
+        updated = pattern.sub(overview, text, count=1)
+    else:
+        h1 = re.search(rf"(?m)^# {re.escape(title)}\s*$", text)
+        if h1 is None:
+            return _normalize_timeline_heading(text)
+        insertion = h1.end()
+        breadcrumb = re.match(
+            r"\n+<!-- breadcrumb:start -->.*?<!-- breadcrumb:end -->",
+            text[insertion:],
+            flags=re.DOTALL,
+        )
+        if breadcrumb is not None:
+            insertion += breadcrumb.end()
+        updated = text[:insertion].rstrip() + "\n\n" + overview + "\n" + text[insertion:].lstrip()
+
+    return _normalize_timeline_heading(updated)
+
+
+def _normalize_timeline_heading(text: str) -> str:
+    return re.sub(
+        rf"(?m)^## (?:시간 이력|한 줄 이력)\s*\n\s*(?={re.escape(WIKI_TIMELINE_START)})",
+        "## 한 줄 이력\n\n",
+        text,
+    )
+
+
 def _upsert_frontmatter_value(text: str, key: str, value: str) -> str:
-    if _frontmatter_raw(text, key):
-        return re.sub(rf"(?m)^{re.escape(key)}:\s*.*$", f"{key}: {value}", text, count=1)
-    return _insert_frontmatter_value(text, key, value)
+    """Replace one root frontmatter property without leaving YAML block tails.
+
+    Older Wiki pages commonly encode lists as a block::
+
+        facets:
+        - 개념
+        - 학습
+
+    Replacing only the ``facets:`` line turns the two list items into stray
+    YAML and can create a second logical source of truth on the next run.  The
+    replacement therefore owns the complete root-level YAML value, whether it
+    was written inline or as a block.
+    """
+
+    match = re.match(r"\A---\n(?P<yaml>[\s\S]*?)\n---(?P<body>[\s\S]*)\Z", text)
+    if match is None:
+        raise WoonError("Wiki document requires YAML frontmatter")
+
+    lines = match.group("yaml").splitlines()
+    key_pattern = re.compile(rf"^{re.escape(key)}:[ \t]*(?:.*)$")
+    root_key_pattern = re.compile(r"^[A-Za-z0-9_-]+:[ \t]*(?:.*)$")
+    start = next((index for index, line in enumerate(lines) if key_pattern.match(line)), None)
+    if start is None:
+        return _insert_frontmatter_value(text, key, value)
+
+    end = start + 1
+    while end < len(lines) and not root_key_pattern.match(lines[end]):
+        end += 1
+    lines[start:end] = [f"{key}: {value}"]
+    rendered = "\n".join(lines)
+    return f"---\n{rendered}\n---{match.group('body')}"
 
 
 def _insert_frontmatter_value(text: str, key: str, value: str) -> str:

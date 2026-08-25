@@ -17,7 +17,10 @@ from woon_core.knowledge.compiled_wiki import (
     CompiledWiki,
     CompiledWikiSettings,
     CuratedRevision,
+    _contains_mermaid_color_directive,
     _normalize_compiled_display_body,
+    _validate_claim_record,
+    _validate_source,
 )
 from woon_core.knowledge.domain import DocumentMetadata, IndexedDocument
 from woon_core.knowledge.service import KnowledgeService
@@ -50,6 +53,50 @@ flowchart LR
     assert 'broken["score<br/>(T"]' in repaired
     assert 'valid["score<br/>(T, T)"]' in repaired
     assert "본문의 shape은 (T, T)다." in repaired
+
+
+def test_compiler_rejects_mermaid_local_colors_but_allows_semantic_line_styles() -> None:
+    colored = """```mermaid
+flowchart TD
+  failed["실패"]
+  style failed fill:#f55,color:#fff
+```
+"""
+    semantic = """```mermaid
+flowchart TD
+  start["시작"] -.->|"확인 필요"| review["검토"]
+```
+"""
+
+    assert _contains_mermaid_color_directive(colored)
+    assert not _contains_mermaid_color_directive(semantic)
+
+    digest = hashlib.sha256(colored.encode("utf-8")).hexdigest()
+    with pytest.raises(WoonError, match="source Mermaid"):
+        _validate_source(
+            {
+                "source_id": "source://fixture/colored",
+                "kind": "fixture",
+                "locator": "fixture",
+                "original_sha256": digest,
+                "normalized_sha256": digest,
+                "privacy": "local-only",
+                "lifecycle": "compiled",
+                "purpose": "색상 규칙 회귀 검사",
+                "body": colored,
+            }
+        )
+    with pytest.raises(WoonError, match="claim Mermaid"):
+        _validate_claim_record(
+            {
+                "claim_id": "claim://fixture/colored",
+                "kind": "fixture",
+                "statement": "색 지정이 있는 Mermaid는 거부한다.",
+                "status": "accepted",
+                "source_ids": ["source://fixture/colored"],
+                "markdown": colored,
+            }
+        )
 
 
 def test_compiler_removes_retired_recent_document_list() -> None:
@@ -231,7 +278,7 @@ def test_compile_preserves_single_wiki_context_and_audits_it(tmp_path: Path) -> 
 대화에서 다시 생각한 내용이다.
 <!-- woon-wiki-current:end -->
 
-## 시간 이력
+## 한 줄 이력
 
 <!-- woon-wiki-timeline:start -->
 - 2026-08-24 · 실행 — 큐를 다시 학습했다.
@@ -275,7 +322,9 @@ def test_compile_prunes_retired_page_receipt_without_rewriting_current_page(
     assert [item["page_id"] for item in current["receipts"]] == ["os/queue"]
 
 
-def test_managed_conversation_context_does_not_stale_compiler_receipt(tmp_path: Path) -> None:
+def test_managed_context_refreshes_exact_output_receipt_without_losing_context(
+    tmp_path: Path,
+) -> None:
     write_page(tmp_path, "os/queue.md", "큐", "근거로 확인한 설명이다.")
     compiler = CompiledWiki(compiled_settings(tmp_path))
     compiler.migrate()
@@ -288,7 +337,7 @@ def test_managed_conversation_context_does_not_stale_compiler_receipt(tmp_path: 
 대화에서 다시 생각한 내용이다.
 <!-- woon-wiki-current:end -->
 
-## 시간 이력
+## 한 줄 이력
 
 <!-- woon-wiki-timeline:start -->
 - 2026-08-24 · 실행 — 큐를 다시 학습했다.
@@ -296,8 +345,11 @@ def test_managed_conversation_context_does_not_stale_compiler_receipt(tmp_path: 
 """
     path.write_text(path.read_text(encoding="utf-8").rstrip() + context, encoding="utf-8")
 
+    assert not compiler.audit().complete
+    assert any("output bytes differ" in error for error in compiler.audit().errors)
+    assert compiler.compile().compiled == 1
     assert compiler.audit().complete
-    assert compiler.compile().compiled == 0
+    assert "대화에서 다시 생각한 내용이다." in path.read_text(encoding="utf-8")
 
     path.write_text(
         path.read_text(encoding="utf-8").replace("근거로 확인한 설명", "임의로 바꾼 설명"),
@@ -305,7 +357,26 @@ def test_managed_conversation_context_does_not_stale_compiler_receipt(tmp_path: 
     )
     audit = compiler.audit()
     assert not audit.complete
-    assert any("cannot be reproduced" in error for error in audit.errors)
+    assert any("output bytes differ" in error for error in audit.errors)
+
+
+def test_audit_fails_when_receipt_output_hash_does_not_match_current_bytes(
+    tmp_path: Path,
+) -> None:
+    write_page(tmp_path, "os/queue.md", "큐", "근거로 확인한 설명이다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    receipts_path = tmp_path / "catalog/llm-wiki/receipts.yaml"
+    payload = yaml.safe_load(receipts_path.read_text(encoding="utf-8"))
+    payload["receipts"][0]["output_sha256"] = "0" * 64
+    receipts_path.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+
+    audit = compiler.audit()
+
+    assert not audit.complete
+    assert any("output bytes differ" in error for error in audit.errors)
 
 
 def test_current_use_curation_is_separate_from_legacy_source_purpose(tmp_path: Path) -> None:

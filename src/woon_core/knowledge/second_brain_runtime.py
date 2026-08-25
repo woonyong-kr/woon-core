@@ -103,6 +103,8 @@ class AutomationRunStore:
         automation_id: str,
         request: RunRequest,
         produce: Callable[[], RunOutcome],
+        *,
+        validate: Callable[[], None] | None = None,
     ) -> RunResult:
         """Run one local operation or replay its existing receipt.
 
@@ -134,6 +136,8 @@ class AutomationRunStore:
                 raise WoonError(
                     f"second-brain owned paths changed for {automation_id}; refresh before retry"
                 )
+            if validate is not None:
+                validate()
             try:
                 outcome = produce()
             except Exception as error:

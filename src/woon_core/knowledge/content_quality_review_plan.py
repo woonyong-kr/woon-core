@@ -30,6 +30,8 @@ MAX_BATCH_SIZE = 64
 DEFAULT_MAX_BATCH_CHARS = 24_000
 MIN_MAX_BATCH_CHARS = 4_000
 MAX_MAX_BATCH_CHARS = 200_000
+_RUNTIME_DIRECTORY_MODE = 0o700
+_RUNTIME_FILE_MODE = 0o600
 
 
 def create_content_quality_review_plan(
@@ -121,11 +123,15 @@ def create_content_quality_review_plan(
         "compiled_pages": len(targets),
         "batches": manifest_batches,
     }
-    destination.mkdir(parents=True)
+    destination.mkdir(mode=_RUNTIME_DIRECTORY_MODE, parents=True)
     try:
         for path, payload in rendered_batches:
-            atomic_write(path, encode_json(payload))
-        atomic_write(destination / "manifest.json", encode_json(manifest))
+            atomic_write(path, encode_json(payload), mode=_RUNTIME_FILE_MODE)
+        atomic_write(
+            destination / "manifest.json",
+            encode_json(manifest),
+            mode=_RUNTIME_FILE_MODE,
+        )
     except BaseException:
         # The directory did not exist before this call, so partial plan files
         # cannot be mistaken for a valid resumable plan on a later run.
@@ -184,7 +190,7 @@ def rebase_content_quality_review_plan(
     )
     current = _load_object(destination / "manifest.json", "rebased quality review plan")
     _validate_plan(current)
-    results_destination.mkdir(parents=True)
+    results_destination.mkdir(mode=_RUNTIME_DIRECTORY_MODE, parents=True)
 
     can_reuse = _references_match(prior, current)
     prior_reviews: dict[str, dict[str, object]] = {}
@@ -205,7 +211,9 @@ def rebase_content_quality_review_plan(
         targets = _targets_from_manifest(batch.get("targets"))
         reviews = [prior_reviews.get(page_id) for page_id in targets]
         if len(reviews) == len(targets) and all(
-            review is not None and review["output_sha256"] == target["output_sha256"]
+            review is not None
+            and review["verdict"] == "passed"
+            and review["output_sha256"] == target["output_sha256"]
             for review, target in zip(reviews, targets.values(), strict=True)
         ):
             result_file = _safe_relative(
@@ -221,6 +229,7 @@ def rebase_content_quality_review_plan(
                         "reviews": [review for review in reviews if review is not None],
                     }
                 ),
+                mode=_RUNTIME_FILE_MODE,
             )
             reused_batches.append(batch_id)
             reusable_pages += len(targets)
@@ -243,6 +252,7 @@ def rebase_content_quality_review_plan(
                     "result_files": _result_file_digests(results_destination, reused_batches),
                 }
             ),
+            mode=_RUNTIME_FILE_MODE,
         )
         inherited_results = str(inherited_path)
 
@@ -331,7 +341,7 @@ def assemble_content_quality_reviews(
         },
         "reviews": [reviews[page_id] for page_id in sorted(reviews)],
     }
-    atomic_write(destination, encode_json(payload))
+    atomic_write(destination, encode_json(payload), mode=_RUNTIME_FILE_MODE)
     return {
         "version": PLAN_VERSION,
         "output": str(destination),

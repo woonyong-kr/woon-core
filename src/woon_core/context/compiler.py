@@ -104,8 +104,15 @@ class Compiler:
                 repository_path,
                 _string_list(manifest.get("generated_paths", []), "generated_paths"),
                 manifest.get("path_audit_exceptions", []),
+                _string_list(manifest.get("path_audit_raw_roots", []), "path_audit_raw_roots"),
             )
-            audit_directory_names(repository_path)
+            audit_directory_names(
+                repository_path,
+                _string_list(
+                    manifest.get("directory_name_audit_ignored_roots", []),
+                    "directory_name_audit_ignored_roots",
+                ),
+            )
             self._check_required_paths(repository_path, manifest)
             repositories += 1
         return CompileResult(repositories=repositories, artifacts=artifacts_count)
@@ -219,8 +226,17 @@ class Compiler:
         return loaded
 
 
-def audit_paths(root: Path, generated_paths: list[str], raw_exceptions: object) -> None:
+def audit_paths(
+    root: Path,
+    generated_paths: list[str],
+    raw_exceptions: object,
+    raw_roots: list[str] | tuple[str, ...] = (),
+) -> None:
     generated = {_safe_relative(value, "generated path") for value in generated_paths}
+    raw_source_roots = {_safe_relative(value, "path audit raw root") for value in raw_roots}
+    for relative in raw_source_roots:
+        if not (root / relative).is_dir():
+            raise WoonError(f"path audit raw root must be a directory: {relative.as_posix()!r}")
     if not isinstance(raw_exceptions, list):
         raise WoonError("path_audit_exceptions must be a list")
     excluded: set[Path] = set()
@@ -243,6 +259,8 @@ def audit_paths(root: Path, generated_paths: list[str], raw_exceptions: object) 
         if any(part in SKIPPED_DIRECTORIES for part in relative.parts):
             continue
         if any(relative == item or item in relative.parents for item in generated):
+            continue
+        if any(relative == item or item in relative.parents for item in raw_source_roots):
             continue
         if not path.is_file() or relative in excluded or not _is_operational(relative):
             continue
@@ -291,13 +309,21 @@ def _is_re_compile_call(node: ast.Call) -> bool:
     )
 
 
-def audit_directory_names(root: Path) -> None:
+def audit_directory_names(root: Path, ignored_roots: list[str] | tuple[str, ...] = ()) -> None:
     """Enforce kebab-case except for language and tool owned directories."""
 
+    ignored = {_safe_relative(value, "directory-name ignored root") for value in ignored_roots}
+    for relative in ignored:
+        if not (root / relative).is_dir():
+            raise WoonError(
+                f"directory-name ignored root must be a directory: {relative.as_posix()!r}"
+            )
     violations: list[str] = []
     for path in sorted(item for item in root.rglob("*") if item.is_dir()):
         relative = path.relative_to(root)
         if any(part in DIRECTORY_NAME_SKIPPED_DIRECTORIES for part in relative.parts):
+            continue
+        if any(relative == item or item in relative.parents for item in ignored):
             continue
         name = path.name
         if name.startswith((".", "_")):

@@ -110,7 +110,7 @@ def test_ignores_repository_instructions_outside_person_index_content_roots(tmp_
 
 def test_ignores_unparseable_legacy_source_during_person_dashboard_lookup(tmp_path: Path) -> None:
     service = _service(tmp_path)
-    legacy = tmp_path / "sources/imports/legacy.md"
+    legacy = tmp_path / "wiki/private/_sources/knowledge/imports/legacy.md"
     legacy.parent.mkdir(parents=True)
     legacy.write_text("---\ntitle: [broken\n---\n", encoding="utf-8")
 
@@ -299,7 +299,10 @@ def test_materializes_default_owner_without_rewriting_private_or_novel_records(
 ) -> None:
     service = _service(tmp_path)
     _write_document(tmp_path / "brain/decision.md", title="학습 결정")
-    _write_document(tmp_path / "sources/private/original.md", title="비공개 원본")
+    _write_document(
+        tmp_path / "wiki/private/_sources/knowledge/private/original.md",
+        title="비공개 원본",
+    )
     novel_card = tmp_path / "wiki/private/lee-minjeong.md"
     _write_document(novel_card, title="이민정")
     novel_card.write_text(
@@ -311,7 +314,10 @@ def test_materializes_default_owner_without_rewriting_private_or_novel_records(
         ),
         encoding="utf-8",
     )
-    _write_document(tmp_path / "sources/private/lee-minjeong-notes.md", title="창작 메모")
+    _write_document(
+        tmp_path / "wiki/private/_sources/knowledge/private/lee-minjeong-notes.md",
+        title="창작 메모",
+    )
 
     first = service.materialize_default_owner()
     second = service.materialize_default_owner()
@@ -321,12 +327,10 @@ def test_materializes_default_owner_without_rewriting_private_or_novel_records(
     assert "record_owner: choi-woonyoung" in (tmp_path / "brain/decision.md").read_text(
         encoding="utf-8"
     )
-    assert "record_owner:" not in (tmp_path / "sources/private/original.md").read_text(
-        encoding="utf-8"
-    )
-    assert "record_owner:" not in (tmp_path / "sources/private/lee-minjeong-notes.md").read_text(
-        encoding="utf-8"
-    )
+    original = tmp_path / "wiki/private/_sources/knowledge/private/original.md"
+    notes = tmp_path / "wiki/private/_sources/knowledge/private/lee-minjeong-notes.md"
+    assert "record_owner:" not in original.read_text(encoding="utf-8")
+    assert "record_owner:" not in notes.read_text(encoding="utf-8")
 
 
 def test_rejects_guess_driven_cards_and_private_link_targets(tmp_path: Path) -> None:
@@ -350,7 +354,10 @@ def test_rejects_guess_driven_cards_and_private_link_targets(tmp_path: Path) -> 
         creation_basis="explicit-request",
     )
     _write_document(tmp_path / "wiki/example.md", title="컴파일 산출물")
-    _write_document(tmp_path / "sources/private/example.md", title="개인 원본")
+    _write_document(
+        tmp_path / "wiki/private/_sources/knowledge/private/example.md",
+        title="개인 원본",
+    )
 
     linked = service.link_document(
         relative_path="wiki/example.md",
@@ -361,7 +368,7 @@ def test_rejects_guess_driven_cards_and_private_link_targets(tmp_path: Path) -> 
     assert linked.changed is True
     with pytest.raises(WoonError, match="private originals"):
         service.link_document(
-            relative_path="sources/private/example.md",
+            relative_path="wiki/private/_sources/knowledge/private/example.md",
             person_id="kim-heejun",
             roles=("participant",),
             evidence="명시된 참석자",

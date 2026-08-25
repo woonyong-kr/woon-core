@@ -6,13 +6,23 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+
+import yaml
 
 from woon_core.calendar.constants import (
     CONTEXT_CALENDAR_DASHBOARD_CSS_CLASS,
     CONTEXT_CALENDAR_PLUGIN_ID,
     CONTEXT_CALENDAR_PROFILE_ID,
+)
+from woon_core.errors import WoonError
+from woon_core.knowledge.source_boundary import audit_source_boundary
+from woon_core.knowledge.wiki_tree import (
+    LEGACY_TREE_FIELDS,
+    is_compact_link_canonical_id,
+    is_compact_link_page,
+    load_wiki_tree,
 )
 
 VAULT = Path.cwd().resolve()
@@ -24,10 +34,8 @@ CONTENT_ROOTS = [
     "brain/home.md",
     "brain/log.md",
     "brain/review",
-    "maps",
     "wiki",
     "inbox",
-    "sources",
 ]
 
 OPERATING_ROOTS = [
@@ -42,7 +50,6 @@ TEMPLATE_ROOTS = [
 MANAGED_NON_MARKDOWN_ROOTS = [
     "wiki",
     "maps",
-    "sources",
     "inbox",
     "types",
     "templates",
@@ -66,6 +73,7 @@ SKIP_DIRS = {
     "types",
     "assets",
     "exports",
+    "_sources",
 }
 OPERATING_SKIP_DIRS = SKIP_DIRS - {"types"}
 TEMPLATE_SKIP_DIRS = SKIP_DIRS - {"templates"}
@@ -73,15 +81,17 @@ TEMPLATE_SKIP_DIRS = SKIP_DIRS - {"templates"}
 WIKILINK_RE = re.compile(r"!?\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 LINK_LIST_SLUG_RE = re.compile(r"\[\[([^\]|#\n]+)(?:#[^\]|]+)?\]\]\s*(?:—|--|-)\s+\S")
-ABSOLUTE_LOCAL_RE = re.compile(r"""(?:/Users|/home)/[^/\s`)\]'\"]+(?:/[^\s`)\]'\"]*)?""")
+ABSOLUTE_LOCAL_RE = re.compile(
+    r"""(?<![\w.:/-])(?:/Users|/home)/[^/\s`)\]'\"]+(?:/[^\s`)\]'\"]+)+"""
+)
 LOCAL_ASSET_FIELDS = {"source_images"}
 TRANSIENT_FILE_NAMES = {".DS_Store"}
 TRANSIENT_FILE_PREFIXES = (".fuse_hidden",)
 TRANSIENT_FILE_SUFFIXES = ("~", ".tmp", ".bak")
 SOURCE_LIFECYCLES = {"captured", "compiled", "archived"}
 SOURCE_KINDS = {"web", "book", "lecture", "transcript", "clipping"}
-TEMPLATE_TYPES = {"Wiki", "키워드", "Source", "Creative", "Daily"}
-OBSIDIAN_GRAPH_FILTER = "(path:wiki -path:wiki/private) OR path:maps"
+TEMPLATE_TYPES = {"Wiki", "키워드", "Source", "Creative", "Daily", "Operations"}
+OBSIDIAN_GRAPH_FILTER = "path:wiki tag:#graph/overview -path:wiki/private/_sources"
 GLOBAL_GRAPH_ROOT = "wiki/README.md"
 OBSIDIAN_FRONT_MATTER_TITLE_PLUGIN = "obsidian-front-matter-title-plugin"
 OBSIDIAN_EXPLORER_SNIPPET = "focus-workspace"
@@ -109,6 +119,16 @@ MERMAID_LEGACY_MARKERS = (
     "TABLE BORDER=",
     "FONT POINT-SIZE=",
 )
+MERMAID_NEUTRAL_STYLE_MARKER = "woon-mermaid-neutral-v1"
+MERMAID_COLOR_DIRECTIVE_RE = re.compile(
+    r"^\s*(?:style\s+\S+|classDef\s+\S+|linkStyle\s+\S+)"
+    r"[^\n]*(?:fill|stroke|color)\s*:",
+    re.IGNORECASE,
+)
+MERMAID_THEME_COLOR_RE = re.compile(
+    r"%%\{init:[^\n]*(?:themeVariables|themeCSS)",
+    re.IGNORECASE,
+)
 OBSIDIAN_HIDDEN_EXPLORER_PATHS = (
     "assets",
     "catalog",
@@ -130,7 +150,7 @@ OBSIDIAN_IGNORED_PATHS = (
     "docs/",
     "evals/",
     "exports/",
-    "sources/private/",
+    "wiki/private/_sources/",
     ".json",
 )
 RETIRED_PRIVATE_NOVEL_ROOT = VAULT / "projects/writing"
@@ -177,7 +197,7 @@ CALENDAR_ICS_PROJECTION_PRODID = "PRODID:-//Woon//Apple Calendar Read-only Proje
 CALENDAR_PROJECTION_FILE_MODE = 0o400
 CALENDAR_PROJECTION_DIRECTORY_MODE = 0o500
 NONCANONICAL_MAP_ROOTS = ("maps/legacy/", "maps/samples/")
-ALLOWED_WIKI_FACETS = {"개념", "프로젝트", "콘텐츠", "인물", "커리어", "학습", "생활"}
+ALLOWED_WIKI_FACETS = {"개념", "프로젝트", "리소스", "인물", "커리어", "학습", "생활"}
 ALLOWED_VISIBLE_ROOT_DIRECTORIES = {
     "assets",
     "brain",
@@ -188,7 +208,6 @@ ALLOWED_VISIBLE_ROOT_DIRECTORIES = {
     "exports",
     "inbox",
     "maps",
-    "sources",
     "templates",
     "types",
     "wiki",
@@ -247,11 +266,11 @@ def wiki_and_entity_policy_issues(
         or any(char.isspace() for char in canonical_id)
     ):
         wiki.append(f"{relative}: canonical_id must be a stable path-independent identity")
-    facets = frontmatter.get("facets")
-    if not isinstance(facets, list) or not facets:
-        wiki.append(f"{relative}: facets must be a non-empty list")
+    facets = frontmatter.get("facets", [])
+    if not isinstance(facets, list):
+        wiki.append(f"{relative}: facets must be a list when present")
         facets = []
-    elif (
+    elif facets and (
         len(facets) != len(set(str(value) for value in facets)) or set(facets) - ALLOWED_WIKI_FACETS
     ):
         wiki.append(f"{relative}: facets must be unique values from the Wiki contract")
@@ -263,15 +282,30 @@ def wiki_and_entity_policy_issues(
         "폐기됨",
     }:
         wiki.append(f"{relative}: knowledge_state is invalid")
-    parents = frontmatter.get("parent_topics")
-    if not isinstance(parents, list):
-        wiki.append(f"{relative}: parent_topics must be a list")
-    elif relative == "wiki/README.md" and parents:
-        wiki.append(f"{relative}: Wiki root must not have a parent topic")
-    elif relative != "wiki/README.md" and not parents:
-        wiki.append(f"{relative}: visible Wiki must have a parent topic")
-    elif relative != "wiki/README.md" and len(parents) != 1:
-        wiki.append(f"{relative}: visible Wiki must have exactly one primary parent topic")
+    for field in LEGACY_TREE_FIELDS.intersection(frontmatter):
+        wiki.append(f"{relative}: legacy Wiki tree field remains: {field}")
+    node_kind = frontmatter.get("node_kind")
+    if node_kind not in {"root", "hub", "topic", "entity", "detail", "decision"}:
+        wiki.append(f"{relative}: node_kind is invalid")
+    view_mode = frontmatter.get("view_mode")
+    if view_mode not in {"tree", "linear", "project", "topic-timeline", "article"}:
+        wiki.append(f"{relative}: view_mode is invalid")
+    keywords = frontmatter.get("keywords")
+    if (
+        not isinstance(keywords, list)
+        or not keywords
+        or not all(isinstance(value, str) and value.strip() for value in keywords)
+    ):
+        wiki.append(f"{relative}: keywords must be a non-empty string list")
+    if not isinstance(frontmatter.get("aliases"), list):
+        wiki.append(f"{relative}: aliases must be a list")
+    if not isinstance(frontmatter.get("updated"), (str, date, datetime)):
+        wiki.append(f"{relative}: updated is required")
+    parent = frontmatter.get("parent")
+    if relative == "wiki/README.md" and parent not in {None, ""}:
+        wiki.append(f"{relative}: Wiki root must not have a parent")
+    elif relative != "wiki/README.md" and not isinstance(parent, str):
+        wiki.append(f"{relative}: visible Wiki must have exactly one parent")
     if frontmatter.get("question_kind") == "interview":
         title = frontmatter.get("title")
         filename = Path(relative).stem
@@ -288,14 +322,14 @@ def wiki_and_entity_policy_issues(
             wiki.append(f"{relative}: interview_tracks must be a non-empty list")
         if not isinstance(question_topic, str) or not question_topic.strip():
             wiki.append(f"{relative}: question_topic must name a reusable semantic topic")
-        if parents == ["[[wiki/README|Wiki]]"]:
+        if parent == "[[wiki/README|Wiki]]":
             wiki.append(
                 f"{relative}: interview question must use a semantic parent below Wiki root"
             )
-        if isinstance(parents, list) and len(parents) == 1 and isinstance(parents[0], str):
+        if isinstance(parent, str):
             parent_match = re.fullmatch(
                 r"\[\[(?P<path>[^\]|#]+)(?:#[^\]|]+)?(?:\|(?P<title>[^\]]+))?\]\]",
-                parents[0].strip(),
+                parent.strip(),
             )
             if parent_match is not None:
                 parent_path = parent_match.group("path")
@@ -310,12 +344,14 @@ def wiki_and_entity_policy_issues(
                     and parent_title.strip() != question_topic.strip()
                 ):
                     wiki.append(f"{relative}: question_topic must match the semantic parent title")
-    if "프로젝트" in facets and (
+    if frontmatter.get("entity_kind") == "project" and (
         not isinstance(frontmatter.get("project_id"), str)
         or not isinstance(frontmatter.get("objective"), str)
     ):
         entities.append(f"{relative}: project facet requires project_id and objective")
-    if "콘텐츠" in facets and frontmatter.get("content_kind") not in {
+    if frontmatter.get("entity_kind") == "content" and frontmatter.get(
+        "content_kind"
+    ) not in {
         "book",
         "film",
         "series",
@@ -326,9 +362,18 @@ def wiki_and_entity_policy_issues(
         "article",
         "exhibition",
         "learning-material-bundle",
+        "novel",
     }:
         entities.append(f"{relative}: content facet requires a valid content_kind")
     return wiki, entities
+
+
+def nonwiki_keyword_policy_issues(relative: str, frontmatter: dict[str, object]) -> list[str]:
+    """Keep human/AI keyword knowledge in the one canonical Wiki tree."""
+
+    if not relative.startswith("wiki/") and frontmatter.get("type") == "키워드":
+        return [f"{relative}: keyword knowledge belongs only under wiki/; use an operational type"]
+    return []
 
 
 def runtime_permission_issues(vault: Path) -> list[str]:
@@ -449,7 +494,7 @@ def daily_digest_embed_issues(vault: Path) -> list[str]:
 def vault_execution_ownership_issues(vault: Path) -> list[str]:
     """Reject executable maintenance code in the document Vault.
 
-    Raw source material may contain code under ``sources/``. This guard only
+    Raw source material may contain code under ``wiki/private/_sources``. This guard only
     protects runnable top-level files and the retired ``scripts/`` runtime
     folder, both of which must be owned by ``woon-core``.
     """
@@ -506,7 +551,7 @@ def iter_managed_non_markdown_files() -> list[Path]:
             if not item.is_file() or item.suffix == ".md":
                 continue
             parts = set(item.relative_to(VAULT).parts)
-            if parts & {".git", ".obsidian", "quartz"}:
+            if parts & {".git", ".obsidian", "quartz", "_sources"}:
                 continue
             files.append(item)
     return sorted(set(files))
@@ -555,7 +600,7 @@ def is_allowed_non_markdown_file(path: Path) -> bool:
     r = rel(path)
     if path.name == ".gitkeep" and r.startswith(("wiki/", "brain/wiki/")):
         return True
-    if path.suffix == ".base" and r.startswith(("inbox/", "sources/")):
+    if path.suffix == ".base" and r.startswith(("inbox/", "wiki/private/_sources/knowledge/")):
         return True
     if r == CALENDAR_ICS_PROJECTION_PATH:
         return is_core_calendar_ics_projection(path)
@@ -569,6 +614,13 @@ def is_allowed_non_markdown_file(path: Path) -> bool:
         # treated as an unexpected source artifact.
         return True
     if r == "catalog/source-audits/inflearn-java-course-materials.json":
+        return True
+    if r.startswith("wiki/private/_sources/knowledge/private/career/applications/") and path.suffix.casefold() in {
+        ".json",
+        ".pdf",
+        ".yaml",
+        ".yml",
+    }:
         return True
     if path.suffix != ".drawio":
         return False
@@ -872,9 +924,9 @@ def clean_value(value: str) -> object:
 def retired_external_video_boundary_issues(vault: Path) -> list[str]:
     """Reject a retired video archive instead of silently preserving new captures."""
 
-    if (vault / "sources/external-video").exists():
+    if (vault / "wiki/private/_sources/knowledge/external-video").exists():
         return [
-            "sources/external-video is retired; "
+            "wiki/private/_sources/knowledge/external-video is retired; "
             "keep changing video links out of the canonical Vault"
         ]
     return []
@@ -894,7 +946,15 @@ def retired_ai_instruction_boundary_issues(vault: Path) -> list[str]:
                 "and must be absent"
             )
 
-    excluded_roots = {".git", ".local", ".legacy-backup", "scripts", "quartz"}
+    excluded_roots = {
+        ".git",
+        ".local",
+        ".legacy-backup",
+        ".obsidian",
+        "_sources",
+        "scripts",
+        "quartz",
+    }
     for path in sorted(vault.rglob("*")):
         if not path.is_file():
             continue
@@ -1052,22 +1112,25 @@ def person_schema_issues(vault: Path) -> list[str]:
             issues.append(f"{relative}: unsupported person_scope")
         if kind not in GENERAL_PERSON_KINDS:
             issues.append(f"{relative}: unsupported person_kind")
-        if scope == "general" and metadata.get("parent_moc") != "[[people-index|인물 관계]]":
-            issues.append(f"{relative}: general person card must point to people-index")
-        if scope == "novel-local-only" and "[[people-index|인물 관계]]" in card_path.read_text(
-            encoding="utf-8"
+        parent = metadata.get("parent")
+        if scope == "general" and not (
+            isinstance(parent, str) and parent.startswith("[[wiki/people/README")
         ):
-            issues.append(f"{relative}: novel-local-only card must not link to people-index")
+            issues.append(f"{relative}: general person card must be a child of wiki/people/README")
+        if (
+            scope == "novel-local-only"
+            and isinstance(parent, str)
+            and parent.startswith("[[wiki/people/README")
+        ):
+            issues.append(
+                f"{relative}: novel-local-only card must not enter the general people tree"
+            )
 
-    people_map = vault / "maps/people-index.md"
-    if not people_map.is_file():
-        issues.append("maps/people-index.md is required")
-    else:
-        map_text = people_map.read_text(encoding="utf-8")
-        if "wiki/private/이민정" in map_text:
-            issues.append("maps/people-index.md: must exclude novel-local-only person cards")
-        if "![[../inbox/wiki/wiki.base#인물]]" not in map_text:
-            issues.append("maps/people-index.md: person directory dashboard is required")
+    people_hub = vault / "wiki/people/README.md"
+    if not people_hub.is_file():
+        issues.append("wiki/people/README.md is required")
+    elif "[[wiki/personal/최우녕|최우녕]]" not in people_hub.read_text(encoding="utf-8"):
+        issues.append("wiki/people/README.md: people tree must include the Vault owner")
     return issues
 
 
@@ -1101,10 +1164,7 @@ def is_scoped_context_tree_title_collision(
     ]
     if len(context_paths) == len(paths):
         return len({rel(path.parent) for path in context_paths}) == len(context_paths)
-    if len(context_paths) != 1 or len(paths) != 2:
-        return False
-    index_path = next(path for path in paths if path not in context_paths)
-    return metadata.get(index_path, {}).get("map_role") == "subject-index"
+    return False
 
 
 def quartz_root(path: Path) -> str:
@@ -1341,6 +1401,68 @@ def mermaid_quality_issues(relative: str, text: str) -> tuple[list[str], list[st
     return shape_issues, placeholder_issues
 
 
+def mermaid_color_issues(relative: str, text: str) -> list[str]:
+    """Report Mermaid-local colors that break the shared light/dark visual contract."""
+
+    issues: list[str] = []
+    in_mermaid = False
+    for no, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not in_mermaid:
+            in_mermaid = stripped.startswith("```mermaid")
+            continue
+        if stripped.startswith("```"):
+            in_mermaid = False
+            continue
+        if MERMAID_COLOR_DIRECTIVE_RE.search(line) or MERMAID_THEME_COLOR_RE.search(line):
+            issues.append(f"{relative}: line {no}")
+    return issues
+
+
+def wiki_base_contract_issues(vault: Path) -> list[str]:
+    """Validate the native Base semantically instead of matching YAML formatting."""
+
+    wiki_base = vault / "inbox/wiki/wiki.base"
+    if not wiki_base.is_file():
+        return ["inbox/wiki/wiki.base is missing"]
+    try:
+        base_data = yaml.safe_load(wiki_base.read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        return [f"inbox/wiki/wiki.base is invalid YAML: {error}"]
+    if not isinstance(base_data, dict):
+        return ["inbox/wiki/wiki.base must contain a YAML object"]
+
+    issues: list[str] = []
+    formulas = base_data.get("formulas")
+    title_formula = formulas.get("title_link") if isinstance(formulas, dict) else None
+    if title_formula != "file.asLink(title)":
+        issues.append("inbox/wiki/wiki.base must use file.asLink(title) for the human title")
+    views = base_data.get("views")
+    view_names = (
+        {
+            view.get("name")
+            for view in views
+            if isinstance(view, dict) and isinstance(view.get("name"), str)
+        }
+        if isinstance(views, list)
+        else set()
+    )
+    for required_name in (
+        "전체",
+        "프로젝트",
+        "책",
+        "리소스",
+        "개념",
+        "학습",
+        "커리어",
+        "생활",
+        "인물",
+    ):
+        if required_name not in view_names:
+            issues.append(f"inbox/wiki/wiki.base is missing view {required_name!r}")
+    return issues
+
+
 def main() -> int:
     files = [path for path in iter_markdown() if not is_calendar_projection_markdown(path)]
     index = target_index(files)
@@ -1374,6 +1496,7 @@ def main() -> int:
         "template_policy_violations": [],
         "inbox_policy_violations": [],
         "source_policy_violations": [],
+        "source_boundary_violations": [],
         "book_source_link_violations": [],
         "obsidian_graph_policy_violations": [],
         "source_asset_policy_violations": [],
@@ -1395,12 +1518,15 @@ def main() -> int:
         "wiki_display_contract_violations": [],
         "strict_relative_link_violations": [],
         "mermaid_shape_violations": [],
+        "mermaid_color_violations": [],
     }
 
     if RETIRED_PRIVATE_NOVEL_ROOT.exists():
         issues["private_novel_boundary_violations"].append(
-            "projects/writing must be owned by the separate local-only Novel workspace"
+            "projects/writing is retired; Novel sources belong in "
+            "wiki/private/_sources/novel and navigation belongs in wiki/private/novel"
         )
+    issues["source_boundary_violations"].extend(audit_source_boundary(VAULT))
 
     issues["retired_external_video_boundary_violations"].extend(
         retired_external_video_boundary_issues(VAULT)
@@ -1419,34 +1545,50 @@ def main() -> int:
     issues["daily_digest_projection_violations"].extend(daily_digest_embed_issues(VAULT))
     issues["runtime_permission_violations"].extend(runtime_permission_issues(VAULT))
     issues["obsidian_workspace_violations"].extend(obsidian_workspace_issues(VAULT))
+    try:
+        tree_nodes, tree_texts, tree_issues = load_wiki_tree(VAULT)
+    except WoonError as error:
+        issues["wiki_display_contract_violations"].append(str(error))
+    else:
+        issues["wiki_display_contract_violations"].extend(tree_issues)
+        for node in tree_nodes:
+            text = tree_texts[node.relative_path]
+            if (
+                node.node_kind not in {"root", "hub", "entity"}
+                and not is_compact_link_page(node)
+                and "<!-- woon-wiki-overview:start -->" not in text
+            ):
+                issues["wiki_display_contract_violations"].append(
+                    f"{node.relative_path}: generated overview is missing"
+                )
+            if node.node_kind in {"root", "hub"} and (
+                "<!-- woon-wiki-overview:start -->" in text
+                or "<!-- woon-wiki-overview:end -->" in text
+            ):
+                issues["wiki_display_contract_violations"].append(
+                    f"{node.relative_path}: navigation page must not repeat an overview"
+                )
+            expected_mode = {
+                "book": "linear",
+                "project": "project",
+                "person": "topic-timeline",
+            }.get(str(parse_frontmatter(text).get("entity_kind", "")))
+            if expected_mode is not None and node.view_mode != expected_mode:
+                issues["entity_policy_violations"].append(
+                    f"{node.relative_path}: entity view_mode must be {expected_mode}"
+                )
+    for map_markdown in sorted((VAULT / "maps").rglob("*.md")):
+        issues["wiki_display_contract_violations"].append(
+            f"parallel Markdown knowledge map must be removed: {rel(map_markdown)}"
+        )
 
     wiki_view_root = VAULT / "inbox/wiki"
-    wiki_base = wiki_view_root / "wiki.base"
     retired_facet_pages = sorted(wiki_view_root.glob("*.md")) if wiki_view_root.is_dir() else []
     if retired_facet_pages:
         issues["wiki_display_contract_violations"].extend(
             f"duplicate Wiki dashboard must be removed: {rel(path)}" for path in retired_facet_pages
         )
-    if not wiki_base.is_file():
-        issues["wiki_display_contract_violations"].append("inbox/wiki/wiki.base is missing")
-    else:
-        base_text = wiki_base.read_text(encoding="utf-8")
-        for required in (
-            "file.asLink(title)",
-            'name: "전체"',
-            'name: "프로젝트"',
-            'name: "책"',
-            'name: "콘텐츠"',
-            'name: "개념"',
-            'name: "학습"',
-            'name: "커리어"',
-            'name: "생활"',
-            'name: "인물"',
-        ):
-            if required not in base_text:
-                issues["wiki_display_contract_violations"].append(
-                    f"inbox/wiki/wiki.base is missing {required!r}"
-                )
+    issues["wiki_display_contract_violations"].extend(wiki_base_contract_issues(VAULT))
 
     for retired_map in ("maps/README.md", "maps/developer-wiki-map.md", "maps/vault-moc.md"):
         if (VAULT / retired_map).exists():
@@ -1458,7 +1600,6 @@ def main() -> int:
     if home_path.is_file():
         home_text = home_path.read_text(encoding="utf-8")
         for required_embed in (
-            "![[../inbox/wiki/wiki.base#프로젝트]]",
             "![[../inbox/inbox-review.base#검토 대기]]",
             "![[../inbox/daily/daily.base#일일 이력]]",
         ):
@@ -1466,6 +1607,20 @@ def main() -> int:
                 issues["wiki_display_contract_violations"].append(
                     f"brain/home.md must reuse {required_embed} instead of a duplicate table"
                 )
+        for required_link in (
+            "[[../wiki/README|Wiki]]",
+            "[[../wiki/personal/projects/README|프로젝트]]",
+            "[[../wiki/people/README|인물·관계]]",
+        ):
+            if required_link not in home_text:
+                issues["wiki_display_contract_violations"].append(
+                    f"brain/home.md must expose the human navigation link {required_link}"
+                )
+
+    if not (VAULT / "wiki/README.md").is_file():
+        issues["wiki_display_contract_violations"].append(
+            "wiki/README.md is required as the sole human Wiki entry"
+        )
 
     source_asset_audit = Path(__file__).with_name("audit-source-assets.py")
     source_asset_result = subprocess.run(
@@ -1514,10 +1669,7 @@ def main() -> int:
             "path:users",
             "path:assets",
         )
-        allowed_group_roots = (
-            "path:wiki",
-            "path:maps",
-        )
+        allowed_group_roots = ("path:wiki",)
         colors: dict[int, str] = {}
         for group in graph_config.get("colorGroups", []):
             query = group.get("query", "") if isinstance(group, dict) else ""
@@ -1548,6 +1700,10 @@ def main() -> int:
     except FileNotFoundError as exc:
         issues["obsidian_graph_policy_violations"].append(str(exc))
     else:
+        if MERMAID_NEUTRAL_STYLE_MARKER not in explorer_css:
+            issues["obsidian_graph_policy_violations"].append(
+                "enabled CSS snippet must apply the neutral Mermaid display contract"
+            )
         for hidden_path in OBSIDIAN_HIDDEN_EXPLORER_PATHS:
             selector = f'data-path="{hidden_path}"'
             if selector not in explorer_css:
@@ -1783,6 +1939,7 @@ def main() -> int:
         mermaid_shapes, mermaid_placeholders = mermaid_quality_issues(r, text)
         issues["mermaid_shape_violations"].extend(mermaid_shapes)
         issues["mermaid_placeholder_nodes"].extend(mermaid_placeholders)
+        issues["mermaid_color_violations"].extend(mermaid_color_issues(r, text))
         for no, line in enumerate(text.splitlines(), start=1):
             if ABSOLUTE_LOCAL_RE.search(line):
                 issues["absolute_local_paths"].append(f"{r}: line {no}")
@@ -1794,6 +1951,8 @@ def main() -> int:
         if not fm:
             issues["missing_frontmatter"].append(r)
             continue
+
+        issues["wiki_display_contract_violations"].extend(nonwiki_keyword_policy_issues(r, fm))
 
         if r.startswith("wiki/") and fm.get("type") == "Wiki":
             summary = fm.get("summary")
@@ -1836,6 +1995,19 @@ def main() -> int:
         wiki_issues, entity_issues = wiki_and_entity_policy_issues(r, text, fm)
         issues["wiki_pipeline_policy_violations"].extend(wiki_issues)
         issues["entity_policy_violations"].extend(entity_issues)
+        if (
+            r.startswith("wiki/")
+            and fm.get("type") == "Wiki"
+            and fm.get("node_kind") not in {"root", "hub", "entity"}
+            and not is_compact_link_canonical_id(fm.get("canonical_id"))
+            and (
+                text.count("<!-- woon-wiki-overview:start -->") != 1
+                or text.count("<!-- woon-wiki-overview:end -->") != 1
+            )
+        ):
+            issues["wiki_display_contract_violations"].append(
+                f"{r}: one generated detail overview is required"
+            )
 
         if r.startswith("maps/"):
             table_lines = [
@@ -1862,7 +2034,7 @@ def main() -> int:
 
         visible_text = strip_fenced_blocks(text)
         for no, line in enumerate(visible_text.splitlines(), start=1):
-            if LINK_LIST_SLUG_RE.search(line):
+            if not line.lstrip().startswith(">") and LINK_LIST_SLUG_RE.search(line):
                 issues["link_list_slug_exposure"].append(f"{r}: line {no}: {line.strip()}")
 
         for field in LOCAL_ASSET_FIELDS:
@@ -1880,7 +2052,7 @@ def main() -> int:
         if published and root not in QUARTZ_SYNC_ROOTS:
             issues["published_outside_quartz_scope"].append(r)
 
-        if (r.startswith(("inbox/", "sources/")) or r == "head-quarter.md") and (
+        if (r.startswith(("inbox/", "wiki/private/_sources/knowledge/")) or r == "head-quarter.md") and (
             published or fm.get("access") != "local-only"
         ):
             issues["local_operational_published"].append(r)
@@ -1891,9 +2063,9 @@ def main() -> int:
                     f"{r}: inbox docs must be publish:false and access:local-only"
                 )
             if r in {"inbox/README.md", "inbox/capture/README.md", "inbox/daily/README.md"}:
-                if fm.get("type") not in {"Dashboard", "키워드"}:
+                if fm.get("type") not in {"Dashboard", "Operations"}:
                     issues["inbox_policy_violations"].append(
-                        f"{r}: inbox README must be Dashboard or 키워드"
+                        f"{r}: inbox README must be Dashboard or Operations"
                     )
             elif r.startswith("inbox/daily/") and fm.get("type") != "Daily":
                 issues["inbox_policy_violations"].append(f"{r}: inbox/daily notes must be Daily")
@@ -1941,7 +2113,7 @@ def main() -> int:
                                 f"{r}: person-memory review must not resolve or link a person"
                             )
 
-        if r.startswith("sources/private/"):
+        if r.startswith("wiki/private/_sources/knowledge/private/"):
             # Private originals are byte-preserved evidence, not compiler input.
             # Their historical frontmatter must not be rewritten merely to fit a
             # current Source schema; private paths are excluded from LLM search.
@@ -1949,7 +2121,7 @@ def main() -> int:
                 issues["source_policy_violations"].append(
                     f"{r}: private original must be publish:false and access:local-only"
                 )
-        elif r.startswith("sources/") and r != "sources/README.md":
+        elif r.startswith("wiki/private/_sources/knowledge/") and r != "wiki/private/_sources/knowledge/README.md":
             if fm.get("type") != "Source":
                 issues["source_policy_violations"].append(f"{r}: type must be Source")
             if fm.get("publish") is not False or fm.get("access") != "local-only":
@@ -2068,11 +2240,20 @@ def main() -> int:
                 incoming[match].add(path)
                 target_rel = rel(match)
                 target_fm = metadata.get(match, {})
-                if fm.get("access") == "public" and target_fm.get("publish") is False:
+                intra_wiki = r.startswith("wiki/") and target_rel.startswith("wiki/")
+                if (
+                    not intra_wiki
+                    and fm.get("access") == "public"
+                    and target_fm.get("publish") is False
+                ):
                     issues["published_links_to_unpublished"].append(f"{r} -> {target_rel}")
-                if fm.get("access") == "public" and (
-                    target_fm.get("access") != "public"
-                    or target_rel.startswith(("sources/", "inbox/"))
+                if (
+                    not intra_wiki
+                    and fm.get("access") == "public"
+                    and (
+                        target_fm.get("access") != "public"
+                        or target_rel.startswith(("wiki/private/_sources/knowledge/", "inbox/"))
+                    )
                 ):
                     issues["published_links_to_local_only"].append(f"{r} -> {target_rel}")
 
@@ -2107,24 +2288,17 @@ def main() -> int:
         if quartz_root(path) not in QUARTZ_SYNC_ROOTS:
             continue
 
-        if path != home and path not in reachable:
+        if path != home and path not in reachable and not r.startswith("wiki/"):
             issues["unreachable_published_from_home"].append(r)
 
-        if path != home and not incoming[path]:
+        if path != home and not incoming[path] and not r.startswith("wiki/"):
             issues["zero_incoming_published"].append(r)
 
         if (
             r.startswith("wiki/")
             and path.name not in {"README.md", "index.md"}
             and fm.get("type") == "Wiki"
-            and not any(rel(src).startswith("maps/") for src in incoming[path])
-        ):
-            issues["published_wiki_without_map_link"].append(r)
-
-        if (
-            r.startswith("wiki/")
-            and path.name not in {"README.md", "index.md"}
-            and fm.get("type") == "Wiki"
+            and "<!-- woon-wiki-children:start -->" not in texts[path]
         ):
             body = texts[path].split("\n---", 1)[-1]
             h2_count = sum(1 for line in body.splitlines() if line.startswith("## "))

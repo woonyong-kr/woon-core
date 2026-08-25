@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -32,15 +33,18 @@ _ROLES = frozenset(
         "mentioned",
     }
 )
-_FORBIDDEN_LINK_ROOTS = ("catalog/", "sources/private/")
+_FORBIDDEN_LINK_ROOTS = (
+    "catalog/",
+    "wiki/private/_sources/knowledge/private/",
+    "wiki/private/_sources/novel/",
+)
 _PRIVATE_HISTORY_ROOTS = (
     "inbox/calendar/events/",
     "inbox/daily/",
 )
 _PRIVATE_HISTORY_EXCLUDED_PATHS = frozenset(
     {
-        "maps/people-index.md",
-        "maps/local-private-index.md",
+        "wiki/people/README.md",
         "inbox/daily/README.md",
     }
 )
@@ -200,6 +204,8 @@ class PersonService:
             if not directory.exists():
                 continue
             for path in sorted(directory.rglob("*.md")):
+                if "_sources" in path.relative_to(directory).parts:
+                    continue
                 try:
                     metadata, _ = _frontmatter(path.read_text(encoding="utf-8"), path)
                 except WoonError:
@@ -978,10 +984,16 @@ def _render_card(
         "relationship_to_owner": relationship_to_owner,
         "card_creation_basis": creation_basis,
         "role": "person-dashboard",
-        "parent_moc": "[[people-index|인물 관계]]",
-        "tags": ["domain:common", "topic:people"],
+        "node_kind": "entity",
+        "entity_kind": "person",
+        "view_mode": "topic-timeline",
+        "parent": "[[wiki/people/README|인물]]",
+        "keywords": [title],
+        "aliases": [],
+        "updated": date.today().isoformat(),
+        "tags": ["domain:common", "topic:people", "graph/overview"],
         "people": [link],
-        "related_to": ["[[people-index|인물 관계]]"],
+        "related_to": ["[[wiki/people/README|인물]]"],
     }
     default_identifiers = _default_korean_name_identifiers(title)
     if default_identifiers:
@@ -1000,18 +1012,7 @@ def _render_card(
     yaml_text = yaml.safe_dump(
         frontmatter, allow_unicode=True, sort_keys=False, default_flow_style=False
     )
-    return (
-        f"---\n{yaml_text}---\n\n# {title}\n\n"
-        f"> {purpose}\n\n"
-        "## 관계\n\n"
-        f"- 최우녕과의 관계: {relationship_to_owner}\n"
-        f"- 카드 생성 근거: {creation_basis}\n"
-        "- 개인 이력이나 추측은 적지 않고, 다시 찾아볼 문서 연결만 남긴다.\n\n"
-        "## 연결 문서\n\n"
-        "이 인물이 `people` 속성에 명시된 문서만 표시한다. "
-        "본문에 이름이 언급됐다는 이유만으로는 연결하지 않는다.\n\n"
-        "![[person-indexed-docs.base]]\n"
-    )
+    return f"---\n{yaml_text}---\n\n# {title}\n"
 
 
 def _record_operation(path: Path, *, operation: str, payload: dict[str, object]) -> None:

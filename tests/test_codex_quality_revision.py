@@ -17,6 +17,8 @@ from woon_core.knowledge.codex_quality_revision import (
     _propose_revision,
     _restore_protected_material,
     _validate_proposal,
+    apply_codex_quality_revisions,
+    create_codex_quality_revision_proposals,
 )
 
 BODY = """## 시작
@@ -63,6 +65,95 @@ value = 1
     }
 
     _validate_proposal(proposal, _candidate())
+
+
+def test_revision_runtime_artifacts_are_private(tmp_path, monkeypatch) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text("{}\n", encoding="utf-8")
+    output = tmp_path / "proposals"
+    output.mkdir(mode=0o755)
+    proposal = {
+        "body": BODY.replace("값을 한 곳에서", "값을 한 지점에서"),
+        "statement": "값 변경이 미치는 영향을 설명한다.",
+        "current_use": "값 변경의 영향을 다시 설명할 때 사용한다.",
+    }
+    monkeypatch.setattr(
+        revision,
+        "_revision_candidates",
+        lambda *_: ((_candidate(),), "a" * 64),
+    )
+    monkeypatch.setattr(revision, "_codex_binary", lambda _: "/usr/bin/codex")
+    monkeypatch.setattr(revision, "_require_chatgpt_login", lambda _: None)
+    monkeypatch.setattr(revision, "_propose_revision", lambda *_: proposal)
+
+    create_codex_quality_revision_proposals(
+        tmp_path,
+        plan,
+        tmp_path / "reviews",
+        output,
+        model="gpt-5.6-sol",
+        max_attempts=2,
+    )
+
+    assert output.stat().st_mode & 0o777 == 0o700
+    assert (output / "run-manifest.json").stat().st_mode & 0o777 == 0o600
+    assert (output / _proposal_file_name("os/example")).stat().st_mode & 0o777 == 0o600
+
+
+def test_apply_can_select_an_adjudicated_subset(tmp_path, monkeypatch) -> None:
+    first = _candidate()
+    second = RevisionCandidate(
+        page_id="os/second",
+        output_sha256="b" * 64,
+        source_body_sha256=first.source_body_sha256,
+        title="두 번째",
+        purpose=first.purpose,
+        body=first.body,
+        failures=first.failures,
+        failure_reasons=first.failure_reasons,
+    )
+    monkeypatch.setattr(
+        revision,
+        "_revision_candidates",
+        lambda *_: ((first, second), "c" * 64),
+    )
+    monkeypatch.setattr(
+        revision,
+        "_collect_proposal_records",
+        lambda candidates, *_args, **_kwargs: (
+            {
+                candidates[0].page_id: {
+                    "body": BODY,
+                    "statement": "값 변경의 영향을 설명한다.",
+                    "current_use": first.purpose,
+                }
+            },
+            {candidates[0].page_id: "proposal.json"},
+        ),
+    )
+
+    class FakeReport:
+        curated = 1
+        compiled = 1
+        unchanged = 0
+        page_ids = ("os/example",)
+
+    class FakeService:
+        def curate_compiled_wiki_revisions(self, records):
+            assert [record.page_id for record in records] == ["os/example"]
+            return FakeReport()
+
+    monkeypatch.setattr(revision, "build_knowledge_service", lambda _: (None, FakeService()))
+
+    report = apply_codex_quality_revisions(
+        tmp_path,
+        tmp_path / "plan.json",
+        tmp_path / "reviews",
+        (tmp_path / "proposals",),
+        page_ids=("os/example",),
+    )
+
+    assert report["page_ids"] == ["os/example"]
 
 
 def test_revision_rejects_changed_code_fence() -> None:

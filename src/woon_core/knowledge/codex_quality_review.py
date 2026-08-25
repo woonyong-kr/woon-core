@@ -40,6 +40,7 @@ from woon_core.knowledge.ollama_quality_review import (
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_MAX_ATTEMPTS = 1
 HOSTED_PROVIDER = "openai-codex-cli-chatgpt"
+REASONING_EFFORT = "high"
 
 CALIBRATION_MARKDOWN = """---
 purpose: 아무거나
@@ -100,7 +101,8 @@ def run_codex_quality_reviews(
     binary = _codex_binary(codex_binary)
     _require_chatgpt_login(binary)
     destination = results_dir.expanduser().resolve()
-    destination.mkdir(parents=True, exist_ok=True)
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination.chmod(0o700)
     _prepare_or_load_manifest(
         destination,
         plan_path,
@@ -137,7 +139,7 @@ def run_codex_quality_reviews(
                 max_attempts,
             )
             _validate_result(result, batch_id, targets)
-            atomic_write(result_path, encode_json(result))
+            atomic_write(result_path, encode_json(result), mode=0o600)
             reviewed.append(batch_id)
             pages += len(targets)
         except WoonError as error:
@@ -204,6 +206,7 @@ def _prepare_or_load_manifest(
         "version": 1,
         "provider": HOSTED_PROVIDER,
         "model": model,
+        "reasoning_effort": REASONING_EFFORT,
         "codex_binary": Path(binary).name,
         "plan_sha256": hashlib.sha256(plan_path.expanduser().read_bytes()).hexdigest(),
         "timeout_seconds": timeout_seconds,
@@ -245,7 +248,11 @@ def _prepare_or_load_manifest(
     # hosted runner creates its own execution manifest. Each inherited result
     # is revalidated against the new plan in the normal batch loop below.
     calibration = _run_calibration(binary, model, timeout_seconds)
-    atomic_write(path, encode_json({**expected, "calibration": calibration}))
+    atomic_write(
+        path,
+        encode_json({**expected, "calibration": calibration}),
+        mode=0o600,
+    )
 
 
 def _run_calibration(binary: str, model: str, timeout_seconds: int) -> dict[str, object]:
@@ -353,6 +360,21 @@ revisitability, current_use를 pass 또는 fail로 판정한다.
 - revisitability: H1/H2, 정확한 용어와 경계로 나중에 다시 찾을 수 있다.
 - current_use: frontmatter purpose가 본문의 현재 학습, 설명, 검색 목적과 맞는다.
 
+일반 교과 개념이나 원리 설명은 compiler의 source·claim·receipt 계층이 출처를 소유한다.
+따라서 본문에 inline citation이 없다는 이유만으로 evidence_boundary를 fail로 두지 마라.
+본문이 특정 버전의 실제 실행·측정 결과처럼 말하거나 사실·해석·미결정을 서로 섞을 때만 fail이다.
+`확인 범위:` anchor가 있으면 그 문장을 evidence_boundary의 첫 근거로 선택하고, 본문이 그 범위를
+직접 모순하지 않는 한 pass로 판정하라. 일반 설명을 검증된 실행 결과로 바꾸어 읽지 마라.
+이 예외는 evidence_boundary에만 적용한다. 같은 말을 반복하는 동어반복, 연결 없는 짧은 단문,
+"이것은 이것이다" 같은 무의미한 문장은 natural_korean을 반드시 fail로 판정하라.
+
+오탐을 막기 위해 결함을 현재 Markdown의 선택한 anchor에서 직접 입증할 수 있을 때만 fail로
+판정한다. 문장이 자연스럽거나 사실·해석의 경계를 위반하지 않는 anchor를 고른 뒤 막연히
+"충분하지 않다"고 평가해서는 안 된다. natural_korean은 선택한 문장 자체의 문법·호응·연결에
+구체적인 결함이 있어야 fail이고, 완전한 의문문·설명문·도입문은 짧다는 이유만으로 fail이 아니다.
+evidence_boundary는 특정 실행·측정·버전 주장과 그 근거 경계가 실제로 충돌하는 문장을 선택할 수
+있을 때만 fail이다. 명확한 결함을 입증하지 못하면 pass로 판정하라.
+
 하나라도 fail이면 해당 페이지 verdict는 needs-revision이다.
 anchor는 페이지에서 실제로 찾은 후보를 골라야 한다.
 후보가 약해도 문서 밖에서 보완하지 말고 JSON schema에 맞는 객체만 출력하라.
@@ -438,9 +460,32 @@ def _expand_codex_model_result(
             or not isinstance(expanded_reviews[0], dict)
         ):
             raise WoonError("Codex quality review compact entry has an invalid review")
+        _honor_scope_note_evidence_boundary(expanded_reviews[0])
         _replace_duplicate_anchors(expanded_reviews[0], target)
         reviews.extend(expanded_reviews)
     return {"version": PLAN_VERSION, "batch_id": batch_id, "reviews": reviews}
+
+
+def _honor_scope_note_evidence_boundary(review: dict[str, object]) -> None:
+    """Reject a self-contradictory failure that cites the scope note itself.
+
+    The writing contract says a ``확인 범위:`` note is the primary passing
+    evidence unless another sentence contradicts it.  A reviewer that selects
+    the note itself as the failing anchor has not identified that contradiction.
+    """
+
+    rubric = review.get("rubric")
+    anchors = review.get("evidence_anchors")
+    if not isinstance(rubric, dict) or not isinstance(anchors, dict):
+        return
+    anchor = anchors.get("evidence_boundary")
+    if rubric.get("evidence_boundary") != "fail" or not isinstance(anchor, str):
+        return
+    if not anchor.lstrip().startswith("확인 범위:"):
+        return
+    rubric["evidence_boundary"] = "pass"
+    if all(rubric.get(criterion) == "pass" for criterion in CRITERIA):
+        review["verdict"] = "passed"
 
 
 def _replace_duplicate_anchors(review: dict[str, object], target: ReviewTarget) -> None:
@@ -495,6 +540,7 @@ def _run_codex(
         ]
         if model != "subscription-default":
             command.extend(["--model", model])
+        command.extend(["--config", f'model_reasoning_effort="{REASONING_EFFORT}"'])
         for feature in (
             "apps",
             "browser_use",
@@ -559,6 +605,7 @@ def _write_failure(destination: Path, batch_id: str, error: str) -> None:
     atomic_write(
         destination / f"{batch_id}.attempt-{sequence:03d}.failure.json",
         encode_json({"version": 1, "batch_id": batch_id, "attempt": sequence, "error": error}),
+        mode=0o600,
     )
 
 

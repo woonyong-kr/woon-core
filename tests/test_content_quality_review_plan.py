@@ -199,6 +199,9 @@ def test_creates_resumable_review_batches_and_assembles_current_payload(tmp_path
 
     assert plan["compiled_pages"] == 2
     assert plan["batches"] == 2
+    assert plan_dir.stat().st_mode & 0o777 == 0o700
+    assert (plan_dir / "manifest.json").stat().st_mode & 0o777 == 0o600
+    assert (plan_dir / "quality-001.input.json").stat().st_mode & 0o777 == 0o600
     manifest = json.loads((plan_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["max_batch_chars"] == 24_000
     first_batch = json.loads((plan_dir / "quality-001.input.json").read_text(encoding="utf-8"))
@@ -354,6 +357,45 @@ def test_rebases_only_complete_batches_with_current_markdown_and_same_standards(
         }
     ]
     assert report["inherited_results"] == str(rebased_results / ".inherited-results.json")
+
+
+def test_rebase_does_not_reuse_a_failed_review(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _write_vault(vault)
+    standard, prompt = _write_standards(tmp_path)
+    prior_plan = tmp_path / "prior-plan"
+    create_content_quality_review_plan(
+        vault,
+        standard,
+        "repo://skills/standards/learning-writing-harness.md",
+        prompt,
+        "repo://skills/standards/learning-quality-review-prompt.md",
+        prior_plan,
+        1,
+    )
+    prior_results = tmp_path / "prior-results"
+    _write_results(prior_plan, prior_results)
+    failed_path = prior_results / "quality-001.result.json"
+    failed = json.loads(failed_path.read_text(encoding="utf-8"))
+    failed["reviews"][0]["verdict"] = "needs-revision"
+    failed["reviews"][0]["rubric"]["natural_korean"] = "fail"
+    failed_path.write_text(json.dumps(failed, ensure_ascii=False), encoding="utf-8")
+
+    report = rebase_content_quality_review_plan(
+        vault,
+        prior_plan / "manifest.json",
+        prior_results,
+        standard,
+        "repo://skills/standards/learning-writing-harness.md",
+        prompt,
+        "repo://skills/standards/learning-quality-review-prompt.md",
+        tmp_path / "rebased-plan",
+        tmp_path / "rebased-results",
+        1,
+    )
+
+    assert "quality-001" in report["batches_to_review"]
+    assert "quality-001" not in report["reused_batches"]
 
 
 def test_rebase_rejects_all_prior_reviews_when_the_writing_standard_changed(tmp_path: Path) -> None:

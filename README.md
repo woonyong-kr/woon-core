@@ -46,7 +46,23 @@ woon knowledge index --vault /path/to/woon-knowledge
 woon knowledge search '검색어' --vault /path/to/woon-knowledge
 woon knowledge source-plan --source /path/to/source --source-name source --vault /path/to/woon-knowledge
 woon knowledge source-audit --source /path/to/source --source-name source --vault /path/to/woon-knowledge
+woon career create --id company-role-2026 --company Company --role Role --jd /path/to/jd.pdf --vault /path/to/woon-knowledge
+woon career analyze --id company-role-2026 --vault /path/to/woon-knowledge
+woon career context --id company-role-2026 --vault /path/to/woon-knowledge
 ```
+
+## 지원 파이프라인
+
+`woon career`는 지원 하나를 `wiki/personal/career/applications/<id>.md` 한 편에서 관리한다. JD와 PDF는 private source로 hash를 보존하며, 별도 JSON tracker나 context 저장소를 만들지 않는다.
+
+- `analyze`: JD 문장과 기존 Wiki를 대조하되 결과를 사람 검토 전 후보로만 둔다.
+- `evaluate`: 사람이 검토한 `verified`·`adjacent`·`gap` 판정과 Wiki 근거를 기록한다.
+- `approve-draft` → `attach-pdf --kind draft` → `mark-reviewed` → `mark-ready`: 명시 확인을 거쳐 초안을 제출 가능 상태로 올린다.
+- `attach-pdf --kind submitted --confirmed true`: 검증된 실제 제출 PDF 복사와 지원 상태 변경을 같은 잠금·복구 경계에서 수행한다.
+- `outcome --confirmed true`: 제출 뒤 면접·합격·불합격·철회·종료 결과를 기록한다.
+- `context`: 현재 Wiki 검색 결과를 제한된 크기로 조립해 출력할 뿐 저장하지 않는다.
+
+PDF 렌더러는 각 문서 저장소가 소유한다. Career pipeline은 렌더러가 만든 PDF를 읽어 페이지와 hash를 검증한 뒤 지원 기록과 함께 보존하며, 자동 지원·메일 전송·공개 게시를 수행하지 않는다.
 
 `skills eval-routing`은 같은 catalog·prompt·JSON schema로 Codex와 Claude를 각각 격리 실행합니다. 특정 실행기만 검사하려면 `--executor codex` 또는 `--executor claude`를 사용합니다. `installable: false`인 평가 전용 profile은 validate와 routing에는 사용할 수 있지만 target plan·install은 거부됩니다.
 

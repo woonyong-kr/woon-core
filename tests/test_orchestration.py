@@ -6,7 +6,9 @@ import pytest
 from woon_core.errors import WoonError
 from woon_core.knowledge.orchestration import (
     _AUTOMATION_PERSON_PROMPT_GUARD_TERMS,
+    AutomationContract,
     _has_person_protection,
+    _validate_wiki_prompt_contract,
     load_orchestrator_settings,
     verify_codex_automation_registry,
 )
@@ -25,10 +27,14 @@ def write_policy(
     (vault / "docs").mkdir(parents=True, exist_ok=True)
     (vault / "config").mkdir(exist_ok=True)
     (vault / "docs/second-brain-operating-model.md").write_text("# policy\n", encoding="utf-8")
+    (vault / "docs/wiki-information-architecture.md").write_text(
+        "# Wiki information architecture\n", encoding="utf-8"
+    )
     (vault / "config/person-schema.json").write_text("{}\n", encoding="utf-8")
     (vault / "config/second-brain-orchestrator.yaml").write_text(
         f"""version: 1
 policy_document: docs/second-brain-operating-model.md
+wiki_contract: docs/wiki-information-architecture.md
 timezone: Asia/Seoul
 repository_contract:
   personal_vault: woon-knowledge
@@ -37,7 +43,7 @@ repository_contract:
   reusable_code_repository: woon-core
   vault_executable_sources: forbidden
   vault_tool_interface: core-owned-cli
-  public_export: manual_verified_one_way_only
+  public_export: disabled_until_verified_projection_exists
 runtime:
   checkpoint_path: .local/woon/checkpoints.yaml
   receipt_directory: .local/woon/receipts
@@ -105,6 +111,31 @@ obsidian_tasks:
   todo:
     required: [verb-first-title, independently-verifiable-action, purpose]
     prohibited: [knowledge-note, raw-original, person-profile, novel-manuscript]
+daily_document_pipeline:
+  knowledge_canonical_root: wiki
+  daily_root: inbox/daily
+  source_to_wiki_owner: codex-conversation-ingest
+  wiki_to_daily_owner: daily-record-materialization
+  daily_to_wiki_promotion: forbidden
+  completion_mode: per-stage-reconciliation
+  failed_stage: preserve-verified-stage-results
+  stages:
+    - id: task-projection
+      owner: woon-tasks-service
+      marker: woon-tasks
+      proof: .local/woon-knowledge/tasks-state.json
+    - id: codex-projection
+      owner: daily-record-materialization
+      marker: woon-codex-digest
+      proof: .local/woon-knowledge/automation-receipts/daily-record-materialization
+    - id: calendar-projection
+      owner: woon-calendar-service
+      marker: "woon_projection: apple-calendar"
+      proof: output-hash-and-reread
+    - id: activity-review
+      owner: activity-history-review
+      marker: review-only
+      proof: review-card-and-vault-audit
 automations:
   - id: mail-schedule-candidates
     owner: mail-schedule-task
@@ -402,3 +433,89 @@ def test_accepts_person_protection_with_safe_punctuation_variants() -> None:
     )
 
     assert _has_person_protection(prompt)
+
+
+def _prompt_contract(automation_id: str) -> AutomationContract:
+    return AutomationContract(
+        automation_id=automation_id,
+        owner="fixture-owner",
+        cadence="daily",
+        inputs=("fixture-input",),
+        outputs=("fixture-output",),
+        checkpoint_key=f"{automation_id}-checkpoint",
+        required_signals=("fixture-signal",),
+        prohibited=("person-profile-inference", "unresolved-identity-link"),
+        mode="materialize",
+        status="enabled",
+        task_thread_id="fixture-thread",
+        codex_automation_id="fixture-automation",
+        rrule="FREQ=DAILY;BYHOUR=1",
+        notification_policy="failed_runs_only",
+        prompt_sha256="a" * 64,
+        owned_paths=("wiki",),
+    )
+
+
+def test_rejects_retired_wiki_fields_in_enabled_automation_prompts() -> None:
+    with pytest.raises(WoonError, match="retired Wiki term parent_topics"):
+        _validate_wiki_prompt_contract(
+            _prompt_contract("codex-conversation-ingest"),
+            "new_wiki_reason parent_topics parent keywords central_question wiki/** "
+            "일일 기록은 Wiki 승격 입력이 아니다",
+        )
+
+
+def test_accepts_new_single_wiki_prompt_contracts() -> None:
+    _validate_wiki_prompt_contract(
+        _prompt_contract("codex-conversation-ingest"),
+        "new_wiki_reason parent keywords central_question wiki/** "
+        "일일 기록은 Wiki 승격 입력이 아니다 "
+        "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크 "
+        "콘텐츠 subtree와 Facet을 만들지 않는다 resource_keyword "
+        "책 → 장르 키워드 → 책 제목 리소스 → 주제 키워드 → 원자료 링크",
+    )
+    _validate_wiki_prompt_contract(
+        _prompt_contract("knowledge-curation"),
+        "canonical_id parent keywords view_mode 하위 키워드 최신 문서 wiki/README.md "
+        "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크 "
+        "콘텐츠 subtree와 Facet이 없는지 "
+        "책 → 장르 키워드 → 책 제목 리소스 → 주제 키워드 → 원자료 링크",
+    )
+    _validate_wiki_prompt_contract(
+        _prompt_contract("daily-record-materialization"),
+        "Wiki 문서를 새로 만들지 않는다. 단계별 검증만 하며 전체 완료 receipt를 만들지 않는다.",
+    )
+
+
+def test_daily_pipeline_forbids_promoting_daily_notes_back_into_wiki(tmp_path: Path) -> None:
+    write_policy(tmp_path)
+    path = tmp_path / "config/second-brain-orchestrator.yaml"
+    daily_lane = """
+  - id: daily-record-materialization
+    owner: daily-record-task
+    cadence: daily
+    inputs: [codex-synthesis-ledger]
+    output: [daily-conversation-summary]
+    checkpoint_key: daily-codex-projection
+    required_signals: [kst-day]
+    prohibited: [person-profile-inference, unresolved-identity-link]
+    execution:
+      mode: materialize
+      status: planned
+      task_thread_id: null
+      codex_automation_id: null
+      rrule: null
+      notification_policy: null
+      prompt_sha256: null
+      owned_paths: [inbox/daily, inbox/calendar, brain/review/activity]
+"""
+    policy = path.read_text(encoding="utf-8").replace(
+        "cursor_contract:\n", daily_lane + "cursor_contract:\n"
+    )
+    path.write_text(
+        policy.replace("daily_to_wiki_promotion: forbidden", "daily_to_wiki_promotion: allowed"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WoonError, match="daily_to_wiki_promotion"):
+        load_orchestrator_settings(tmp_path)

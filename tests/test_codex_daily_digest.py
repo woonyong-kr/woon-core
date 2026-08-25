@@ -10,9 +10,16 @@ from test_orchestration import write_policy
 from woon_core.errors import WoonError
 from woon_core.knowledge.codex_daily_digest import (
     CodexDailyDigestEntry,
+    CodexDailyExchange,
     entries_from_records,
     migrate_legacy_daily_digests,
     record_codex_daily_digest,
+)
+from woon_core.knowledge.codex_source_archive import (
+    CodexSourceAttachment,
+    CodexSourceBundle,
+    CodexSourceMessage,
+    record_codex_source_bundle,
 )
 from woon_core.knowledge.orchestration import load_orchestrator_settings
 from woon_core.knowledge.second_brain_runtime import record_governance_preflight
@@ -45,8 +52,8 @@ def test_records_transcript_free_daily_digest_once(tmp_path: Path) -> None:
     assert path.is_file()
     assert "원문 대신 결정과 다음 행동만" in path.read_text(encoding="utf-8")
     assert first.relative_path == "inbox/daily/2026-08-17.md"
-    assert "## 대화에서 남긴 것" in path.read_text(encoding="utf-8")
-    assert "## 성장·학습" in path.read_text(encoding="utf-8")
+    assert "## 오늘 한눈에" in path.read_text(encoding="utf-8")
+    assert "## 오늘 기록" in path.read_text(encoding="utf-8")
     assert "[[../../wiki/personal/herdr|Herdr]]" in path.read_text(encoding="utf-8")
     assert receipt.is_file()
     assert json.loads(receipt.read_text(encoding="utf-8"))["candidate_ids"]
@@ -118,9 +125,9 @@ def test_empty_daily_digest_explains_its_honest_input_state(
     )
 
     rendered = (tmp_path / "inbox/daily/2026-08-17.md").read_text(encoding="utf-8")
-    assert "## 대화 정리 상태" in rendered
+    assert "> [!info]" in rendered
     assert expected_title in rendered
-    assert "## 대화에서 남긴 것" not in rendered
+    assert "## 오늘 기록" not in rendered
 
 
 def test_nonempty_daily_digest_marks_completion_before_rendering_entries(tmp_path: Path) -> None:
@@ -141,7 +148,7 @@ def test_nonempty_daily_digest_marks_completion_before_rendering_entries(tmp_pat
     )
 
     rendered = (tmp_path / "inbox/daily/2026-08-17.md").read_text(encoding="utf-8")
-    assert "**정리 완료**" in rendered
+    assert "> [!info] 정리 완료" in rendered
 
 
 def test_partial_daily_digest_renders_items_without_claiming_day_complete(tmp_path: Path) -> None:
@@ -163,10 +170,10 @@ def test_partial_daily_digest_renders_items_without_claiming_day_complete(tmp_pa
     )
 
     rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
-    assert "**현재까지 정리됨**" in rendered
+    assert "> [!info] 현재까지 정리됨" in rendered
     assert "완료된 대화부터 누적한다" in rendered
-    assert "**정리 완료**" not in rendered
-    assert "## 대화에서 남긴 것" in rendered
+    assert "> [!info] 정리 완료" not in rendered
+    assert "## 오늘 기록" in rendered
 
 
 def test_daily_digest_coalesces_incremental_updates_for_the_same_subject(tmp_path: Path) -> None:
@@ -201,11 +208,277 @@ def test_daily_digest_coalesces_incremental_updates_for_the_same_subject(tmp_pat
     )
 
     rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
-    assert rendered.count("자동화는 실제 산출물로 검증한다") == 1
-    assert "개념·학습" in rendered
+    assert rendered.count("### 자동화는 실제 산출물로 검증한다") == 1
+    assert "`개념`" in rendered
+    assert "`학습`" in rendered
     assert "실제 Wiki와 일일 기록" in rendered
     assert "재실행에서 문서가 변하지 않아야" in rendered
     assert "내부 식별자는 충돌하지 않게" in rendered
+
+
+def test_daily_digest_renders_readable_question_answer_outcome_and_attachment(
+    tmp_path: Path,
+) -> None:
+    _digest_settings(tmp_path)
+    (tmp_path / "inbox/daily").mkdir(parents=True)
+    (tmp_path / "inbox/daily/2026-08-24.md").write_text("# 2026-08-24\n", encoding="utf-8")
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 24),
+        entries=(
+            CodexDailyDigestEntry(
+                kind="학습",
+                title="AICE 학습 환경을 준비했다",
+                summary="실습 자료와 코드를 한 프로젝트에서 실행할 수 있게 정리했다.",
+                intent="시험 준비를 자료 보관에서 끝내지 않고 실습으로 이어가기 위한 작업이었다.",
+                exchanges=(
+                    CodexDailyExchange(
+                        question="샘플 문항과 실습 코드를 한번에 학습할 수 있게 묶을 수 있나?",
+                        answer=(
+                            "원본은 변경하지 않고, 실행용 notebook과 검증 스크립트를 "
+                            "별도로 두는 구조로 정리했다."
+                        ),
+                        outcome="회귀·분류 자료와 실습 코드가 학습 순서에 연결됐다.",
+                        attachments=("회귀 샘플 문항 PDF", "분류 샘플 해설 PDF"),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
+    assert "**질문** —" in rendered
+    assert "**답변** —" in rendered
+    assert "**결과** —" in rendered
+    assert "**자료** — 회귀 샘플 문항 PDF, 분류 샘플 해설 PDF" in rendered
+
+
+def test_daily_digest_renders_detailed_semantics_and_compact_source_index(
+    tmp_path: Path,
+) -> None:
+    _digest_settings(tmp_path)
+    daily = tmp_path / "inbox/daily/2026-08-24.md"
+    daily.parent.mkdir(parents=True)
+    daily.write_text("# 2026-08-24\n", encoding="utf-8")
+    record_codex_source_bundle(
+        tmp_path,
+        CodexSourceBundle(
+            day=date(2026, 8, 24),
+            source_locator="thread-fixture:2026-08-24",
+            title="데님 핏을 실제 착용 기준으로 비교했다",
+            messages=(
+                CodexSourceMessage(
+                    role="user",
+                    text="기존에 편하게 입은 바지와 비교하면 어떤 핏이 맞아?",
+                    created_at="2026-08-24T03:10:00Z",
+                    attachments=(CodexSourceAttachment(label="착용 사진", media_type="image"),),
+                ),
+                CodexSourceMessage(
+                    role="assistant",
+                    text=(
+                        "실제 착용감을 우선하면 와이드 계열이 더 가깝습니다. "
+                        f"[근거]({tmp_path / 'private/note.md'})와 "
+                        "ai-reference/는 사람 화면에 노출하지 않습니다."
+                    ),
+                    created_at="2026-08-24T03:11:00Z",
+                ),
+            ),
+        ),
+    )
+    entries = entries_from_records(
+        [
+            {
+                "kind": "생활",
+                "title": "데님 핏을 실제 착용 기준으로 비교했다",
+                "summary": "사이즈 표보다 실제 착용감을 우선했다.",
+                "exchanges": [
+                    {
+                        "question": "어떤 핏이 맞나?",
+                        "answer": "와이드 계열을 후보로 좁혔다.",
+                        "facts": ["편하게 입은 기존 바지가 있다."],
+                        "criteria": ["실제 착용감", "원하는 실루엣"],
+                        "alternatives": ["와이드", "배럴"],
+                        "evidence": ["착용 사진"],
+                        "changes": ["구매 기준을 정리했다."],
+                        "unresolved": ["기장을 최종 확인해야 한다."],
+                    }
+                ],
+            }
+        ]
+    )
+
+    record_codex_daily_digest(tmp_path, day=date(2026, 8, 24), entries=entries)
+
+    rendered = daily.read_text(encoding="utf-8")
+    assert "**확인한 사실** — 편하게 입은 기존 바지가 있다." in rendered
+    assert "**판단 기준** — 실제 착용감 · 원하는 실루엣" in rendered
+    assert "## 대화 찾아보기" in rendered
+    assert "> [!note]- 데님 핏을 실제 착용 기준으로 비교했다" in rendered
+    assert "질문 1개 · 답변 1개" in rendered
+    assert "**12:10**" in rendered
+    assert "기존에 편하게 입은 바지와 비교하면" in rendered
+    assert "실제 착용감을 우선하면 와이드 계열이 더 가깝습니다." not in rendered
+    assert "thread-fixture" not in rendered
+    assert str(tmp_path) not in rendered
+    assert "ai-reference/" not in rendered
+
+
+def test_daily_digest_links_explicit_canonical_wiki_from_local_source(
+    tmp_path: Path,
+) -> None:
+    _digest_settings(tmp_path)
+    daily = tmp_path / "inbox/daily/2026-08-24.md"
+    daily.parent.mkdir(parents=True)
+    daily.write_text("# 2026-08-24\n", encoding="utf-8")
+    canonical = tmp_path / "wiki/personal/context-calendar.md"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text(
+        '---\ntitle: "Context Calendar 사용 원칙"\n---\n\n# Context Calendar 사용 원칙\n',
+        encoding="utf-8",
+    )
+    record_codex_source_bundle(
+        tmp_path,
+        CodexSourceBundle(
+            day=date(2026, 8, 24),
+            source_locator="thread-fixture:2026-08-24",
+            title="Context Calendar 사용 원칙을 정리했다",
+            messages=(
+                CodexSourceMessage(
+                    role="assistant",
+                    text=f"정본은 {canonical}:1에 반영했다.",
+                    created_at="2026-08-24T03:11:00Z",
+                ),
+            ),
+        ),
+    )
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 24),
+        entries=(),
+        input_state="source-only",
+    )
+
+    rendered = daily.read_text(encoding="utf-8")
+    assert "## 관련 문서" not in rendered
+    assert "> - **연결** ·" in rendered
+    assert "[[../../wiki/personal/context-calendar|Context Calendar 사용 원칙]]" in rendered
+
+
+def test_daily_digest_places_canonical_links_with_their_subject(tmp_path: Path) -> None:
+    _digest_settings(tmp_path)
+    daily = tmp_path / "inbox/daily/2026-08-24.md"
+    daily.parent.mkdir(parents=True)
+    daily.write_text("# 2026-08-24\n", encoding="utf-8")
+    subject = tmp_path / "wiki/personal/context-calendar.md"
+    parent = tmp_path / "wiki/personal/wiki.md"
+    subject.parent.mkdir(parents=True)
+    subject.write_text(
+        '---\ntitle: "Context Calendar 사용 원칙"\n---\n\n# Context Calendar 사용 원칙\n',
+        encoding="utf-8",
+    )
+    parent.write_text(
+        '---\ntitle: "Wiki"\n---\n\n# Wiki\n',
+        encoding="utf-8",
+    )
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 24),
+        entries=(
+            CodexDailyDigestEntry(
+                kind="결정",
+                title="Context Calendar 사용 원칙",
+                summary="날짜 탐색과 일정 연결의 소유권을 정리했다.",
+                related_documents=(
+                    "wiki/personal/context-calendar.md",
+                    "wiki/personal/wiki.md",
+                ),
+            ),
+        ),
+    )
+
+    rendered = daily.read_text(encoding="utf-8")
+    assert "### [[../../wiki/personal/context-calendar|Context Calendar 사용 원칙]]" in rendered
+    assert "**연결된 기준** — [[../../wiki/personal/wiki|Wiki]]" in rendered
+    assert "## 관련 문서" not in rendered
+    assert rendered.count("[[../../wiki/personal/context-calendar") == 1
+
+
+def test_daily_digest_populates_native_base_metadata(tmp_path: Path) -> None:
+    _digest_settings(tmp_path)
+    daily = tmp_path / "inbox/daily/2026-08-24.md"
+    daily.parent.mkdir(parents=True)
+    daily.write_text(
+        "---\n"
+        "type: Daily\n"
+        'title: "2026-08-24"\n'
+        'summary: ""\n'
+        'digest_status: ""\n'
+        "---\n\n"
+        "# 2026-08-24\n",
+        encoding="utf-8",
+    )
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 24),
+        entries=(
+            CodexDailyDigestEntry(
+                kind="학습",
+                title="AICE 학습 환경을 준비했다",
+                summary="샘플 문항과 실습 코드를 한 흐름으로 정리했다.",
+            ),
+        ),
+    )
+
+    rendered = daily.read_text(encoding="utf-8")
+    assert 'summary: "AICE 학습 환경을 준비했다"' in rendered
+    assert 'digest_status: "정리 완료"' in rendered
+    assert '  - "학습"' in rendered
+    assert '  - "AICE"' in rendered
+
+
+def test_daily_digest_removes_only_retired_empty_sections_and_keeps_manual_text(
+    tmp_path: Path,
+) -> None:
+    _digest_settings(tmp_path)
+    daily = tmp_path / "inbox/daily/2026-08-24.md"
+    daily.parent.mkdir(parents=True)
+    daily.write_text(
+        "# 2026-08-24\n\n"
+        "## 오늘의 초점\n\n-\n\n"
+        "## 포착\n\n- 내가 직접 적은 메모\n\n"
+        "## 사실 이력\n\n"
+        "- 시간·행동·결정·외부 원본 위치만 짧게 기록\n\n"
+        "## 질문\n\n-\n"
+        "## 만든 문서\n\n-\n\n"
+        "## Woon 처리 안내\n\n"
+        "여기에 쓴 자유 메모는 자동으로 다른 폴더로 옮기지 않는다. "
+        "지식화·원본 보존·검증이 필요한 내용은 이 채팅에 보내면 Woon이 "
+        "판정하고 처리한다. 사용자는 검토 대기 후보에 실제 결정이 필요할 때만 "
+        "확인한다.\n",
+        encoding="utf-8",
+    )
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 24),
+        entries=(),
+        input_state="no-meaningful",
+    )
+
+    rendered = daily.read_text(encoding="utf-8")
+    assert "## 오늘의 초점" not in rendered
+    assert "## 사실 이력" not in rendered
+    assert "## 질문" not in rendered
+    assert "## 만든 문서" not in rendered
+    assert "## Woon 처리 안내" not in rendered
+    assert "## 포착" in rendered
+    assert "내가 직접 적은 메모" in rendered
+    assert "<!-- woon-tasks:start -->" in rendered
+    assert rendered.endswith("## 자유 메모\n")
 
 
 def test_migrates_only_generated_legacy_digests_into_the_daily_record(tmp_path: Path) -> None:
@@ -244,7 +517,7 @@ def _digest_settings(vault: Path):
     cadence: daily
     inputs: [codex-opted-in-summaries]
     output: [daily-codex-digest]
-    checkpoint_key: daily-record-materialization
+    checkpoint_key: daily-codex-projection
     required_signals: [kst-day, privacy-classification]
     prohibited: [raw-transcript-ingest, system-prompt-ingest, tool-output-ingest, reasoning-ingest,
       person-profile-inference, unresolved-identity-link]

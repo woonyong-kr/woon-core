@@ -82,6 +82,17 @@ def test_audit_paths_ignores_local_and_generated_files(tmp_path: Path) -> None:
     audit_paths(tmp_path, ["generated"], [])
 
 
+def test_audit_paths_ignores_declared_raw_source_root_only(tmp_path: Path) -> None:
+    write(tmp_path / "wiki/private/_sources/raw.json", f'"{MAC_USER_HOME}"')
+    write(tmp_path / "config.yaml", "enabled: true\n")
+
+    audit_paths(tmp_path, [], [], ["wiki/private/_sources"])
+
+    write(tmp_path / "config.yaml", f'path: "{MAC_USER_HOME}"\n')
+    with pytest.raises(WoonError, match="absolute user paths"):
+        audit_paths(tmp_path, [], [], ["wiki/private/_sources"])
+
+
 def test_audit_paths_allows_regex_detector_but_rejects_runtime_value(tmp_path: Path) -> None:
     write(
         tmp_path / "detector.py",
@@ -115,6 +126,13 @@ def test_directory_name_audit_ignores_obsidian_tool_owned_directories(tmp_path: 
     (tmp_path / ".obsidian/themes/Minimal").mkdir(parents=True)
 
     audit_directory_names(tmp_path)
+
+
+def test_directory_name_audit_ignores_declared_canonical_data_roots(tmp_path: Path) -> None:
+    (tmp_path / "wiki/private/novel/사건-히스토리").mkdir(parents=True)
+    (tmp_path / "wiki/private/_sources/raw_source").mkdir(parents=True)
+
+    audit_directory_names(tmp_path, ["wiki/private/novel", "wiki/private/_sources"])
 
 
 def test_directory_name_audit_rejects_spaces_and_uppercase(tmp_path: Path) -> None:

@@ -60,6 +60,11 @@ LEGACY_SIMPLE_CALENDAR_ID = "woon-simple-calendar"
 CONTEXT_GRAPH_ID = "context-graph"
 LOCAL_DEVELOPMENT_PLUGINS = frozenset({CONTEXT_CALENDAR_ID, CONTEXT_GRAPH_ID})
 CONTEXT_CALENDAR_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/simple-calendar.git"
+CONTEXT_GRAPH_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/linked-canvas.git"
+LOCAL_PLUGIN_SOURCE_REPOSITORIES = {
+    CONTEXT_CALENDAR_ID: CONTEXT_CALENDAR_SOURCE_REPOSITORY,
+    CONTEXT_GRAPH_ID: CONTEXT_GRAPH_SOURCE_REPOSITORY,
+}
 
 
 @dataclass(frozen=True)
@@ -178,7 +183,7 @@ def _normalize_github_repository(value: str) -> str:
     return normalized
 
 
-def _git_output(source: Path, *arguments: str) -> str:
+def _git_output(source: Path, plugin_id: str, *arguments: str) -> str:
     try:
         result = subprocess.run(
             ("git", "-C", str(source), *arguments),
@@ -188,25 +193,26 @@ def _git_output(source: Path, *arguments: str) -> str:
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise WoonError("Context Calendar Git provenance could not be inspected") from error
+        raise WoonError(f"{plugin_id} Git provenance could not be inspected") from error
     if result.returncode != 0:
         detail = result.stderr.strip() or "Git command failed"
-        raise WoonError(f"Context Calendar Git provenance is invalid: {detail}")
+        raise WoonError(f"{plugin_id} Git provenance is invalid: {detail}")
     return result.stdout.strip()
 
 
-def _context_calendar_git_provenance(source: Path) -> GitSourceProvenance:
-    repository_root = Path(_git_output(source, "rev-parse", "--show-toplevel")).resolve()
+def _local_plugin_git_provenance(plugin_id: str, source: Path) -> GitSourceProvenance:
+    approved_repository = LOCAL_PLUGIN_SOURCE_REPOSITORIES.get(plugin_id)
+    if approved_repository is None:
+        raise WoonError(f"{plugin_id} has no approved source repository")
+    repository_root = Path(_git_output(source, plugin_id, "rev-parse", "--show-toplevel")).resolve()
     if repository_root != source:
-        raise WoonError("Context Calendar build source must be the Git repository root")
-    if _git_output(source, "status", "--porcelain", "--untracked-files=all"):
-        raise WoonError("Context Calendar build source Git repository must be clean")
-    remote = _git_output(source, "remote", "get-url", "origin")
-    if _normalize_github_repository(remote) != _normalize_github_repository(
-        CONTEXT_CALENDAR_SOURCE_REPOSITORY
-    ):
-        raise WoonError("Context Calendar build source origin is not approved")
-    head_commit = _git_output(source, "rev-parse", "--verify", "HEAD^{commit}")
+        raise WoonError(f"{plugin_id} build source must be the Git repository root")
+    if _git_output(source, plugin_id, "status", "--porcelain", "--untracked-files=all"):
+        raise WoonError(f"{plugin_id} build source Git repository must be clean")
+    remote = _git_output(source, plugin_id, "remote", "get-url", "origin")
+    if _normalize_github_repository(remote) != _normalize_github_repository(approved_repository):
+        raise WoonError(f"{plugin_id} build source origin is not approved")
+    head_commit = _git_output(source, plugin_id, "rev-parse", "--verify", "HEAD^{commit}")
     return GitSourceProvenance(
         repository=_normalize_github_repository(remote) + ".git",
         head_commit=head_commit,
@@ -463,9 +469,7 @@ class ObsidianPluginService:
             raise WoonError(
                 f"local manifest version does not match expected version: {expected_version}"
             )
-        provenance = (
-            _context_calendar_git_provenance(source) if plugin_id == CONTEXT_CALENDAR_ID else None
-        )
+        provenance = _local_plugin_git_provenance(plugin_id, source)
 
         receipt_id = self._receipt_id()
         receipt_root = self._local / "receipts"
@@ -1292,20 +1296,18 @@ class ObsidianPluginService:
             asset_hashes: dict[str, str] = {}
             for name in REQUIRED_ASSETS:
                 path = self._plugins / plugin_id / name
-                _require_vault_local_file(self._vault, path, "Context Calendar runtime asset")
+                _require_vault_local_file(self._vault, path, f"{plugin_id} runtime asset")
                 asset_hashes[name] = _sha256(path.read_bytes())
         except OSError as error:
-            raise WoonError("Context Calendar runtime assets are incomplete") from error
+            raise WoonError(f"{plugin_id} runtime assets are incomplete") from error
         if not self._matching_receipt(
             "install-local-build",
             plugin_id,
             version,
             asset_hashes=asset_hashes,
-            require_context_git_provenance=plugin_id == CONTEXT_CALENDAR_ID,
+            require_local_git_provenance=plugin_id in LOCAL_PLUGIN_SOURCE_REPOSITORIES,
         ):
-            raise WoonError(
-                "Context Calendar must be installed by the verified local-build adapter"
-            )
+            raise WoonError(f"{plugin_id} must be installed by the verified local-build adapter")
         return asset_hashes
 
     def _matching_receipt(
@@ -1318,7 +1320,7 @@ class ObsidianPluginService:
         settings_hash: str | None = None,
         dashboard_hash: str | None = None,
         attestation_checks: tuple[str, ...] | None = None,
-        require_context_git_provenance: bool = False,
+        require_local_git_provenance: bool = False,
     ) -> bool:
         receipt_root = self._local / "receipts"
         for path in sorted(receipt_root.glob("*.json"), reverse=True):
@@ -1336,12 +1338,12 @@ class ObsidianPluginService:
                 continue
             if asset_hashes is not None and plugin.get("assets_sha256") != dict(asset_hashes):
                 continue
-            if require_context_git_provenance:
+            if require_local_git_provenance:
                 source = plugin.get("source")
                 head_commit = source.get("head_commit") if isinstance(source, dict) else None
                 if (
                     not isinstance(source, dict)
-                    or source.get("repository") != CONTEXT_CALENDAR_SOURCE_REPOSITORY
+                    or source.get("repository") != LOCAL_PLUGIN_SOURCE_REPOSITORIES.get(plugin_id)
                     or source.get("clean") is not True
                     or not isinstance(head_commit, str)
                     or len(head_commit) not in {40, 64}

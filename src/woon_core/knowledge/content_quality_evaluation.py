@@ -301,14 +301,43 @@ def criterion_anchor_candidates(markdown: str, criterion: str) -> list[str]:
         if line.startswith("#") and 2 <= len(line.lstrip("#").strip()) <= 120
     )
     prose = _unique(_prose_candidates(body))[:12]
+    scope_notes = _unique(
+        line[2:].strip()
+        for line in body
+        if line.startswith("> 확인 범위:") and 12 <= len(line[2:].strip()) <= 280
+    )
     purpose = _unique(
         line.strip()
         for line in frontmatter
         if line.startswith("purpose:") and 12 <= len(line.strip()) <= 240
     )
+    node_kind = next(
+        (
+            line.split(":", 1)[1].strip().strip("'\"")
+            for line in frontmatter
+            if line.startswith("node_kind:")
+        ),
+        "",
+    )
+    link_labels = _unique(
+        match.group(1).strip()
+        for match in re.finditer(r"\[\[(?:[^\]|]+\|)?([^\]]+)\]\]", "\n".join(body))
+        if 2 <= len(match.group(1).strip()) <= 120
+    )
+    if node_kind in {"root", "hub", "entity"}:
+        navigation_candidates = _unique(headings + purpose + link_labels)[:12]
+        if not navigation_candidates or not link_labels:
+            raise WoonError("quality review navigation surface has no usable link anchor")
+        if criterion == "current_use":
+            return purpose or headings[:1] or navigation_candidates[:1]
+        if criterion == "revisitability":
+            return _unique(headings + link_labels) or navigation_candidates
+        return navigation_candidates
     all_candidates = _unique(headings + prose + purpose)[:12]
     if not all_candidates or not prose:
         raise WoonError("quality review markdown has no usable evidence anchor")
+    if criterion == "evidence_boundary" and scope_notes:
+        return _unique(scope_notes + prose)[:12]
     if criterion in {"natural_korean", "evidence_boundary"}:
         return prose
     if criterion == "current_use":

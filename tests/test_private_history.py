@@ -8,10 +8,9 @@ import pytest
 from woon_core.errors import WoonError
 from woon_core.people.cli import run_people
 from woon_core.people.private_history import (
-    VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY,
+    RETIRED_VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY,
     VAULT_PRIVATE_HISTORY_REVIEW_RELATIVE_PATH,
     PrivatePersonHistoryService,
-    _history_role_label,
 )
 from woon_core.people.service import PersonService
 
@@ -119,28 +118,39 @@ def test_private_history_sync_projects_explicit_links_and_removes_resolved_revie
     analysis.write_text("private analysis\n", encoding="utf-8")
     _write_work_catalog(novel)
     _write_ledger(novel, include_participant=True, candidates=True)
+    retired_views = (
+        (
+            vault / RETIRED_VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY / "README.md",
+            "woon_projection: vault-private-person-history\n",
+        ),
+        (
+            novel / "work/dashboards/README.md",
+            "woon_projection: novel-private-work\n",
+        ),
+        (
+            novel / "work/people/dashboards/README.md",
+            "woon_projection: novel-private-person-history\n",
+        ),
+    )
+    for path, marker in retired_views:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(marker, encoding="utf-8")
+    subject_card = vault / "wiki/private/subject-person.md"
+    subject_card.write_text(
+        subject_card.read_text(encoding="utf-8")
+        + "\n<!-- woon-private-person-history:start -->\n"
+        + "duplicate dashboard link\n"
+        + "<!-- woon-private-person-history:end -->\n",
+        encoding="utf-8",
+    )
 
     result = PrivatePersonHistoryService(vault, novel).sync()
 
     assert (result.works, result.people, result.links, result.candidates) == (1, 2, 2, 1)
-    vault_dashboard = (
-        vault / VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY / "subject-person.md"
-    ).read_text(encoding="utf-8")
-    assert "창작물 1 · (미정) · 확정 자료 1개" in vault_dashboard
-    assert "observations.md" not in vault_dashboard
-    assert "private source body" not in vault_dashboard
-    novel_dashboard = (novel / "work/people/dashboards/subject-person.md").read_text(
-        encoding="utf-8"
-    )
-    assert "[observations.md]" in novel_dashboard
-    assert "../../../vault-source/observations.md" in novel_dashboard
-    assert "woon-knowledge" not in novel_dashboard
-    assert "[창작물 1 · (미정)](../../dashboards/creative-work-1.md)" in novel_dashboard
-    work_dashboard = (novel / "work/dashboards/creative-work-1.md").read_text(encoding="utf-8")
-    assert "entity_type: creative-work" in work_dashboard
-    assert "category: novel" in work_dashboard
-    assert "[대상 인물](../people/dashboards/subject-person.md)" in work_dashboard
-    assert "private source body" not in work_dashboard
+    assert not (vault / RETIRED_VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY).exists()
+    assert not (novel / "work/dashboards").exists()
+    assert not (novel / "work/people/dashboards").exists()
+    assert "woon-private-person-history:start" not in subject_card.read_text(encoding="utf-8")
     review = vault / VAULT_PRIVATE_HISTORY_REVIEW_RELATIVE_PATH
     assert review.exists()
     review_text = review.read_text(encoding="utf-8")
@@ -148,16 +158,18 @@ def test_private_history_sync_projects_explicit_links_and_removes_resolved_revie
     assert "creative-work-1" in review_text
     assert "사용자 확인 전에는 같은 사람인지 확정할 수 없음" in review_text
     assert "create/scene.md" not in review_text
-    assert "비공개 이력" in (vault / "wiki/personal/participant-person.md").read_text(
-        encoding="utf-8"
-    )
+    assert "woon-private-person-history:start" not in (
+        vault / "wiki/personal/participant-person.md"
+    ).read_text(encoding="utf-8")
 
     _write_ledger(novel, include_participant=False, candidates=False)
     second = PrivatePersonHistoryService(vault, novel).sync()
 
     assert second.candidates == 0
     assert not review.exists()
-    assert not (vault / VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY / "participant-person.md").exists()
+    assert not (
+        vault / RETIRED_VAULT_PRIVATE_HISTORY_RELATIVE_DIRECTORY / "participant-person.md"
+    ).exists()
     assert "woon-private-person-history:start" not in (
         vault / "wiki/personal/participant-person.md"
     ).read_text(encoding="utf-8")
@@ -195,12 +207,6 @@ def test_private_history_cli_requires_explicit_local_novel_root(tmp_path: Path) 
     assert "status: ok" in output.getvalue()
     assert "works: 1" in output.getvalue()
     assert "people: 1" in output.getvalue()
-
-
-def test_private_history_uses_korean_role_labels() -> None:
-    assert _history_role_label("mentioned") == "일정에 언급"
-    assert _history_role_label("organizer") == "일정 주관"
-    assert _history_role_label("record-owner") == "기록 소유자"
 
 
 def test_private_history_rejects_links_to_an_unknown_work(tmp_path: Path) -> None:

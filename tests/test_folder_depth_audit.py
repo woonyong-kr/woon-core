@@ -27,6 +27,8 @@ def test_accepts_declared_semantic_wiki_collections(tmp_path: Path) -> None:
     _write(tmp_path / "wiki/personal/projects/service.md")
     _write(tmp_path / "wiki/personal/interview/README.md")
     _write(tmp_path / "wiki/personal/interview/ai-engineer/question.md")
+    _write(tmp_path / "wiki/personal/career/README.md")
+    _write(tmp_path / "wiki/personal/career/applications/company-role.md")
 
     result = _run_audit(tmp_path)
 

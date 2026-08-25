@@ -10,7 +10,6 @@ CHECK_ROOTS = {
     "README.md",
     "maps",
     "wiki",
-    "sources",
     "inbox",
     "types",
 }
@@ -23,11 +22,10 @@ SKIP_PARTS = {
     "quartz",
     "scripts",
     "templates",
+    "_sources",
 }
 
-PROTECTED_PREFIXES = {
-    ("sources", "imports"),
-}
+PROTECTED_PREFIXES: set[tuple[str, ...]] = set()
 
 PREFIX_MAX_PARTS = {
     # These are generated or purpose-owned collections rather than ad-hoc nesting.
@@ -41,9 +39,10 @@ PREFIX_MAX_PARTS = {
     # extra level is deliberate ownership, not ad-hoc nesting.
     ("wiki", "personal", "projects"): 4,
     ("wiki", "personal", "interview"): 5,
-    # Private raw originals stay below their domain folder so they are never
-    # confused with searchable or publishable Wiki material.
-    ("sources", "private", "writing"): 4,
+    # Career keeps one human-readable hub and one record per application.  The
+    # extra applications level is a declared collection, not a second canon.
+    ("wiki", "personal", "career"): 4,
+    ("wiki", "personal", "career", "applications"): 5,
 }
 
 

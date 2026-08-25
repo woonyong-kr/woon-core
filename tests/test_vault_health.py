@@ -20,6 +20,44 @@ AUDIT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIT)
 
 
+class WikiBaseContractTests(unittest.TestCase):
+    def test_accepts_semantically_equal_quoted_or_plain_yaml_scalars(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "inbox/wiki/wiki.base"
+            base.parent.mkdir(parents=True)
+            base.write_text(
+                """formulas:
+  title_link: file.asLink(title)
+views:
+  - {type: table, name: 전체}
+  - {type: table, name: 프로젝트}
+  - {type: table, name: 책}
+  - {type: table, name: 리소스}
+  - {type: table, name: 개념}
+  - {type: table, name: 학습}
+  - {type: table, name: 커리어}
+  - {type: table, name: 생활}
+  - {type: table, name: 인물}
+""",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(AUDIT.wiki_base_contract_issues(root), [])
+
+    def test_reports_missing_human_title_formula_and_view(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "inbox/wiki/wiki.base"
+            base.parent.mkdir(parents=True)
+            base.write_text("views:\n  - {type: table, name: 전체}\n", encoding="utf-8")
+
+            issues = AUDIT.wiki_base_contract_issues(root)
+
+            self.assertTrue(any("file.asLink(title)" in issue for issue in issues))
+            self.assertTrue(any("프로젝트" in issue for issue in issues))
+
+
 class MermaidQualityTests(unittest.TestCase):
     def test_rejects_legacy_converter_markup_and_duplicate_stand_in_node(self) -> None:
         shapes, placeholders = AUDIT.mermaid_quality_issues(
@@ -69,6 +107,25 @@ flowchart TD
             ["wiki/example.md: line 4", "wiki/example.md: line 5"],
         )
 
+    def test_rejects_local_mermaid_colors_and_accepts_labeled_line_styles(self) -> None:
+        colored = """```mermaid
+flowchart TD
+  failed["실패"]
+  style failed fill:#f55,color:#fff
+```
+"""
+        semantic = """```mermaid
+flowchart TD
+  start["시작"] -.->|"확인 필요"| review["검토"]
+```
+"""
+
+        self.assertEqual(
+            AUDIT.mermaid_color_issues("wiki/example.md", colored),
+            ["wiki/example.md: line 4"],
+        )
+        self.assertEqual(AUDIT.mermaid_color_issues("wiki/example.md", semantic), [])
+
 
 class VaultRootDirectoryTests(unittest.TestCase):
     def test_allows_only_canonical_visible_root_directories(self) -> None:
@@ -99,7 +156,7 @@ class RetiredExternalVideoBoundaryTests(unittest.TestCase):
     def test_rejects_external_video_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "sources/external-video").mkdir(parents=True)
+            (root / "wiki/private/_sources/knowledge/external-video").mkdir(parents=True)
 
             issues = AUDIT.retired_external_video_boundary_issues(root)
 
@@ -169,6 +226,22 @@ class GlobalGraphRootTests(unittest.TestCase):
 
 
 class WikiAndEntityPolicyTests(unittest.TestCase):
+    def _contract(self, **overrides: object) -> dict[str, object]:
+        metadata: dict[str, object] = {
+            "type": "Wiki",
+            "canonical_id": "personal/example",
+            "node_kind": "topic",
+            "parent": "[[wiki/README|Wiki]]",
+            "keywords": ["예시"],
+            "aliases": [],
+            "view_mode": "tree",
+            "updated": "2026-08-25",
+            "facets": ["개념"],
+            "knowledge_state": "확인 필요",
+        }
+        metadata.update(overrides)
+        return metadata
+
     def test_reports_single_wiki_contract_violations_directly(self) -> None:
         wiki, entities = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/깨진-지식.md",
@@ -194,33 +267,52 @@ class WikiAndEntityPolicyTests(unittest.TestCase):
         self.assertTrue(project_entities)
         self.assertTrue(content_entities)
 
-    def test_accepts_project_and_content_facets_in_the_same_wiki_contract(self) -> None:
+    def test_rejects_keyword_documents_outside_the_single_wiki(self) -> None:
+        self.assertEqual(
+            AUDIT.nonwiki_keyword_policy_issues("inbox/capture/README.md", {"type": "키워드"}),
+            [
+                "inbox/capture/README.md: keyword knowledge belongs only under wiki/; "
+                "use an operational type"
+            ],
+        )
+        self.assertEqual(
+            AUDIT.nonwiki_keyword_policy_issues("inbox/capture/README.md", {"type": "Operations"}),
+            [],
+        )
+
+    def test_accepts_project_and_resource_facets_in_the_same_wiki_contract(self) -> None:
         project = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/자격-준비.md",
             "# 자격 준비\n",
-            {
-                "type": "Wiki",
-                "access": "local-only",
-                "canonical_id": "personal/자격-준비",
-                "facets": ["프로젝트", "학습"],
-                "knowledge_state": "생각 중",
-                "parent_topics": ["[[wiki/README|Wiki]]"],
-                "project_id": "aice-associate",
-                "objective": "자격 취득",
-            },
+            self._contract(
+                **{
+                    "access": "local-only",
+                    "canonical_id": "personal/자격-준비",
+                    "node_kind": "entity",
+                    "view_mode": "project",
+                    "keywords": ["자격 준비", "AICE Associate"],
+                    "facets": ["프로젝트", "학습"],
+                    "knowledge_state": "생각 중",
+                    "project_id": "aice-associate",
+                    "objective": "자격 취득",
+                }
+            ),
         )
         content = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/학습-자료.md",
             "# 학습 자료\n",
-            {
-                "type": "Wiki",
-                "access": "local-only",
-                "canonical_id": "personal/학습-자료",
-                "facets": ["콘텐츠", "학습"],
-                "knowledge_state": "확인 필요",
-                "parent_topics": ["[[wiki/README|Wiki]]"],
-                "content_kind": "course",
-            },
+            self._contract(
+                **{
+                    "access": "local-only",
+                    "canonical_id": "personal/학습-자료",
+                    "node_kind": "entity",
+                    "view_mode": "linear",
+                    "keywords": ["학습 자료"],
+                    "facets": ["리소스", "학습"],
+                    "knowledge_state": "확인 필요",
+                    "content_kind": "course",
+                }
+            ),
         )
 
         self.assertEqual(project, ([], []))
@@ -230,48 +322,45 @@ class WikiAndEntityPolicyTests(unittest.TestCase):
         wiki, _ = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/깨진-정체성.md",
             "# 깨진 정체성\n",
-            {
-                "type": "Wiki",
-                "canonical_id": "../깨진 정체성",
-                "facets": ["학습", "학습", "임의 종류"],
-                "knowledge_state": "생각 중",
-                "parent_topics": ["[[wiki/README|Wiki]]"],
-            },
+            self._contract(
+                **{
+                    "canonical_id": "../깨진 정체성",
+                    "facets": ["학습", "학습", "임의 종류"],
+                }
+            ),
         )
 
         self.assertTrue(any("canonical_id" in issue for issue in wiki))
         self.assertTrue(any("facets" in issue for issue in wiki))
 
-    def test_rejects_multiple_primary_parent_topics(self) -> None:
+    def test_rejects_retired_multiple_parent_field(self) -> None:
         wiki, _ = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/여러-부모.md",
             "# 여러 부모\n",
-            {
-                "type": "Wiki",
-                "canonical_id": "personal/여러-부모",
-                "facets": ["개념"],
-                "knowledge_state": "생각 중",
-                "parent_topics": ["[[wiki/README|Wiki]]", "[[wiki/ai/README|AI]]"],
-            },
+            self._contract(
+                **{
+                    "canonical_id": "personal/여러-부모",
+                    "parent_topics": ["[[wiki/README|Wiki]]", "[[wiki/ai/README|AI]]"],
+                }
+            ),
         )
 
-        self.assertTrue(any("exactly one primary" in issue for issue in wiki))
+        self.assertTrue(any("legacy Wiki tree field" in issue for issue in wiki))
 
     def test_rejects_numbered_interview_identity_and_wiki_root_parent(self) -> None:
         wiki, _ = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/interview/Q06-Kyro-문제와-역할.md",
             "# Q06. Kyro 문제와 역할\n",
-            {
-                "type": "Wiki",
-                "title": "Q06. Kyro 문제와 역할",
-                "canonical_id": "personal/interview/Q06-Kyro-문제와-역할",
-                "facets": ["커리어", "학습"],
-                "knowledge_state": "확인 필요",
-                "parent_topics": ["[[wiki/README|Wiki]]"],
-                "question_kind": "interview",
-                "interview_tracks": ["KRAFTON AI Engineer"],
-                "question_topic": "Kubernetes 장애 복구 서비스",
-            },
+            self._contract(
+                **{
+                    "title": "Q06. Kyro 문제와 역할",
+                    "canonical_id": "personal/interview/Q06-Kyro-문제와-역할",
+                    "facets": ["커리어", "학습"],
+                    "question_kind": "interview",
+                    "interview_tracks": ["KRAFTON AI Engineer"],
+                    "question_topic": "Kubernetes 장애 복구 서비스",
+                }
+            ),
         )
 
         self.assertTrue(any("sequence or archive" in issue for issue in wiki))
@@ -282,20 +371,18 @@ class WikiAndEntityPolicyTests(unittest.TestCase):
         wiki, entities = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/interview/kubernetes-장애-원인을-어떻게-판정했습니까.md",
             "# Kubernetes 장애 원인을 어떻게 판정했습니까?\n",
-            {
-                "type": "Wiki",
-                "title": "Kubernetes 장애 원인을 어떻게 판정했습니까?",
-                "canonical_id": "personal/interview/kubernetes-장애-원인을-어떻게-판정했습니까",
-                "facets": ["커리어", "학습"],
-                "knowledge_state": "확인 필요",
-                "parent_topics": [
-                    "[[wiki/personal/projects/kubernetes-장애-복구-서비스|"
-                    "Kubernetes 장애 복구 서비스]]"
-                ],
-                "question_kind": "interview",
-                "interview_tracks": ["KRAFTON AI Engineer"],
-                "question_topic": "Kubernetes 장애 복구 서비스",
-            },
+            self._contract(
+                **{
+                    "title": "Kubernetes 장애 원인을 어떻게 판정했습니까?",
+                    "canonical_id": "personal/interview/kubernetes-장애-원인을-어떻게-판정했습니까",
+                    "facets": ["커리어", "학습"],
+                    "parent": "[[wiki/personal/projects/kubernetes-장애-복구-서비스|"
+                    "Kubernetes 장애 복구 서비스]]",
+                    "question_kind": "interview",
+                    "interview_tracks": ["KRAFTON AI Engineer"],
+                    "question_topic": "Kubernetes 장애 복구 서비스",
+                }
+            ),
         )
 
         self.assertEqual((wiki, entities), ([], []))
@@ -304,19 +391,18 @@ class WikiAndEntityPolicyTests(unittest.TestCase):
         wiki, _ = AUDIT.wiki_and_entity_policy_issues(
             "wiki/personal/interview/ai-engineer/지원-이유.md",
             "# 지원 이유는 무엇입니까?\n",
-            {
-                "type": "Wiki",
-                "title": "지원 이유는 무엇입니까?",
-                "canonical_id": "personal/interview/ai-engineer/지원-이유",
-                "facets": ["커리어", "학습"],
-                "knowledge_state": "확인 필요",
-                "parent_topics": [
-                    "[[wiki/personal/interview/ai-engineer/README|KRAFTON AI Engineer 면접 준비]]"
-                ],
-                "question_kind": "interview",
-                "interview_tracks": ["KRAFTON AI Engineer"],
-                "question_topic": "경력 서사와 지원 동기",
-            },
+            self._contract(
+                **{
+                    "title": "지원 이유는 무엇입니까?",
+                    "canonical_id": "personal/interview/ai-engineer/지원-이유",
+                    "facets": ["커리어", "학습"],
+                    "parent": "[[wiki/personal/interview/ai-engineer/README|"
+                    "KRAFTON AI Engineer 면접 준비]]",
+                    "question_kind": "interview",
+                    "interview_tracks": ["KRAFTON AI Engineer"],
+                    "question_topic": "경력 서사와 지원 동기",
+                }
+            ),
         )
 
         self.assertTrue(any("job track" in issue for issue in wiki))
@@ -353,6 +439,28 @@ class RuntimePermissionTests(unittest.TestCase):
             receipt.chmod(0o600)
 
             self.assertEqual(AUDIT.runtime_permission_issues(root), [])
+
+
+class CareerSourceAssetTests(unittest.TestCase):
+    def test_accepts_private_career_pdf_and_structured_jd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = (
+                root / "wiki/private/_sources/knowledge/private/career/applications/"
+                "krafton-ai-engineer"
+            )
+            source.mkdir(parents=True)
+            pdf = source / "draft-abc.pdf"
+            jd = source / "jd.yaml"
+            pdf.write_bytes(b"%PDF-1.4\n")
+            jd.write_text("title: JD\n", encoding="utf-8")
+            previous = AUDIT.VAULT
+            try:
+                AUDIT.VAULT = root
+                self.assertTrue(AUDIT.is_allowed_non_markdown_file(pdf))
+                self.assertTrue(AUDIT.is_allowed_non_markdown_file(jd))
+            finally:
+                AUDIT.VAULT = previous
 
 
 class ObsidianWorkspaceTests(unittest.TestCase):
@@ -523,7 +631,7 @@ class VaultExecutionOwnershipTests(unittest.TestCase):
     def test_allows_code_as_raw_source_material(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "sources/imports/example.py"
+            source = root / "wiki/private/_sources/knowledge/imports/example.py"
             source.parent.mkdir(parents=True)
             source.write_text("print('source material')\n", encoding="utf-8")
 
@@ -784,10 +892,10 @@ profile: woon-apple-calendar
 
 
 class RetiredAiInstructionBoundaryTests(unittest.TestCase):
-    def test_rejects_legacy_ai_reference_and_active_stale_locator(self) -> None:
+    def test_ignores_preserved_source_history_but_rejects_active_stale_locator(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            private_source = root / "sources/private/writing/voice.md"
+            private_source = root / "wiki/private/_sources/knowledge/private/writing/voice.md"
             private_source.parent.mkdir(parents=True)
             private_source.write_text(
                 "---\ntype: AI Reference\n---\n# Legacy\n",
@@ -802,8 +910,7 @@ class RetiredAiInstructionBoundaryTests(unittest.TestCase):
 
             issues = AUDIT.retired_ai_instruction_boundary_issues(root)
 
-            self.assertEqual(len(issues), 2)
-            self.assertTrue(any("AI Reference" in issue for issue in issues))
+            self.assertEqual(len(issues), 1)
             self.assertTrue(any("ai-reference/" in issue for issue in issues))
 
     def test_rejects_removed_instruction_roots_and_nested_repository(self) -> None:
@@ -947,7 +1054,11 @@ attributions: []
     def _write_card(self, root: Path, *, scope: str = "general") -> None:
         folder = "personal" if scope == "general" else "private"
         (root / f"wiki/{folder}").mkdir(parents=True)
-        parent = 'parent_moc: "[[people-index|인물 관계]]"\n' if scope == "general" else ""
+        parent = (
+            'parent: "[[wiki/people/README|인물 관계]]"\n'
+            if scope == "general"
+            else 'parent: "[[wiki/private/README|비공개 지식]]"\n'
+        )
         (root / f"wiki/{folder}/최우녕.md").write_text(
             "---\n"
             "type: Wiki\ntitle: 최우녕\npublish: false\naccess: local-only\nstatus: Active\n"
@@ -958,9 +1069,9 @@ attributions: []
         )
 
     def _write_map(self, root: Path) -> None:
-        (root / "maps").mkdir(exist_ok=True)
-        (root / "maps/people-index.md").write_text(
-            "# 인물 관계\n\n![[../inbox/wiki/wiki.base#인물]]\n",
+        (root / "wiki/people").mkdir(parents=True, exist_ok=True)
+        (root / "wiki/people/README.md").write_text(
+            "# 인물 관계\n\n- [[wiki/personal/최우녕|최우녕]]\n",
             encoding="utf-8",
         )
 
@@ -1006,9 +1117,13 @@ attributions: []
                 ),
                 encoding="utf-8",
             )
-            people_map = root / "maps/people-index.md"
-            people_map.write_text(
-                people_map.read_text(encoding="utf-8") + "[[wiki/private/이민정|이민정]]\n",
+            self._write_card(root, scope="novel-local-only")
+            private_card = root / "wiki/private/최우녕.md"
+            private_card.write_text(
+                private_card.read_text(encoding="utf-8").replace(
+                    "[[wiki/private/README|비공개 지식]]",
+                    "[[wiki/people/README|인물 관계]]",
+                ),
                 encoding="utf-8",
             )
 

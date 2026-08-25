@@ -43,8 +43,8 @@ class MarkdownDocumentRepository:
             raise WoonError("knowledge mutation lock escapes the configured vault") from error
 
     def get(self, canonical_id: str) -> CanonicalDocument | None:
-        path = self._path(canonical_id)
-        if not path.is_file():
+        path = self._find_path(canonical_id)
+        if path is None:
             return None
         return self.parse(
             path.relative_to(self._vault).as_posix(),
@@ -55,7 +55,7 @@ class MarkdownDocumentRepository:
         if not self._root.is_dir():
             return []
         documents: list[CanonicalDocument] = []
-        for path in sorted(self._root.rglob("*.md")):
+        for path in self._canonical_markdown_paths():
             relative = path.relative_to(self._vault).as_posix()
             try:
                 documents.append(self.parse(relative, path.read_text(encoding="utf-8")))
@@ -68,7 +68,7 @@ class MarkdownDocumentRepository:
 
         if not self._root.is_dir():
             return ()
-        return tuple(_file_state(path, self._vault) for path in sorted(self._root.rglob("*.md")))
+        return tuple(_file_state(path, self._vault) for path in self._canonical_markdown_paths())
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
@@ -78,11 +78,11 @@ class MarkdownDocumentRepository:
             yield
 
     def snapshot(self, canonical_id: str) -> bytes | None:
-        path = self._path(canonical_id)
-        return path.read_bytes() if path.is_file() else None
+        path = self._find_path(canonical_id)
+        return path.read_bytes() if path is not None else None
 
     def restore_snapshot(self, canonical_id: str, snapshot: bytes | None) -> None:
-        path = self._path(canonical_id)
+        path = self._find_path(canonical_id) or self._path(canonical_id)
         if snapshot is None:
             path.unlink(missing_ok=True)
             return
@@ -104,7 +104,7 @@ class MarkdownDocumentRepository:
         body: str,
         expected_revision: str | None,
     ) -> SaveResult:
-        path = self._path(metadata.canonical_id)
+        path = self._find_path(metadata.canonical_id) or self._path(metadata.canonical_id)
         current = self.get(metadata.canonical_id)
         if current is not None and current.revision != expected_revision:
             raise WoonError(
@@ -136,19 +136,13 @@ class MarkdownDocumentRepository:
         titles: dict[str, str] = {}
         if not self._root.is_dir():
             return []
-        for path in sorted(self._root.rglob("*.md")):
+        for path in self._canonical_markdown_paths():
             relative = path.relative_to(self._vault).as_posix()
             try:
                 document = self.parse(relative, path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, WoonError) as error:
                 errors.append(f"{relative}: {error}")
                 continue
-            expected_id = path.relative_to(self._root).with_suffix("").as_posix()
-            if document.metadata.canonical_id != expected_id:
-                errors.append(
-                    f"{relative}: canonical_id {document.metadata.canonical_id!r} "
-                    f"does not match path {expected_id!r}"
-                )
             if document.metadata.canonical_id in identifiers:
                 errors.append(
                     f"{relative}: duplicate canonical_id also used by "
@@ -211,6 +205,41 @@ class MarkdownDocumentRepository:
         except ValueError as error:
             raise WoonError("canonical document path escapes the configured root") from error
         return candidate
+
+    def _find_path(self, canonical_id: str) -> Path | None:
+        """Resolve a stable canonical identity independently from its current path."""
+
+        if not self._root.is_dir():
+            return None
+        matches: list[Path] = []
+        preferred = self._path(canonical_id)
+        paths = [preferred] if preferred.is_file() else []
+        paths.extend(path for path in self._canonical_markdown_paths() if path != preferred)
+        for path in paths:
+            try:
+                document = self.parse(
+                    path.relative_to(self._vault).as_posix(),
+                    path.read_text(encoding="utf-8"),
+                )
+            except (OSError, UnicodeError, WoonError):
+                continue
+            if document.metadata.canonical_id == canonical_id:
+                matches.append(path)
+        if len(matches) > 1:
+            locations = [path.relative_to(self._vault).as_posix() for path in matches]
+            raise WoonError(
+                f"canonical_id {canonical_id!r} resolves to multiple files: {locations}"
+            )
+        return matches[0] if matches else None
+
+    def _canonical_markdown_paths(self) -> tuple[Path, ...]:
+        """Exclude the raw Wiki-owned source archive from canonical documents."""
+
+        return tuple(
+            path
+            for path in sorted(self._root.rglob("*.md"))
+            if "_sources" not in path.relative_to(self._root).parts
+        )
 
     @staticmethod
     def _render(metadata: DocumentMetadata, body: str) -> str:

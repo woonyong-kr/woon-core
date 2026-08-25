@@ -655,3 +655,35 @@ def test_search_falls_back_to_any_discriminative_term(tmp_path: Path) -> None:
     result = service.search("트랜잭션 멱등성 원자성", 1)
 
     assert result[0].relative_path == "wiki/backend/transaction.md"
+
+
+def test_repository_resolves_stable_canonical_id_after_page_move(tmp_path: Path) -> None:
+    canonical_root = tmp_path / "wiki"
+    moved = canonical_root / "new-location/topic.md"
+    moved.parent.mkdir(parents=True)
+    moved.write_text(
+        "---\n"
+        "type: Wiki\ncanonical_id: concepts/stable-topic\ntitle: 안정된 주제\n"
+        "summary: 경로가 바뀌어도 정체성은 유지한다.\n"
+        "---\n\n# 안정된 주제\n\n이전한 본문이다.\n",
+        encoding="utf-8",
+    )
+    repository = MarkdownDocumentRepository(tmp_path, canonical_root)
+
+    current = repository.get("concepts/stable-topic")
+    assert current is not None
+    assert current.relative_path == "wiki/new-location/topic.md"
+    saved = repository.save(
+        DocumentMetadata(
+            canonical_id="concepts/stable-topic",
+            title="안정된 주제",
+            domain="concepts",
+            summary="경로 이동 뒤에도 같은 파일을 갱신한다.",
+        ),
+        "갱신한 본문이다.",
+        current.revision,
+    )
+
+    assert saved.document.relative_path == "wiki/new-location/topic.md"
+    assert moved.is_file()
+    assert not (canonical_root / "concepts/stable-topic.md").exists()

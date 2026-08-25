@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 
 from woon_core.errors import WoonError
 from woon_core.knowledge.woon_wiki import (
@@ -18,12 +19,31 @@ from woon_core.knowledge.woon_wiki import (
     apply_prepared_wiki_pages,
     compiled_wiki_contract,
     prepare_legacy_wiki_merge,
+    prepare_wiki_article_view_refresh,
     prepare_wiki_corpus_migration,
     prepare_wiki_pages,
     preserve_managed_context,
     resolve_wiki_path,
     transition_knowledge_state,
 )
+
+
+def _metadata(text: str) -> dict[str, object]:
+    block = text.split("---", 2)[1]
+    parsed = yaml.safe_load(block)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def _write_parent(tmp_path: Path, relative: str = "wiki/README.md", title: str = "Wiki") -> str:
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canonical_id = Path(relative).with_suffix("").relative_to("wiki").as_posix()
+    path.write_text(
+        f"---\ntype: Wiki\ntitle: {title}\ncanonical_id: {canonical_id}\n---\n",
+        encoding="utf-8",
+    )
+    return f"[[{Path(relative).with_suffix('').as_posix()}|{title}]]"
 
 
 def test_compiled_wiki_contract_matches_single_wiki_model() -> None:
@@ -43,7 +63,7 @@ tags: [domain:ai, topic:activation-function]
     assert contract["canonical_id"] == "ai/activation-functions"
     assert contract["facets"] == ["개념", "학습"]
     assert contract["knowledge_state"] == "근거 확인됨"
-    assert contract["parent_topics"] == ["[[wiki/ai/README|ai]]"]
+    assert contract["parent"] == "[[wiki/ai/README|ai]]"
     assert contract["summary"] == "활성화 함수는 신경망에 비선형성을 더한다."
 
 
@@ -54,7 +74,7 @@ def test_compiled_wiki_root_has_no_parent() -> None:
     )
 
     assert contract["canonical_id"] == "README"
-    assert contract["parent_topics"] == []
+    assert "parent" not in contract
 
 
 def test_compiled_page_without_section_index_links_to_wiki_root() -> None:
@@ -63,7 +83,7 @@ def test_compiled_page_without_section_index_links_to_wiki_root() -> None:
         "---\ntype: Wiki\ntitle: PintOS\n---\n\n# PintOS\n\n교육용 운영체제다.\n",
     )
 
-    assert contract["parent_topics"] == ["[[wiki/README|Wiki]]"]
+    assert contract["parent"] == "[[wiki/README|Wiki]]"
 
 
 def test_compiled_contract_preserves_explicit_semantic_parent() -> None:
@@ -72,8 +92,7 @@ def test_compiled_contract_preserves_explicit_semantic_parent() -> None:
         """---
 type: Wiki
 title: Kubernetes 장애 복구 서비스 런타임
-parent_topics:
-- '[[wiki/personal/projects/kubernetes-장애-복구-서비스|Kubernetes 장애 복구 서비스]]'
+parent: '[[wiki/personal/projects/kubernetes-장애-복구-서비스|Kubernetes 장애 복구 서비스]]'
 ---
 
 # Kubernetes 장애 복구 서비스 런타임
@@ -82,9 +101,9 @@ parent_topics:
 """,
     )
 
-    assert contract["parent_topics"] == [
+    assert contract["parent"] == (
         "[[wiki/personal/projects/kubernetes-장애-복구-서비스|Kubernetes 장애 복구 서비스]]"
-    ]
+    )
 
 
 def test_compiled_contract_does_not_treat_a_project_folder_as_entity_metadata() -> None:
@@ -114,8 +133,7 @@ title: 이전 제목
 summary: 이전 요약
 facets:
 - 개념
-parent_topics:
-- '[[wiki/README|Wiki]]'
+parent: '[[wiki/README|Wiki]]'
 people:
 - '[[wiki/personal/people/최우녕|최우녕]]'
 knowledge_state: 근거 확인됨
@@ -132,8 +150,7 @@ summary: 새 compiler 요약
 facets:
 - 프로젝트
 - 학습
-parent_topics:
-- '[[wiki/personal/projects/README|프로젝트]]'
+parent: '[[wiki/personal/projects/README|프로젝트]]'
 knowledge_state: 근거 확인됨
 ---
 
@@ -172,7 +189,8 @@ facets:
     assert contract["facets"] == ["커리어", "학습"]
 
 
-def test_new_conversation_delta_creates_one_wiki_subject(tmp_path: Path) -> None:
+def test_new_entity_creates_link_index_information_and_separate_history(tmp_path: Path) -> None:
+    parent = _write_parent(tmp_path)
     pages = prepare_wiki_pages(
         tmp_path,
         (
@@ -183,27 +201,39 @@ def test_new_conversation_delta_creates_one_wiki_subject(tmp_path: Path) -> None
                 knowledge_state="생각 중",
                 day=date(2026, 8, 24),
                 intent="자격 취득 준비를 한곳에서 추적하려는 것으로 보인다.",
+                parent=parent,
+                keywords=("AICE Associate", "자격 준비"),
+                node_kind="entity",
+                view_mode="project",
+                entity_kind="project",
             ),
         ),
     )
 
-    assert list(path.relative_to(tmp_path).as_posix() for path in pages) == [
-        "wiki/personal/aice-associate-준비.md"
+    assert [path.relative_to(tmp_path).as_posix() for path in pages] == [
+        "wiki/nodes/aice-associate-준비.md",
+        "wiki/nodes/aice-associate-준비-정보.md",
+        "wiki/nodes/aice-associate-준비-히스토리.md",
     ]
-    text = next(iter(pages.values())).decode("utf-8")
-    assert 'canonical_id: "personal/aice-associate-준비"' in text
-    assert 'facets: ["프로젝트", "학습", "커리어"]' in text
-    assert "project_id: aice-associate-준비" in text
-    assert "project_status: Active" in text
-    assert 'objective: "회귀와 분류 문제를 반복해서 풀며 시험을 준비한다."' in text
-    assert 'knowledge_state: "생각 중"' in text
-    assert WIKI_CURRENT_START in text
-    assert WIKI_TIMELINE_START in text
+    landing = pages[tmp_path / "wiki/nodes/aice-associate-준비.md"].decode("utf-8")
+    information = pages[tmp_path / "wiki/nodes/aice-associate-준비-정보.md"].decode("utf-8")
+    history = pages[tmp_path / "wiki/nodes/aice-associate-준비-히스토리.md"].decode("utf-8")
+    assert _metadata(landing)["canonical_id"] == "nodes/aice-associate-준비"
+    assert WIKI_CURRENT_START not in landing
+    assert WIKI_TIMELINE_START not in landing
+    assert 'facets: ["프로젝트", "학습", "커리어"]' in information
+    assert "project_id: aice-associate-준비" in information
+    assert 'objective: "회귀와 분류 문제를 반복해서 풀며 시험을 준비한다."' in information
+    assert WIKI_CURRENT_START in information
+    assert WIKI_TIMELINE_START not in information
+    assert WIKI_CURRENT_START not in history
+    assert WIKI_TIMELINE_START in history
 
 
 def test_existing_subject_is_updated_in_place_and_keeps_free_prose(tmp_path: Path) -> None:
+    parent = _write_parent(tmp_path, "wiki/ai/README.md", "AI")
     path = tmp_path / "wiki/ai/transformer.md"
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         """---
 type: Wiki
@@ -230,6 +260,8 @@ knowledge_state: "근거 확인됨"
                 facets=("개념", "학습"),
                 knowledge_state="확인 필요",
                 day=date(2026, 8, 24),
+                parent=parent,
+                keywords=("Transformer",),
             ),
         ),
     )
@@ -283,16 +315,84 @@ llm_wiki:
     assert report.document_count == 2
     assert report.changed_count == 2
     text = report.pages[first].decode("utf-8")
+    metadata = _metadata(text)
     assert "type: Wiki" in text
-    assert 'canonical_id: "database/index"' in text
-    assert 'facets: ["개념", "학습"]' in text
-    assert 'knowledge_state: "근거 확인됨"' in text
+    assert metadata["canonical_id"] == "database/index"
+    assert metadata["facets"] == ["개념", "학습"]
+    assert metadata["knowledge_state"] == "근거 확인됨"
     assert "근거가 있는 기존 설명이다." in text
-    assert 'summary: "근거가 있는 기존 설명이다."' in text
+    assert metadata["summary"] == "근거가 있는 기존 설명이다."
     assert "단일 Wiki 정본 계약" not in text
     canonical_text = report.pages[canonical].decode("utf-8")
-    assert 'canonical_id: "canonical/hidden"' in canonical_text
-    assert 'knowledge_state: "확인 필요"' in canonical_text
+    canonical_metadata = _metadata(canonical_text)
+    assert canonical_metadata["canonical_id"] == "canonical/hidden"
+    assert canonical_metadata["knowledge_state"] == "확인 필요"
+
+
+def test_article_view_refresh_does_not_rewrite_frontmatter_or_prose(tmp_path: Path) -> None:
+    page = tmp_path / "wiki/ai/queue.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        """---
+type: Wiki
+title: 큐
+summary: 먼저 들어온 항목을 먼저 처리하는 자료구조다.
+facets:
+- 개념
+- 학습
+knowledge_state: 근거 확인됨
+parent_topics:
+- '[[wiki/algorithm/README|알고리즘과 자료구조]]'
+---
+
+# 큐
+
+보존할 본문이다.
+""",
+        encoding="utf-8",
+    )
+
+    report = prepare_wiki_article_view_refresh(tmp_path)
+    refreshed = report.pages[page].decode("utf-8")
+
+    assert report.changed_count == 1
+    assert refreshed.count("facets:") == 1
+    assert refreshed.count("parent_topics:") == 1
+    assert "보존할 본문이다." in refreshed
+    assert "> [!info] 한눈에 보기" in refreshed
+
+
+def test_corpus_migration_replaces_yaml_block_lists_without_duplicate_keys(tmp_path: Path) -> None:
+    page = tmp_path / "wiki/ai/queue.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        """---
+type: Wiki
+title: 큐
+facets:
+- 개념
+- 학습
+parent_topics:
+- '[[wiki/algorithm/README|알고리즘과 자료구조]]'
+---
+
+# 큐
+
+먼저 들어온 항목을 먼저 처리하는 자료구조다.
+""",
+        encoding="utf-8",
+    )
+
+    first = prepare_wiki_corpus_migration(tmp_path, migration_day=date(2026, 8, 24))
+    page.write_bytes(first.pages[page])
+    second = prepare_wiki_corpus_migration(tmp_path, migration_day=date(2026, 8, 24))
+    refreshed = second.pages[page].decode("utf-8")
+    metadata = _metadata(refreshed)
+
+    assert refreshed.count("facets:") == 1
+    assert "parent_topics:" not in refreshed
+    assert metadata["facets"] == ["개념", "학습"]
+    assert metadata["parent"] == "[[wiki/algorithm/README|알고리즘과 자료구조]]"
 
 
 def test_corpus_migration_preserves_and_recovers_entity_facets(tmp_path: Path) -> None:
@@ -300,17 +400,17 @@ def test_corpus_migration_preserves_and_recovers_entity_facets(tmp_path: Path) -
         "wiki/personal/project.md": (
             "---\ntype: Wiki\ntitle: 시험 준비\nproject_id: exam\n"
             'facets: ["프로젝트", "학습"]\n---\n',
-            '["프로젝트", "학습"]',
+            ["프로젝트", "학습"],
         ),
         "wiki/personal/book.md": (
             "---\ntype: Wiki\ntitle: 학습 책\ncontent_kind: book\n"
             'facets: ["콘텐츠", "학습"]\n---\n',
-            '["콘텐츠", "학습"]',
+            ["학습"],
         ),
         "wiki/personal/person.md": (
             "---\ntype: Wiki\ntitle: 확인된 사람\nentity_type: person\n"
             'person_id: known-person\nfacets: ["개념", "학습"]\n---\n',
-            '["인물"]',
+            ["인물"],
         ),
     }
     for relative, (body, _) in fixtures.items():
@@ -324,7 +424,7 @@ def test_corpus_migration_preserves_and_recovers_entity_facets(tmp_path: Path) -
 
     for relative, (_, expected) in fixtures.items():
         text = (tmp_path / relative).read_text(encoding="utf-8")
-        assert f"facets: {expected}" in text
+        assert _metadata(text)["facets"] == expected
     assert second.changed_count == 0
 
 
@@ -360,7 +460,7 @@ knowledge_state: "확인 필요"
 
     assert "단일 Wiki 정본 계약" not in text
     assert "큐 구현을 다시 연습했다." in text
-    assert 'summary: "큐는 먼저 들어온 값을 먼저 꺼내는 자료구조다."' in text
+    assert _metadata(text)["summary"] == "큐는 먼저 들어온 값을 먼저 꺼내는 자료구조다."
 
 
 def test_corpus_migration_prefers_human_one_line_summary_over_breadcrumb(
@@ -393,8 +493,8 @@ Attention의 세부 계산을 설명한다.
 
     report = prepare_wiki_corpus_migration(tmp_path, migration_day=date(2026, 8, 24))
 
-    assert 'summary: "Query와 Key를 비교한 가중치로 Value를 섞는다."' in report.pages[path].decode(
-        "utf-8"
+    assert _metadata(report.pages[path].decode("utf-8"))["summary"] == (
+        "Query와 Key를 비교한 가중치로 Value를 섞는다."
     )
 
 
@@ -463,7 +563,7 @@ knowledge_state: "확인 필요"
     merged = preserve_managed_context(existing, rendered)
 
     assert merged.count("<!-- woon-wiki-timeline:start -->") == 1
-    assert merged.count("## 시간 이력") == 1
+    assert merged.count("## 한 줄 이력") == 1
     assert "큐를 다시 학습했다" in merged
 
 
@@ -526,7 +626,33 @@ knowledge_state: "확인 필요"
     merged = preserve_managed_context(existing, existing + duplicate)
 
     assert merged.count("<!-- woon-wiki-timeline:start -->") == 1
-    assert merged.count("## 시간 이력") == 1
+    assert merged.count("## 한 줄 이력") == 1
+
+
+def test_wiki_update_renders_one_compact_article_index() -> None:
+    rendered = preserve_managed_context(
+        "",
+        """---
+type: Wiki
+title: 큐
+summary: 먼저 들어온 항목을 먼저 처리하는 자료구조다.
+facets: [개념, 학습]
+knowledge_state: 근거 확인됨
+parent: '[[wiki/algorithm/README|알고리즘과 자료구조]]'
+node_kind: topic
+view_mode: tree
+---
+
+# 큐
+
+본문이다.
+""",
+    )
+
+    assert rendered.count("<!-- woon-wiki-overview:start -->") == 1
+    assert "> [!info] 한눈에 보기" in rendered
+    assert "> **종류** · topic · tree" in rendered
+    assert "[[wiki/algorithm/README|알고리즘과 자료구조]]" in rendered
 
 
 def test_prepared_batch_applies_all_pages(tmp_path: Path) -> None:
@@ -587,13 +713,13 @@ def test_legacy_subject_roots_merge_into_wiki_and_rewrite_links(tmp_path: Path) 
     report = prepare_legacy_wiki_merge(tmp_path, migration_day=date(2026, 8, 24))
     apply_legacy_wiki_merge(tmp_path, report)
 
-    target = tmp_path / "wiki/personal/aice-준비.md"
+    target = tmp_path / "wiki/personal/projects/aice-준비.md"
     assert report.subject_count == 1
     assert target.is_file()
     assert not source.exists()
     assert not index.exists()
-    assert 'facets: ["프로젝트"]' in target.read_text(encoding="utf-8")
-    assert "[[wiki/personal/aice-준비|AICE 준비]]" in home.read_text(encoding="utf-8")
+    assert _metadata(target.read_text(encoding="utf-8"))["facets"] == ["프로젝트"]
+    assert "[[wiki/personal/projects/aice-준비|AICE 준비]]" in home.read_text(encoding="utf-8")
 
 
 def test_interview_answer_keeps_current_and_archives_the_previous_revision(
@@ -623,7 +749,8 @@ def test_interview_answer_keeps_current_and_archives_the_previous_revision(
         facets=("커리어", "학습"),
         knowledge_state="확인 필요",
         day=date(2026, 8, 18),
-        parent_topics=(parent,),
+        parent=parent,
+        keywords=("Kyro", "개인 기여"),
         interview_tracks=("AI Engineer",),
         question_topic="Kubernetes 장애 복구 서비스",
         interview_answer=InterviewAnswerRevision(
@@ -645,7 +772,8 @@ def test_interview_answer_keeps_current_and_archives_the_previous_revision(
         facets=("커리어", "학습"),
         knowledge_state="확인 필요",
         day=date(2026, 8, 24),
-        parent_topics=(parent,),
+        parent=parent,
+        keywords=first.keywords,
         interview_tracks=first.interview_tracks,
         question_topic=first.question_topic,
         interview_answer=InterviewAnswerRevision(
@@ -668,7 +796,7 @@ def test_interview_answer_keeps_current_and_archives_the_previous_revision(
     assert "전체 구조를 설계했다." in merged
     assert "개인 기여와 검증 한계를 분리했다." in merged
     assert "실환경 정확도를 증명한 결과는 아니다." in merged
-    assert f'parent_topics: ["{parent}"]' in merged
+    assert _metadata(merged)["parent"] == parent
 
 
 def test_interview_parent_must_resolve_to_an_existing_wiki(tmp_path: Path) -> None:
@@ -678,14 +806,15 @@ def test_interview_parent_must_resolve_to_an_existing_wiki(tmp_path: Path) -> No
         facets=("커리어", "학습"),
         knowledge_state="확인 필요",
         day=date(2026, 8, 24),
-        parent_topics=("[[wiki/personal/없는-프로젝트|없는 프로젝트]]",),
+        parent="[[wiki/personal/없는-프로젝트|없는 프로젝트]]",
+        keywords=("면접 질문",),
         interview_answer=InterviewAnswerRevision(
             question="무엇을 했습니까?",
             answer="확인 중이다.",
         ),
     )
 
-    with pytest.raises(WoonError, match="parent topic"):
+    with pytest.raises(WoonError, match="parent must point"):
         prepare_wiki_pages(tmp_path, (delta,))
 
 
@@ -705,7 +834,8 @@ def test_weaker_interview_attempt_is_archived_without_replacing_current(
         facets=("커리어", "학습"),
         knowledge_state="확인 필요",
         day=date(2026, 8, 23),
-        parent_topics=(parent,),
+        parent=parent,
+        keywords=("개인 기여",),
         interview_tracks=("공통 면접",),
         question_topic="개인 기여",
         interview_answer=InterviewAnswerRevision(
@@ -724,7 +854,8 @@ def test_weaker_interview_attempt_is_archived_without_replacing_current(
         facets=("커리어", "학습"),
         knowledge_state="확인 필요",
         day=date(2026, 8, 24),
-        parent_topics=(parent,),
+        parent=parent,
+        keywords=initial.keywords,
         interview_tracks=initial.interview_tracks,
         question_topic=initial.question_topic,
         interview_answer=InterviewAnswerRevision(

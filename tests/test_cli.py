@@ -333,6 +333,7 @@ def test_knowledge_validate_orchestrator_has_no_runtime_side_effect(
         return OrchestratorSettings(
             vault=vault,
             policy_document=policy,
+            wiki_contract=policy,
             timezone="Asia/Seoul",
             checkpoint_path=tmp_path / ".local/checkpoint.yaml",
             receipt_directory=tmp_path / ".local/receipts",
@@ -363,6 +364,7 @@ def test_knowledge_validate_orchestrator_uses_codex_home_registry_by_default(
     settings = OrchestratorSettings(
         vault=tmp_path,
         policy_document=policy,
+        wiki_contract=policy,
         timezone="Asia/Seoul",
         checkpoint_path=tmp_path / ".local/checkpoint.yaml",
         receipt_directory=tmp_path / ".local/receipts",
@@ -394,6 +396,7 @@ def test_knowledge_validate_orchestrator_can_verify_registered_heartbeats(
     settings = OrchestratorSettings(
         vault=tmp_path,
         policy_document=policy,
+        wiki_contract=policy,
         timezone="Asia/Seoul",
         checkpoint_path=tmp_path / ".local/checkpoint.yaml",
         receipt_directory=tmp_path / ".local/receipts",
@@ -751,6 +754,7 @@ def test_knowledge_evaluate_quality_uses_explicit_review_path(
     standard.write_text("standard", encoding="utf-8")
     prompt.write_text("prompt", encoding="utf-8")
     vault.mkdir()
+    report = tmp_path / "report.json"
     captured: dict[str, Path] = {}
 
     def fake_evaluate(
@@ -777,6 +781,8 @@ def test_knowledge_evaluate_quality_uses_explicit_review_path(
             str(standard),
             "--prompt",
             str(prompt),
+            "--output",
+            str(report),
         ],
         output,
     )
@@ -788,6 +794,7 @@ def test_knowledge_evaluate_quality_uses_explicit_review_path(
         "prompt": prompt.resolve(),
     }
     assert '"passed": true' in output.getvalue()
+    assert report.stat().st_mode & 0o777 == 0o600
 
 
 def test_quality_review_plan_uses_immutable_input_paths(

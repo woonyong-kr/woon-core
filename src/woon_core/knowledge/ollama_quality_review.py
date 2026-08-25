@@ -93,7 +93,8 @@ def run_ollama_quality_reviews(
     batches = _selected_batches(plan, batch_ids)
     plan_root = plan_path.expanduser().resolve().parent
     destination = results_dir.expanduser().resolve()
-    destination.mkdir(parents=True, exist_ok=True)
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination.chmod(0o700)
     inherited_results_sha256 = _validate_inherited_results(destination)
     _prepare_run_manifest(
         destination,
@@ -145,7 +146,7 @@ def run_ollama_quality_reviews(
                 max_attempts,
                 batch_context_tokens,
             )
-            atomic_write(result_path, encode_json(result))
+            atomic_write(result_path, encode_json(result), mode=0o600)
             reviewed.append(batch_id)
             if was_retried:
                 retried.append(batch_id)
@@ -708,7 +709,7 @@ def _prepare_run_manifest(destination: Path, expected: dict[str, object]) -> Non
         return
     if any(destination.glob("*.result.json")) and expected.get("inherited_results_sha256") is None:
         raise WoonError("quality review results are missing their execution manifest")
-    atomic_write(path, encode_json(expected))
+    atomic_write(path, encode_json(expected), mode=0o600)
 
 
 def _validate_inherited_results(destination: Path) -> str | None:

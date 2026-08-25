@@ -186,6 +186,9 @@ def test_runs_local_ollama_and_persists_only_valid_result(
     )
 
     assert report["reviewed_pages"] == 1
+    assert results.stat().st_mode & 0o777 == 0o700
+    assert (results / "run-manifest.json").stat().st_mode & 0o777 == 0o600
+    assert (results / "quality-001.result.json").stat().st_mode & 0o777 == 0o600
     request = observed["request"]
     assert hasattr(request, "full_url")
     assert request.full_url == "http://127.0.0.1:11434/api/generate"  # type: ignore[attr-defined]

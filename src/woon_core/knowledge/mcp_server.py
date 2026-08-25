@@ -21,6 +21,7 @@ from woon_core.knowledge.codex_knowledge import (
     entries_from_records as codex_knowledge_entries_from_records,
 )
 from woon_core.knowledge.codex_knowledge import record_codex_knowledge_entries
+from woon_core.knowledge.context_bundle import build_wiki_context_bundle
 from woon_core.knowledge.domain import DocumentMetadata
 from woon_core.knowledge.factory import build_knowledge_service
 from woon_core.knowledge.mail_schedule_automation import (
@@ -106,6 +107,29 @@ def read_knowledge_excerpt(document_id: str, chunk_id: str) -> dict[str, object]
 
     service = _service()
     return asdict(service.read_excerpt(document_id, chunk_id))
+
+
+@mcp.tool(
+    name="woon_knowledge_context",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def get_wiki_context(
+    subject: str, max_items: int = 24, max_chars: int = 30_000
+) -> dict[str, object]:
+    """Read one Wiki subject with its ancestors, children, history, and evidence."""
+
+    settings, _ = build_knowledge_service()
+    return build_wiki_context_bundle(
+        settings.vault,
+        subject,
+        max_items=max_items,
+        max_chars=max_chars,
+    ).to_record()
 
 
 @mcp.tool(
@@ -269,9 +293,12 @@ def record_codex_daily_digest_run(
 ) -> dict[str, object]:
     """Record one Korean block in the canonical daily record from opted-in Codex conclusions.
 
-    ``entries`` may contain only a short ``kind``, ``title``, ``summary``, and
-    optional links to existing local Wiki or map documents.  Do not pass a raw
-    chat transcript, system/developer text, tool output, tokens, or locators.
+    ``entries`` contain a short ``kind``, ``title``, ``summary``, optional
+    intent, readable question/answer/outcome exchanges, human attachment
+    labels, and links to existing canonical ``wiki/`` documents.  Exact
+    opted-in user/final-answer evidence is recorded separately through the
+    local source-archive CLI; never pass system/developer text, tool output,
+    reasoning, tokens, or opaque locators here.
     """
 
     try:
@@ -301,28 +328,33 @@ def record_codex_knowledge_entries_run(
     entries: list[dict[str, object]],
     input_state: str = "processed",
 ) -> dict[str, object]:
-    """Record one day of short Codex conclusions, never a transcript.
+    """Record one day of readable, transcript-free Codex topic summaries.
 
     Each entry has one Korean category such as ``활동``, ``일정``, ``인물``,
-    ``학습``, ``개념``, ``커리어``, ``창작``, ``자료``, ``콘텐츠`` or
-    ``프로젝트`` plus a short title and summary.  Every organized entry updates
-    the local daily ledger.  Set ``wiki_update=true`` only for a reusable,
+    ``학습``, ``개념``, ``커리어``, ``창작``, ``자료`` or
+    ``프로젝트`` plus a short title, summary, intent, and readable exchanges
+    containing the actual question, summarized answer, outcome, and human
+    attachment labels.  Every organized entry updates the local daily ledger.
+    Set ``wiki_update=true`` only for a reusable,
     stable subject; then the same run creates or updates one canonical
     ``wiki/`` document.  Every ``wiki_update=true`` entry must provide exactly
     one identity proof: ``wiki_subject_path`` for an existing canonical subject,
     or ``new_wiki_reason`` after searching the Wiki and finding no matching
     subject.  This prevents sentence-shaped duplicates from bypassing an
-    existing project, content, person, or concept page.  A one-time event keeps
+    existing project, book, resource, person, or concept page.  A one-time event keeps
     ``wiki_update=false`` and does not become a subject page.  Use
     ``disposition=review`` with a short ``review_reason`` when classification or
-    identity needs a person; it creates no Wiki, Calendar, person, project or
-    content side effect.  Use ``disposition=excluded`` for advertisements,
+    identity needs a person; it creates no Wiki, Calendar, person, project, book or
+    resource side effect.  Use ``disposition=excluded`` for advertisements,
     system/tool/reasoning text, secrets, raw private originals and Novel text;
     excluded input is not validated, hashed or persisted.  Explicitly named
-    books, films, lectures and articles may define ``contents``; explicit finite
-    outcomes may define ``projects``.  Both are facets in the same Wiki, not
-    parallel folders.  Existing matching subjects are reused instead of
-    duplicated.  Pass ``input_state=unavailable`` with
+    books may define ``contents`` with exactly one existing genre keyword. Non-book
+    source references may define ``contents`` only with one existing
+    ``resource_keyword`` and an ``official_url``; the run adds only that hyperlink
+    to the matching resource topic and never creates a content/resource entity card.
+    Meaning from every source is merged into the existing subject Wiki first.
+    Explicit finite outcomes may define ``projects``. Existing matching subjects
+    are reused instead of duplicated. Pass ``input_state=unavailable`` with
     ``entries=[]`` when the persisted session for that day is absent, so a blank
     note explains its cause.  Do not pass raw chat text, system/developer text,
     tool output, reasoning, credentials, opaque locators, private originals, or
@@ -356,7 +388,15 @@ def record_codex_knowledge_entries_run(
 def materialize_codex_daily_digest_run(
     day: str,
 ) -> dict[str, object]:
-    """Update one daily record block from the minimized local Codex ledger only."""
+    """Render one daily record from its semantic ledger and local source archive.
+
+    The ledger owns the topic summary and canonical Wiki relationships.  The
+    local-only archive supplies the allowed user questions, assistant final
+    answers, timestamps, and attachment labels.  The daily record renders only
+    a compact question index; exact answers stay in the local archive and the
+    semantic conclusions remain in the normal daily sections.  This
+    materializer does not reread Codex APIs or create a second Wiki.
+    """
 
     try:
         target_day = date.fromisoformat(day)

@@ -384,6 +384,26 @@ def _local_context_graph_build(root: Path, version: str = "0.4.1") -> Path:
         encoding="utf-8",
     )
     (source / "styles.css").write_text(".context-graph { display: block; }\n", encoding="utf-8")
+    subprocess.run(("git", "init", "-q", str(source)), check=True)
+    subprocess.run(("git", "-C", str(source), "config", "user.name", "Woon Test"), check=True)
+    subprocess.run(
+        ("git", "-C", str(source), "config", "user.email", "test@example.invalid"),
+        check=True,
+    )
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(source),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/woonyong-kr/linked-canvas.git",
+        ),
+        check=True,
+    )
+    subprocess.run(("git", "-C", str(source), "add", "."), check=True)
+    subprocess.run(("git", "-C", str(source), "commit", "-q", "-m", "fixture"), check=True)
     return source
 
 
@@ -607,6 +627,31 @@ def test_context_calendar_git_origin_accepts_the_normalized_url_without_git_suff
     )
 
     assert receipt["plugin"]["source"]["repository"].endswith("simple-calendar.git")
+
+
+@pytest.mark.parametrize("failure", ["dirty", "wrong-origin", "not-git"])
+def test_context_graph_local_build_requires_approved_clean_git_provenance(
+    tmp_path: Path, failure: str
+) -> None:
+    vault = _vault(tmp_path)
+    source = _local_context_graph_build(tmp_path)
+    if failure == "dirty":
+        (source / "main.js").write_text("dirty runtime\n", encoding="utf-8")
+        expected = "must be clean"
+    elif failure == "wrong-origin":
+        subprocess.run(
+            ("git", "-C", str(source), "remote", "set-url", "origin", "https://example.com/x.git"),
+            check=True,
+        )
+        expected = "origin is not approved"
+    else:
+        (source / ".git").rename(source / ".not-git")
+        expected = "Git provenance is invalid"
+
+    with pytest.raises(WoonError, match=expected):
+        ObsidianPluginService(vault).install_local_build(CONTEXT_GRAPH_ID, source, "0.4.1")
+
+    assert not (vault / ".obsidian/plugins" / CONTEXT_GRAPH_ID).exists()
 
 
 @pytest.mark.parametrize("linked_root", ["obsidian", "plugins", "local", "receipts"])

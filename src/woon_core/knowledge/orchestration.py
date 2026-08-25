@@ -49,6 +49,14 @@ _AUTOMATION_PERSON_PROMPT_GUARD_TERMS = (
     "검색",
     "넣지 마라",
 )
+_RETIRED_WIKI_PROMPT_TERMS = (
+    "parent_topics",
+    "parent_moc",
+    "map_role",
+    "mindmap_role",
+    "maps/** Markdown",
+    "콘텐츠·책·프로젝트·인물도 같은 Wiki tree",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +99,7 @@ class OrchestratorSettings:
 
     vault: Path
     policy_document: Path
+    wiki_contract: Path
     timezone: str
     checkpoint_path: Path
     receipt_directory: Path
@@ -129,6 +138,9 @@ def load_orchestrator_settings(vault: Path) -> OrchestratorSettings:
     policy_document = _inside(resolved_vault, raw.get("policy_document"), "policy_document")
     if not policy_document.is_file():
         raise WoonError(f"second-brain policy document not found: {policy_document}")
+    wiki_contract = _inside(resolved_vault, raw.get("wiki_contract"), "wiki_contract")
+    if not wiki_contract.is_file():
+        raise WoonError(f"Wiki information architecture contract not found: {wiki_contract}")
     timezone = _required_string(raw.get("timezone"), "timezone")
     runtime = _mapping(raw.get("runtime"), "runtime")
     _require_boolean(
@@ -171,13 +183,14 @@ def load_orchestrator_settings(vault: Path) -> OrchestratorSettings:
     _validate_global_guards(raw.get("global_guards"))
     _validate_identity_contract(resolved_vault, raw.get("identity"), contracts)
     _validate_codex_conversation_contract(contracts)
-    _validate_daily_record_contract(contracts)
+    _validate_daily_record_contract(raw.get("daily_document_pipeline"), contracts)
     _validate_obsidian_tasks_contract(raw.get("obsidian_tasks"))
     _validate_schedule_apply_contract(contracts)
 
     return OrchestratorSettings(
         vault=resolved_vault,
         policy_document=policy_document,
+        wiki_contract=wiki_contract,
         timezone=timezone,
         checkpoint_path=checkpoint_path,
         receipt_directory=receipt_directory,
@@ -231,6 +244,7 @@ def verify_codex_automation_registry(
             raise WoonError(
                 f"Codex automation mismatch for {lane.automation_id}: person protection"
             )
+        _validate_wiki_prompt_contract(lane, prompt)
         verified.append(lane.automation_id)
     return tuple(verified)
 
@@ -257,6 +271,63 @@ def _has_person_protection(prompt: str) -> bool:
         and any(term in prompt for term in ("일반 인물 지도", "일반 검색"))
     )
     return strict or candidate
+
+
+def _validate_wiki_prompt_contract(lane: AutomationContract, prompt: str) -> None:
+    """Reject scheduled instructions that can recreate a parallel Wiki hierarchy."""
+
+    if lane.automation_id not in {
+        "codex-conversation-ingest",
+        "knowledge-curation",
+        "daily-record-materialization",
+    }:
+        return
+    retired = tuple(term for term in _RETIRED_WIKI_PROMPT_TERMS if term in prompt)
+    if retired:
+        raise WoonError(
+            f"Codex automation mismatch for {lane.automation_id}: retired Wiki term "
+            + ", ".join(retired)
+        )
+    if lane.automation_id == "codex-conversation-ingest":
+        required = {
+            "new_wiki_reason",
+            "parent",
+            "keywords",
+            "central_question",
+            "wiki/**",
+            "일일 기록은 Wiki 승격 입력이 아니다",
+            "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크",
+            "콘텐츠 subtree와 Facet을 만들지 않는다",
+            "resource_keyword",
+            "책 → 장르 키워드 → 책 제목",
+            "리소스 → 주제 키워드 → 원자료 링크",
+        }
+    elif lane.automation_id == "knowledge-curation":
+        required = {
+            "canonical_id",
+            "parent",
+            "keywords",
+            "view_mode",
+            "하위 키워드",
+            "최신 문서",
+            "wiki/README.md",
+            "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크",
+            "콘텐츠 subtree와 Facet이 없는지",
+            "책 → 장르 키워드 → 책 제목",
+            "리소스 → 주제 키워드 → 원자료 링크",
+        }
+    else:
+        required = {
+            "Wiki 문서를 새로 만들지 않는다",
+            "단계별",
+            "전체 완료 receipt를 만들지 않는다",
+        }
+    missing = tuple(sorted(term for term in required if term not in prompt))
+    if missing:
+        raise WoonError(
+            f"Codex automation mismatch for {lane.automation_id}: missing Wiki contract "
+            + ", ".join(missing)
+        )
 
 
 def _automation(raw: object, index: int) -> AutomationContract:
@@ -462,10 +533,12 @@ def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, .
         "wiki",
         "brain/review/codex",
         ".local/woon-knowledge/codex-knowledge",
+        "wiki/private/_sources/codex",
     }
     if lane.mode != "materialize" or set(lane.owned_paths) != expected_paths:
         raise WoonError("codex conversation ingest must own the Wiki and local receipt boundary")
     expected_outputs = {
+        "wiki-private-conversation-source-archive",
         "wiki-upsert",
         "runtime-history-receipt",
         "calendar-document-context",
@@ -479,8 +552,10 @@ def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, .
         raise WoonError("codex conversation ingest outputs must use the single Wiki transaction")
 
 
-def _validate_daily_record_contract(contracts: tuple[AutomationContract, ...]) -> None:
-    """A daily conversation block belongs to the canonical daily note."""
+def _validate_daily_record_contract(
+    pipeline_value: object, contracts: tuple[AutomationContract, ...]
+) -> None:
+    """A daily note is a stage-reconciled projection, never a second Wiki input."""
 
     matches = [item for item in contracts if item.automation_id == "daily-record-materialization"]
     if not matches:
@@ -493,6 +568,69 @@ def _validate_daily_record_contract(contracts: tuple[AutomationContract, ...]) -
     required_paths = {"inbox/daily", "inbox/calendar", "brain/review/activity"}
     if lane.mode != "materialize" or set(lane.owned_paths) != required_paths:
         raise WoonError("daily record materialization has an unsafe write boundary")
+    if lane.checkpoint_key != "daily-codex-projection":
+        raise WoonError("daily record checkpoint must track only the Codex projection stage")
+
+    pipeline = _mapping(pipeline_value, "daily_document_pipeline")
+    expected = {
+        "knowledge_canonical_root": "wiki",
+        "daily_root": "inbox/daily",
+        "source_to_wiki_owner": "codex-conversation-ingest",
+        "wiki_to_daily_owner": "daily-record-materialization",
+        "daily_to_wiki_promotion": "forbidden",
+        "completion_mode": "per-stage-reconciliation",
+        "failed_stage": "preserve-verified-stage-results",
+    }
+    for field, required in expected.items():
+        if pipeline.get(field) != required:
+            raise WoonError(f"daily document pipeline {field} must be {required!r}")
+
+    stages = _list(pipeline.get("stages"), "daily_document_pipeline.stages")
+    expected_stages = (
+        (
+            "task-projection",
+            "woon-tasks-service",
+            "woon-tasks",
+            ".local/woon-knowledge/tasks-state.json",
+        ),
+        (
+            "codex-projection",
+            "daily-record-materialization",
+            "woon-codex-digest",
+            ".local/woon-knowledge/automation-receipts/daily-record-materialization",
+        ),
+        (
+            "calendar-projection",
+            "woon-calendar-service",
+            "woon_projection: apple-calendar",
+            "output-hash-and-reread",
+        ),
+        (
+            "activity-review",
+            "activity-history-review",
+            "review-only",
+            "review-card-and-vault-audit",
+        ),
+    )
+    actual_stages: list[tuple[str, str, str, str]] = []
+    for index, raw_stage in enumerate(stages):
+        stage = _mapping(raw_stage, f"daily_document_pipeline.stages[{index}]")
+        actual_stages.append(
+            (
+                _required_slug(stage.get("id"), f"daily_document_pipeline.stages[{index}].id"),
+                _required_string(
+                    stage.get("owner"), f"daily_document_pipeline.stages[{index}].owner"
+                ),
+                _required_string(
+                    stage.get("marker"), f"daily_document_pipeline.stages[{index}].marker"
+                ),
+                _required_string(
+                    stage.get("proof"), f"daily_document_pipeline.stages[{index}].proof"
+                ),
+            )
+        )
+    if tuple(actual_stages) != expected_stages:
+        raise WoonError("daily document pipeline stages must have exact independent ownership")
 
 
 def _validate_repository_contract(value: object) -> None:
@@ -504,7 +642,7 @@ def _validate_repository_contract(value: object) -> None:
         "reusable_code_repository": "woon-core",
         "vault_executable_sources": "forbidden",
         "vault_tool_interface": "core-owned-cli",
-        "public_export": "manual_verified_one_way_only",
+        "public_export": "disabled_until_verified_projection_exists",
     }
     for field, expected in required.items():
         if contract.get(field) != expected:

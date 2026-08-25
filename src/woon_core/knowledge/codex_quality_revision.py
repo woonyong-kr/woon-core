@@ -118,7 +118,8 @@ def create_codex_quality_revision_proposals(
     binary = _codex_binary(codex_binary)
     _require_chatgpt_login(binary)
     destination = output_dir.expanduser().resolve()
-    destination.mkdir(parents=True, exist_ok=True)
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination.chmod(0o700)
     _prepare_manifest(
         destination,
         plan_path,
@@ -143,7 +144,7 @@ def create_codex_quality_revision_proposals(
                 candidate, binary, normalized_model, timeout_seconds, max_attempts
             )
             _validate_proposal(proposal, candidate)
-            atomic_write(path, encode_json(_proposal_record(candidate, proposal)))
+            atomic_write(path, encode_json(_proposal_record(candidate, proposal)), mode=0o600)
             proposed += 1
         except WoonError as error:
             _write_failure(destination, candidate.page_id, str(error))
@@ -168,6 +169,7 @@ def apply_codex_quality_revisions(
     proposals_dirs: tuple[Path, ...],
     *,
     duplicate_policy: str = "error",
+    page_ids: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Promote complete, current proposals and rebuild the local search index.
 
@@ -177,6 +179,15 @@ def apply_codex_quality_revisions(
     """
 
     candidates, reviews_sha256 = _revision_candidates(vault, plan_path, reviews_dir)
+    if page_ids:
+        requested = {_text(page_id, "Codex revision selected page_id") for page_id in page_ids}
+        if len(requested) != len(page_ids):
+            raise WoonError("Codex revision selected page_id is duplicated")
+        available = {candidate.page_id for candidate in candidates}
+        unknown = sorted(requested.difference(available))
+        if unknown:
+            raise WoonError(f"Codex revision selected page is not failed: {unknown[0]}")
+        candidates = tuple(candidate for candidate in candidates if candidate.page_id in requested)
     proposal_records, proposal_sources = _collect_proposal_records(
         candidates, proposals_dirs, plan_path, reviews_sha256, duplicate_policy
     )
@@ -408,7 +419,7 @@ def _prepare_manifest(
         return
     if any(destination.glob("*.proposal.json")) or any(destination.glob("*.failure.json")):
         raise WoonError("Codex revision proposals are missing their execution manifest")
-    atomic_write(path, encode_json(expected))
+    atomic_write(path, encode_json(expected), mode=0o600)
 
 
 def _validate_manifest(value: dict[str, object], plan_path: Path, reviews_sha256: str) -> None:
@@ -857,6 +868,7 @@ def _write_failure(destination: Path, page_id: str, error: str) -> None:
     atomic_write(
         destination / f"revision-{digest}.failure.json",
         encode_json({"version": REVISION_VERSION, "page_id": page_id, "error": error}),
+        mode=0o600,
     )
 
 

@@ -20,6 +20,7 @@ import yaml
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
 from woon_core.knowledge.domain import DocumentMetadata
+from woon_core.knowledge.wiki_tree_migration import rewrite_retired_map_links
 from woon_core.knowledge.woon_wiki import (
     compiled_wiki_contract,
     preserve_managed_context,
@@ -32,6 +33,15 @@ SCHEMA_VERSION = 1
 MAX_COMPOSED_CLAIM_MARKDOWN_CHARS = 1_800
 MANUAL_ARCHIVE_ORIGINS = {"manual-reviewed", "verified-source"}
 GIT_RESTORE_ARCHIVE_ORIGIN = "git-restore"
+MERMAID_COLOR_DIRECTIVE_RE = re.compile(
+    r"^\s*(?:style\s+\S+|classDef\s+\S+|linkStyle\s+\S+)"
+    r"[^\n]*(?:fill|stroke|color)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+MERMAID_THEME_COLOR_RE = re.compile(
+    r"%%\{init:[^\n]*(?:themeVariables|themeCSS)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +265,7 @@ class CompiledWiki:
                 and receipt is not None
                 and receipt.get("input_sha256") == input_sha256
                 and receipt.get("compiler_projection_sha256") == compiler_projection_sha256
+                and receipt.get("output_sha256") == expected_hash
                 and existing_text == output
             ):
                 unchanged += 1
@@ -934,6 +945,8 @@ class CompiledWiki:
                 if receipt.get("input_sha256") != input_sha256:
                     raise WoonError("compiled output is stale for its source or claims")
                 actual = path.read_text(encoding="utf-8")
+                if receipt.get("output_sha256") != _sha256_text(actual):
+                    raise WoonError("compiled output bytes differ from its receipt")
                 rendered = _render_page(page, source_records, claim_records, curation, input_sha256)
                 compiler_projection_sha256 = _sha256_text(preserve_managed_context("", rendered))
                 if receipt.get("compiler_projection_sha256") != compiler_projection_sha256:
@@ -1016,7 +1029,7 @@ class CompiledWiki:
         pages: list[tuple[Path, str]] = []
         for path in sorted(self._settings.output_root.rglob("*.md")):
             relative = path.relative_to(self._settings.output_root)
-            if relative.parts and relative.parts[0].startswith("_"):
+            if any(part.startswith("_") for part in relative.parts):
                 continue
             pages.append((relative, path.read_text(encoding="utf-8")))
         return pages
@@ -1143,8 +1156,15 @@ class CompiledWiki:
                 if isinstance(canonical_id, str) and canonical_id.strip():
                     targets.add(canonical_id.strip())
         for path in self._settings.vault.rglob("*.md"):
+            if "_sources" in path.relative_to(self._settings.vault).parts:
+                continue
             relative = path.relative_to(self._settings.vault).with_suffix("").as_posix()
             targets.add(relative)
+            if relative.startswith("wiki/"):
+                # ``_relation_target`` deliberately removes the human-facing
+                # Wiki root. Non-compiled tree hubs are still valid canonical
+                # relation targets and must be normalized the same way.
+                targets.add(relative.removeprefix("wiki/"))
             targets.add(path.stem)
         return targets
 
@@ -1238,8 +1258,30 @@ def _validate_source(source: dict[str, Any]) -> None:
         raise WoonError("source approved_review_id requires archive_origin")
     if not isinstance(source.get("body"), str):
         raise WoonError("source body must be a string")
+    if _contains_mermaid_color_directive(source["body"]):
+        raise WoonError(
+            "source Mermaid must use renderer-owned neutral colors; "
+            "encode meaning with labels, position, and line style"
+        )
     if _sha256_text(_normalize(source["body"])) != source["normalized_sha256"]:
         raise WoonError("source normalized_sha256 does not match the normalized source body")
+
+
+def _contains_mermaid_color_directive(markdown: str) -> bool:
+    """Reject diagram-local colors so every renderer can own light/dark contrast."""
+
+    in_mermaid = False
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not in_mermaid:
+            in_mermaid = stripped.startswith("```mermaid")
+            continue
+        if stripped.startswith("```"):
+            in_mermaid = False
+            continue
+        if MERMAID_COLOR_DIRECTIVE_RE.search(line) or MERMAID_THEME_COLOR_RE.search(line):
+            return True
+    return False
 
 
 def _validate_archive_review_binding(
@@ -1310,6 +1352,11 @@ def _validate_claim_record(claim: dict[str, Any]) -> None:
     _string_list(claim.get("source_ids"), "claim source_ids")
     if not isinstance(claim.get("markdown"), str):
         raise WoonError("claim markdown must be a string")
+    if _contains_mermaid_color_directive(claim["markdown"]):
+        raise WoonError(
+            "claim Mermaid must use renderer-owned neutral colors; "
+            "encode meaning with labels, position, and line style"
+        )
 
 
 def _curated_body(value: str) -> str:
@@ -1464,7 +1511,13 @@ def _normalize_compiled_display_body(body: str) -> str:
         body,
         flags=re.DOTALL,
     )
-    return body
+    body = re.sub(
+        r"\n?<!-- breadcrumb:start -->.*?<!-- breadcrumb:end -->\n?",
+        "\n",
+        body,
+        flags=re.DOTALL,
+    )
+    return rewrite_retired_map_links(body)
 
 
 def _input_hash(

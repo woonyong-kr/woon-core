@@ -97,6 +97,44 @@ def _compact(targets: dict[str, object], states: str = "pppppp") -> dict[str, ob
     return {"reviews": reviews}
 
 
+def test_review_prompt_uses_compiler_provenance_without_requiring_inline_citations() -> None:
+    target = {"markdown": MARKDOWN, "output_sha256": "a" * 64}
+
+    prompt = codex_quality_review._prompt(  # noqa: SLF001
+        "quality-001",
+        {"os/first": target},
+    )
+
+    assert "inline citation이 없다는 이유만으로" in prompt
+    assert "`확인 범위:` anchor" in prompt
+    assert "막연히" in prompt
+    assert "명확한 결함을 입증하지 못하면 pass" in prompt
+
+
+def test_scope_note_cannot_be_its_own_failing_evidence_boundary() -> None:
+    markdown = MARKDOWN.replace(
+        "# 첫 문서", "# 첫 문서\n\n> 확인 범위: 일반 원리만 설명하며 실행 결과는 별도로 검증한다."
+    )
+    target = {"markdown": markdown, "output_sha256": "a" * 64}
+    candidates = codex_quality_review._compact_anchor_candidates(  # noqa: SLF001
+        {"os/first": target}
+    )
+    evidence_index = candidates["evidence_boundary"].index(
+        "확인 범위: 일반 원리만 설명하며 실행 결과는 별도로 검증한다."
+    )
+    raw = _compact({"os/first": target}, "pfpppp")
+    evidence_position = codex_quality_review.CRITERIA.index("evidence_boundary")
+    raw["reviews"][0]["a"][evidence_position] = evidence_index
+
+    expanded = codex_quality_review._expand_codex_model_result(  # noqa: SLF001
+        raw, "quality-001", {"os/first": target}
+    )
+    review = expanded["reviews"][0]
+
+    assert review["rubric"]["evidence_boundary"] == "pass"
+    assert review["verdict"] == "passed"
+
+
 def _calibration() -> dict[str, object]:
     target = {
         "output_sha256": hashlib.sha256(
@@ -128,6 +166,7 @@ def test_uses_chatgpt_codex_in_an_isolated_empty_directory(
         assert "--ignore-user-config" in command
         assert "--ignore-rules" in command
         assert command[command.index("--sandbox") + 1] == "read-only"
+        assert command[command.index("--config") + 1] == 'model_reasoning_effort="high"'
         assert "--model" not in command
         assert "apps" in command and "shell_tool" in command
         output = Path(command[command.index("--output-last-message") + 1])
@@ -149,8 +188,12 @@ def test_uses_chatgpt_codex_in_an_isolated_empty_directory(
     assert len(calls) == 3
     manifest = json.loads((results / "run-manifest.json").read_text(encoding="utf-8"))
     assert manifest["login"] == "ChatGPT subscription"
+    assert manifest["reasoning_effort"] == "high"
     assert manifest["transmission_scope"] == "compiled wiki Markdown targets only"
     assert (results / "quality-001.result.json").is_file()
+    assert results.stat().st_mode & 0o777 == 0o700
+    assert (results / "run-manifest.json").stat().st_mode & 0o777 == 0o600
+    assert (results / "quality-001.result.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_rejects_novel_before_starting_codex(
