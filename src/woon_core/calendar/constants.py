@@ -6,10 +6,10 @@ LINK_CALENDAR_PROFILE_ID = "woon-apple-calendar"
 LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS = (
     "daily-agenda",
     "direct-note-link",
-    "event-card",
+    "event-marker",
     "month-view",
     "readonly-blocked",
     "ribbon",
 )
-LINK_CALENDAR_VERSION = "3.0.1"
+LINK_CALENDAR_VERSION = "3.1.0"
 OWNED_CALENDAR_NAME = "Woon 일정"
