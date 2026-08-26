@@ -1307,9 +1307,7 @@ class ObsidianPluginService:
             raise WoonError("Link Calendar version is not approved for legacy retirement")
         if LINK_CALENDAR_ID not in self._enabled_ids():
             raise WoonError("Link Calendar must be enabled before retiring the legacy plugin")
-        asset_hashes = self._require_verified_local_build(
-            LINK_CALENDAR_ID, LINK_CALENDAR_VERSION
-        )
+        asset_hashes = self._require_verified_local_build(LINK_CALENDAR_ID, LINK_CALENDAR_VERSION)
         settings_path = self._plugins / LINK_CALENDAR_ID / "data.json"
         _require_vault_local_file(self._vault, settings_path, "Link Calendar settings")
         configuration = self._read_json_object(settings_path)

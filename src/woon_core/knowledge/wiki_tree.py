@@ -197,9 +197,7 @@ def load_wiki_tree(
         entity_kind = _optional_text(metadata.get("entity_kind"), "entity_kind", relative, issues)
         keywords = _string_list(metadata.get("keywords"), "keywords", relative, issues)
         aliases = _string_list(metadata.get("aliases", []), "aliases", relative, issues)
-        navigation_groups = _navigation_groups(
-            metadata.get("navigation_groups"), relative, issues
-        )
+        navigation_groups = _navigation_groups(metadata.get("navigation_groups"), relative, issues)
         state = _required_text(metadata, "knowledge_state", relative, issues)
         updated = _date_value(metadata.get("updated"), "updated", relative, issues)
         if node_kind and node_kind not in NODE_KINDS:
@@ -499,8 +497,10 @@ def _navigation_groups(
             issues.append(f"{relative}: navigation_groups labels must not repeat")
             continue
         labels.add(normalized_label)
-        if not isinstance(child_ids, list) or not child_ids or not all(
-            isinstance(child_id, str) and child_id.strip() for child_id in child_ids
+        if (
+            not isinstance(child_ids, list)
+            or not child_ids
+            or not all(isinstance(child_id, str) and child_id.strip() for child_id in child_ids)
         ):
             issues.append(f"{location}.children must be a non-empty canonical_id list")
             continue
@@ -610,9 +610,7 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
     return issues
 
 
-def _navigation_group_issues(
-    nodes: list[WikiTreeNode], texts: dict[str, str]
-) -> list[str]:
+def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> list[str]:
     """Keep explicit display groups complete and anchored to the canonical parent tree."""
 
     children = _children_by_parent(tuple(nodes))
@@ -627,9 +625,7 @@ def _navigation_group_issues(
             continue
         direct = children.get(parent.relative_path, ())
         direct_by_id = {child.canonical_id: child for child in direct}
-        listed = [
-            child_id for group in parent.navigation_groups for child_id in group.child_ids
-        ]
+        listed = [child_id for group in parent.navigation_groups for child_id in group.child_ids]
         duplicates = sorted(
             {child_id for child_id in listed if listed.count(child_id) > 1}, key=str.casefold
         )
@@ -931,9 +927,7 @@ def _render_explicit_navigation_groups(
             if parent.canonical_id == "resources/README" and child.node_kind == "topic":
                 rows.extend("  " + row for row in _resource_link_rows(texts[child.relative_path]))
             else:
-                rows.append(
-                    "  " + _render_keyword_link(child, include_sequence=include_sequence)
-                )
+                rows.append("  " + _render_keyword_link(child, include_sequence=include_sequence))
     return tuple(rows)
 
 

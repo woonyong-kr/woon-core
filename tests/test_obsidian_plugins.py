@@ -1262,8 +1262,7 @@ def test_attest_link_calendar_runtime_requires_complete_explicit_checklist(
         service.attest_link_calendar_runtime(["ribbon", "month-view"])
 
     assert not any(
-        json.loads(path.read_text(encoding="utf-8")).get("action")
-        == "attest-link-calendar-runtime"
+        json.loads(path.read_text(encoding="utf-8")).get("action") == "attest-link-calendar-runtime"
         for path in (vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json")
     )
 

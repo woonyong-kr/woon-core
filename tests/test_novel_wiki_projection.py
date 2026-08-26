@@ -78,10 +78,7 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
     people = novel / "work/people/person-link-ledger.yaml"
     people.parent.mkdir(parents=True)
     people.write_text(
-        "people:\n"
-        "- person_id: lee-minjeong\n"
-        "  links:\n"
-        "  - path: vault-source/scene.md\n",
+        "people:\n- person_id: lee-minjeong\n  links:\n  - path: vault-source/scene.md\n",
         encoding="utf-8",
     )
 
@@ -94,9 +91,7 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
     judgment_page = (
         vault / "wiki/private/novel/집필-계획/judgment-01-다음-집필-순서.md"
     ).read_text(encoding="utf-8")
-    person_page = (vault / "wiki/private/novel/인물/lee-minjeong.md").read_text(
-        encoding="utf-8"
-    )
+    person_page = (vault / "wiki/private/novel/인물/lee-minjeong.md").read_text(encoding="utf-8")
     assert first.category_count == 3
     assert first.source_count == 1
     assert first.judgment_count == 1

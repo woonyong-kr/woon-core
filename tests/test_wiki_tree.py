@@ -352,12 +352,7 @@ def test_explicit_groups_must_cover_each_direct_child_exactly_once(tmp_path: Pat
         node_kind="hub",
         parent="[[wiki/README|Wiki]]",
         keywords=("프로젝트",),
-        extra=(
-            "navigation_groups:\n"
-            "- label: 창작\n"
-            "  children:\n"
-            "  - projects/missing\n"
-        ),
+        extra=("navigation_groups:\n- label: 창작\n  children:\n  - projects/missing\n"),
     )
     _write_page(
         tmp_path,
@@ -395,12 +390,7 @@ def test_resource_groups_inline_raw_links_below_topic_text(tmp_path: Path) -> No
         node_kind="hub",
         parent="[[wiki/README|Wiki]]",
         keywords=("리소스",),
-        extra=(
-            "navigation_groups:\n"
-            "- label: AI\n"
-            "  children:\n"
-            "  - resources/ai\n"
-        ),
+        extra=("navigation_groups:\n- label: AI\n  children:\n  - resources/ai\n"),
     )
     _write_page(
         tmp_path,
@@ -439,12 +429,7 @@ def test_resource_groups_reject_intermediate_bundle_topics(tmp_path: Path) -> No
         node_kind="hub",
         parent="[[wiki/README|Wiki]]",
         keywords=("리소스",),
-        extra=(
-            "navigation_groups:\n"
-            "- label: AI\n"
-            "  children:\n"
-            "  - resources/ai\n"
-        ),
+        extra=("navigation_groups:\n- label: AI\n  children:\n  - resources/ai\n"),
     )
     _write_page(
         tmp_path,
@@ -460,8 +445,7 @@ def test_resource_groups_reject_intermediate_bundle_topics(tmp_path: Path) -> No
             "wiki/resources/ai/aice.md",
             "AICE Associate",
             "resources/ai/aice",
-            "- [[assets/aice-guide.png|시험 안내]]\n"
-            "- [[assets/aice-schedule.png|시험 일정]]",
+            "- [[assets/aice-guide.png|시험 안내]]\n- [[assets/aice-schedule.png|시험 일정]]",
         ),
         (
             "wiki/resources/ai/transformer.md",
