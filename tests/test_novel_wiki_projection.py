@@ -15,18 +15,25 @@ def _page(
     node_kind: str,
     parent: str | None,
     entity_kind: str | None = None,
+    entity_section: str | None = None,
+    sequence: int | None = None,
+    body: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     parent_row = f"parent: '{parent}'\n" if parent else ""
     entity_row = f"entity_kind: {entity_kind}\n" if entity_kind else ""
+    entity_section_row = f"entity_section: {entity_section}\n" if entity_section else ""
+    lifecycle_row = "lifecycle_status: active\n" if entity_kind == "project" else ""
+    sequence_row = f"sequence: {sequence}\n" if sequence is not None else ""
     path.write_text(
         "---\n"
         f"type: Wiki\ntitle: {title}\ncanonical_id: {canonical_id}\n"
-        f"node_kind: {node_kind}\n{entity_row}{parent_row}"
+        f"node_kind: {node_kind}\n{entity_row}{entity_section_row}{lifecycle_row}"
+        f"{sequence_row}{parent_row}"
         f"keywords:\n- {title}\naliases: []\nview_mode: tree\n"
         "updated: 2026-08-25\nsummary: 테스트 문서다.\n"
         "knowledge_state: 확인 필요\n---\n\n"
-        f"# {title}\n",
+        f"# {title}\n\n{body}".rstrip() + "\n",
         encoding="utf-8",
     )
 
@@ -57,6 +64,17 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
         node_kind="entity",
         parent="[[wiki/projects|프로젝트]]",
         entity_kind="project",
+        body="현재 목표와 집필 기준을 관리한다.",
+    )
+    _page(
+        vault / "wiki/personal/projects/(미정)소설-집필-히스토리.md",
+        title="(미정)소설 집필 히스토리",
+        canonical_id="private-novel/history",
+        node_kind="detail",
+        parent="[[wiki/personal/projects/(미정)소설-집필|(미정)소설 집필]]",
+        entity_section="history",
+        sequence=99,
+        body="아직 기록 없음",
     )
     source = novel / "vault-source/scene.md"
     source.parent.mkdir(parents=True)

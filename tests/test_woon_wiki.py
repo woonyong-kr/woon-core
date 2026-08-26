@@ -67,6 +67,25 @@ tags: [domain:ai, topic:activation-function]
     assert contract["summary"] == "활성화 함수는 신경망에 비선형성을 더한다."
 
 
+def test_compiled_wiki_contract_keeps_explicit_human_summary() -> None:
+    text = """---
+type: Wiki
+title: Link Calendar
+summary: 날짜 정본 노트를 월에서 날짜를 거쳐 여는 읽기 전용 탐색 도구다.
+---
+
+# Link Calendar
+
+## 현재 이해
+
+- 정본 링크만 표시한다.
+"""
+
+    contract = compiled_wiki_contract(Path("personal/context-calendar.md"), text)
+
+    assert contract["summary"] == "날짜 정본 노트를 월에서 날짜를 거쳐 여는 읽기 전용 탐색 도구다."
+
+
 def test_compiled_wiki_root_has_no_parent() -> None:
     contract = compiled_wiki_contract(
         Path("README.md"),
@@ -189,7 +208,7 @@ facets:
     assert contract["facets"] == ["커리어", "학습"]
 
 
-def test_new_entity_creates_link_index_information_and_separate_history(tmp_path: Path) -> None:
+def test_new_entity_keeps_current_knowledge_on_root_and_separates_history(tmp_path: Path) -> None:
     parent = _write_parent(tmp_path)
     pages = prepare_wiki_pages(
         tmp_path,
@@ -212,20 +231,16 @@ def test_new_entity_creates_link_index_information_and_separate_history(tmp_path
 
     assert [path.relative_to(tmp_path).as_posix() for path in pages] == [
         "wiki/nodes/aice-associate-준비.md",
-        "wiki/nodes/aice-associate-준비-정보.md",
         "wiki/nodes/aice-associate-준비-히스토리.md",
     ]
     landing = pages[tmp_path / "wiki/nodes/aice-associate-준비.md"].decode("utf-8")
-    information = pages[tmp_path / "wiki/nodes/aice-associate-준비-정보.md"].decode("utf-8")
     history = pages[tmp_path / "wiki/nodes/aice-associate-준비-히스토리.md"].decode("utf-8")
     assert _metadata(landing)["canonical_id"] == "nodes/aice-associate-준비"
-    assert WIKI_CURRENT_START not in landing
+    assert WIKI_CURRENT_START in landing
     assert WIKI_TIMELINE_START not in landing
-    assert 'facets: ["프로젝트", "학습", "커리어"]' in information
-    assert "project_id: aice-associate-준비" in information
-    assert 'objective: "회귀와 분류 문제를 반복해서 풀며 시험을 준비한다."' in information
-    assert WIKI_CURRENT_START in information
-    assert WIKI_TIMELINE_START not in information
+    assert 'facets: ["프로젝트", "학습", "커리어"]' in landing
+    assert "project_id: aice-associate-준비" in landing
+    assert 'objective: "회귀와 분류 문제를 반복해서 풀며 시험을 준비한다."' in landing
     assert WIKI_CURRENT_START not in history
     assert WIKI_TIMELINE_START in history
 
@@ -355,11 +370,11 @@ parent_topics:
     report = prepare_wiki_article_view_refresh(tmp_path)
     refreshed = report.pages[page].decode("utf-8")
 
-    assert report.changed_count == 1
+    assert report.changed_count == 0
     assert refreshed.count("facets:") == 1
     assert refreshed.count("parent_topics:") == 1
     assert "보존할 본문이다." in refreshed
-    assert "> [!info] 한눈에 보기" in refreshed
+    assert "> [!info] 한눈에 보기" not in refreshed
 
 
 def test_corpus_migration_replaces_yaml_block_lists_without_duplicate_keys(tmp_path: Path) -> None:
@@ -649,10 +664,31 @@ view_mode: tree
 """,
     )
 
-    assert rendered.count("<!-- woon-wiki-overview:start -->") == 1
-    assert "> [!info] 한눈에 보기" in rendered
-    assert "> **종류** · topic · tree" in rendered
-    assert "[[wiki/algorithm/README|알고리즘과 자료구조]]" in rendered
+    assert "<!-- woon-wiki-overview:start -->" not in rendered
+    assert "> [!info] 한눈에 보기" not in rendered
+    assert rendered.endswith("# 큐\n\n본문이다.\n")
+
+
+def test_compiler_normalizes_excess_blank_lines_below_h1() -> None:
+    rendered = preserve_managed_context(
+        "",
+        """---
+type: Wiki
+title: 큐
+summary: 먼저 들어온 항목을 먼저 처리하는 자료구조다.
+facets: [개념, 학습]
+knowledge_state: 근거 확인됨
+---
+
+# 큐
+
+
+
+본문이다.
+""",
+    )
+
+    assert rendered.endswith("# 큐\n\n본문이다.\n")
 
 
 def test_prepared_batch_applies_all_pages(tmp_path: Path) -> None:

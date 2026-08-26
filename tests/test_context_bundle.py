@@ -102,16 +102,20 @@ def test_wiki_context_follows_tree_and_includes_history_and_evidence(tmp_path: P
         node_kind: str,
         entity_kind: str | None = None,
         entity_section: str | None = None,
+        sequence: int | None = None,
     ) -> None:
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         parent_row = f"parent: '{parent}'\n" if parent else ""
         entity_kind_row = f"entity_kind: {entity_kind}\n" if entity_kind else ""
         entity_section_row = f"entity_section: {entity_section}\n" if entity_section else ""
+        lifecycle_row = "lifecycle_status: active\n" if entity_kind == "project" else ""
+        sequence_row = f"sequence: {sequence}\n" if sequence is not None else ""
         path.write_text(
             "---\n"
             f"type: Wiki\ntitle: {title}\ncanonical_id: {canonical_id}\n"
             f"node_kind: {node_kind}\n{entity_kind_row}{entity_section_row}"
+            f"{lifecycle_row}{sequence_row}"
             f"{parent_row}keywords: [{title}]\naliases: []\n"
             "view_mode: tree\nupdated: 2026-08-25\nsummary: 문맥 요약이다.\n"
             "knowledge_state: 확인 필요\n---\n\n"
@@ -140,21 +144,14 @@ def test_wiki_context_follows_tree_and_includes_history_and_evidence(tmp_path: P
         "복구 프로젝트",
         "project",
         "[[wiki/projects|프로젝트]]",
+        "현재 판단이다.\n\n"
+        "## 확인된 근거\n\n"
+        "- 계약 테스트가 통과했다.\n\n"
         "## 키워드\n\n"
-        "- [[wiki/project-info|정보]]\n"
         "- [[wiki/project-history|히스토리]]\n"
         "- [[wiki/project-detail|복구 계약]]",
         node_kind="entity",
         entity_kind="project",
-    )
-    write(
-        "wiki/project-info.md",
-        "복구 프로젝트 정보",
-        "project-info",
-        "[[wiki/project|복구 프로젝트]]",
-        "현재 판단이다.\n\n## 확인된 근거\n\n- 계약 테스트가 통과했다.",
-        node_kind="detail",
-        entity_section="information",
     )
     write(
         "wiki/project-history.md",
@@ -166,6 +163,7 @@ def test_wiki_context_follows_tree_and_includes_history_and_evidence(tmp_path: P
         "<!-- woon-wiki-timeline:end -->",
         node_kind="detail",
         entity_section="history",
+        sequence=1,
     )
     write(
         "wiki/project-detail.md",
@@ -174,14 +172,15 @@ def test_wiki_context_follows_tree_and_includes_history_and_evidence(tmp_path: P
         "[[wiki/project|복구 프로젝트]]",
         "상세 계약이다.",
         node_kind="detail",
+        sequence=2,
     )
 
     bundle = build_wiki_context_bundle(tmp_path, "복구 프로젝트")
 
     roles = [item.role for item in bundle.items]
     assert roles[:3] == ["ancestor", "ancestor", "current"]
-    assert roles.count("child") == 3
-    assert "information" in roles
+    assert roles.count("child") == 2
+    assert "information" not in roles
     assert "history" in roles
     assert "evidence" in roles
     assert any("판단 기준을 수정했다" in item.text for item in bundle.items)

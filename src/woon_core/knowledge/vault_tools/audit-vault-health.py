@@ -20,8 +20,6 @@ from woon_core.errors import WoonError
 from woon_core.knowledge.source_boundary import audit_source_boundary
 from woon_core.knowledge.wiki_tree import (
     LEGACY_TREE_FIELDS,
-    is_compact_link_canonical_id,
-    is_compact_link_page,
     load_wiki_tree,
 )
 
@@ -608,12 +606,10 @@ def is_allowed_non_markdown_file(path: Path) -> bool:
         return is_noncanonical_map_archive(path) or is_valid_markdown_canvas(path)
     if r == "catalog/source-audits/inflearn-java-course-materials.json":
         return True
-    if r.startswith("wiki/private/_sources/knowledge/private/career/applications/") and path.suffix.casefold() in {
-        ".json",
-        ".pdf",
-        ".yaml",
-        ".yml",
-    }:
+    if (
+        r.startswith("wiki/private/_sources/knowledge/private/career/applications/")
+        and path.suffix.casefold() in {".json", ".pdf", ".yaml", ".yml"}
+    ):
         return True
     if path.suffix != ".drawio":
         return False
@@ -1478,19 +1474,11 @@ def main() -> int:
         for node in tree_nodes:
             text = tree_texts[node.relative_path]
             if (
-                node.node_kind not in {"root", "hub", "entity"}
-                and not is_compact_link_page(node)
-                and "<!-- woon-wiki-overview:start -->" not in text
-            ):
-                issues["wiki_display_contract_violations"].append(
-                    f"{node.relative_path}: generated overview is missing"
-                )
-            if node.node_kind in {"root", "hub"} and (
                 "<!-- woon-wiki-overview:start -->" in text
                 or "<!-- woon-wiki-overview:end -->" in text
             ):
                 issues["wiki_display_contract_violations"].append(
-                    f"{node.relative_path}: navigation page must not repeat an overview"
+                    f"{node.relative_path}: generated metadata overview is retired"
                 )
             expected_mode = {
                 "book": "linear",
@@ -1919,18 +1907,12 @@ def main() -> int:
         wiki_issues, entity_issues = wiki_and_entity_policy_issues(r, text, fm)
         issues["wiki_pipeline_policy_violations"].extend(wiki_issues)
         issues["entity_policy_violations"].extend(entity_issues)
-        if (
-            r.startswith("wiki/")
-            and fm.get("type") == "Wiki"
-            and fm.get("node_kind") not in {"root", "hub", "entity"}
-            and not is_compact_link_canonical_id(fm.get("canonical_id"))
-            and (
-                text.count("<!-- woon-wiki-overview:start -->") != 1
-                or text.count("<!-- woon-wiki-overview:end -->") != 1
-            )
+        if r.startswith("wiki/") and fm.get("type") == "Wiki" and (
+            "<!-- woon-wiki-overview:start -->" in text
+            or "<!-- woon-wiki-overview:end -->" in text
         ):
             issues["wiki_display_contract_violations"].append(
-                f"{r}: one generated detail overview is required"
+                f"{r}: generated metadata overview is retired"
             )
 
         if r.startswith("maps/"):
@@ -1976,9 +1958,10 @@ def main() -> int:
         if published and root not in QUARTZ_SYNC_ROOTS:
             issues["published_outside_quartz_scope"].append(r)
 
-        if (r.startswith(("inbox/", "wiki/private/_sources/knowledge/")) or r == "head-quarter.md") and (
-            published or fm.get("access") != "local-only"
-        ):
+        if (
+            r.startswith(("inbox/", "wiki/private/_sources/knowledge/"))
+            or r == "head-quarter.md"
+        ) and (published or fm.get("access") != "local-only"):
             issues["local_operational_published"].append(r)
 
         if r.startswith("inbox/"):
@@ -2045,7 +2028,10 @@ def main() -> int:
                 issues["source_policy_violations"].append(
                     f"{r}: private original must be publish:false and access:local-only"
                 )
-        elif r.startswith("wiki/private/_sources/knowledge/") and r != "wiki/private/_sources/knowledge/README.md":
+        elif (
+            r.startswith("wiki/private/_sources/knowledge/")
+            and r != "wiki/private/_sources/knowledge/README.md"
+        ):
             if fm.get("type") != "Source":
                 issues["source_policy_violations"].append(f"{r}: type must be Source")
             if fm.get("publish") is not False or fm.get("access") != "local-only":

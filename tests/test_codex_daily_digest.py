@@ -125,7 +125,8 @@ def test_empty_daily_digest_explains_its_honest_input_state(
     )
 
     rendered = (tmp_path / "inbox/daily/2026-08-17.md").read_text(encoding="utf-8")
-    assert "> [!info]" in rendered
+    assert "> [!info]" not in rendered
+    assert f"**{expected_title}** —" in rendered
     assert expected_title in rendered
     assert "## 오늘 기록" not in rendered
 
@@ -148,7 +149,7 @@ def test_nonempty_daily_digest_marks_completion_before_rendering_entries(tmp_pat
     )
 
     rendered = (tmp_path / "inbox/daily/2026-08-17.md").read_text(encoding="utf-8")
-    assert "> [!info] 정리 완료" in rendered
+    assert "**정리 완료** —" in rendered
 
 
 def test_partial_daily_digest_renders_items_without_claiming_day_complete(tmp_path: Path) -> None:
@@ -170,9 +171,9 @@ def test_partial_daily_digest_renders_items_without_claiming_day_complete(tmp_pa
     )
 
     rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
-    assert "> [!info] 현재까지 정리됨" in rendered
+    assert "**현재까지 정리됨** —" in rendered
     assert "완료된 대화부터 누적한다" in rendered
-    assert "> [!info] 정리 완료" not in rendered
+    assert "**정리 완료** —" not in rendered
     assert "## 오늘 기록" in rendered
 
 
@@ -239,6 +240,9 @@ def test_daily_digest_renders_readable_question_answer_outcome_and_attachment(
                             "원본은 변경하지 않고, 실행용 notebook과 검증 스크립트를 "
                             "별도로 두는 구조로 정리했다."
                         ),
+                        understanding=(
+                            "자료 보관이 아니라 재실행 가능한 학습 흐름이 필요하다고 판단했다."
+                        ),
                         outcome="회귀·분류 자료와 실습 코드가 학습 순서에 연결됐다.",
                         attachments=("회귀 샘플 문항 PDF", "분류 샘플 해설 PDF"),
                     ),
@@ -250,6 +254,7 @@ def test_daily_digest_renders_readable_question_answer_outcome_and_attachment(
     rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
     assert "**질문** —" in rendered
     assert "**답변** —" in rendered
+    assert "**내 판단** — 자료 보관이 아니라 재실행 가능한 학습 흐름" in rendered
     assert "**결과** —" in rendered
     assert "**자료** — 회귀 샘플 문항 PDF, 분류 샘플 해설 PDF" in rendered
 
@@ -314,8 +319,9 @@ def test_daily_digest_renders_detailed_semantics_and_compact_source_index(
     assert "**확인한 사실** — 편하게 입은 기존 바지가 있다." in rendered
     assert "**판단 기준** — 실제 착용감 · 원하는 실루엣" in rendered
     assert "## 대화 찾아보기" in rendered
-    assert "> [!note]- 데님 핏을 실제 착용 기준으로 비교했다" in rendered
-    assert "질문 1개 · 답변 1개" in rendered
+    assert "> [!note]" not in rendered
+    assert "### 데님 핏을 실제 착용 기준으로 비교했다" in rendered
+    assert "- 질문 1개 · 답변 1개" in rendered
     assert "**12:10**" in rendered
     assert "기존에 편하게 입은 바지와 비교하면" in rendered
     assert "실제 착용감을 우선하면 와이드 계열이 더 가깝습니다." not in rendered
@@ -362,8 +368,10 @@ def test_daily_digest_links_explicit_canonical_wiki_from_local_source(
 
     rendered = daily.read_text(encoding="utf-8")
     assert "## 관련 문서" not in rendered
-    assert "> - **연결** ·" in rendered
-    assert "[[../../wiki/personal/link-calendar|Link Calendar 사용 원칙]]" in rendered
+    assert (
+        "### [[../../wiki/personal/link-calendar|Link Calendar 사용 원칙을 정리했다]]"
+        in rendered
+    )
 
 
 def test_daily_digest_places_canonical_links_with_their_subject(tmp_path: Path) -> None:

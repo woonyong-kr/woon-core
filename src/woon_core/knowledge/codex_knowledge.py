@@ -99,6 +99,22 @@ _CONTENT_KINDS = {
     "learning-material-bundle",
 }
 _PROJECT_STATUSES = {"Planned", "Active", "Paused", "Completed", "Cancelled"}
+_LIFECYCLE_STATES = {
+    "idea",
+    "planned",
+    "active",
+    "paused",
+    "completed",
+    "cancelled",
+    "archived",
+}
+_PROJECT_LIFECYCLE = {
+    "Planned": "planned",
+    "Active": "active",
+    "Paused": "paused",
+    "Completed": "completed",
+    "Cancelled": "cancelled",
+}
 _CODEX_RANGE_RE = re.compile(
     r"^codex-kst-(\d{4}-\d{2}-\d{2})-(?:scan-)?through-(\d+)(?:-[a-z0-9-]+)?-v\d+$"
 )
@@ -177,6 +193,10 @@ class ProjectMention:
     objective: str
     status: str = "Active"
     materials: tuple[str, ...] = ()
+    lifecycle_status: str = "active"
+    started_on: date | None = None
+    ended_on: date | None = None
+    occurred_on: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +242,10 @@ class CodexKnowledgeEntry:
     kind: CodexKnowledgeKind
     title: str
     summary: str
+    lifecycle_status: str | None = None
+    started_on: date | None = None
+    ended_on: date | None = None
+    occurred_on: date | None = None
     wiki_update: bool = False
     wiki_subject_path: str | None = None
     new_wiki_reason: str | None = None
@@ -283,6 +307,10 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexKnowled
             "kind",
             "title",
             "summary",
+            "lifecycle_status",
+            "started_on",
+            "ended_on",
+            "occurred_on",
             "wiki_update",
             "wiki_subject_path",
             "new_wiki_reason",
@@ -312,6 +340,10 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexKnowled
         )
         next_question = raw.get("next_question")
         intent = raw.get("intent")
+        lifecycle_status = raw.get("lifecycle_status")
+        started_on = _record_date(raw.get("started_on"), "started_on")
+        ended_on = _record_date(raw.get("ended_on"), "ended_on")
+        occurred_on = _record_date(raw.get("occurred_on"), "occurred_on")
         wiki_update = raw.get("wiki_update", False)
         wiki_subject_path = raw.get("wiki_subject_path")
         new_wiki_reason = raw.get("new_wiki_reason")
@@ -334,6 +366,8 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexKnowled
             raise WoonError("Codex knowledge next_question must be a string or null")
         if intent is not None and not isinstance(intent, str):
             raise WoonError("Codex knowledge intent must be a string or null")
+        if lifecycle_status is not None and not isinstance(lifecycle_status, str):
+            raise WoonError("Codex knowledge lifecycle_status must be a string or null")
         if not isinstance(wiki_update, bool):
             raise WoonError("Codex knowledge wiki_update must be a boolean")
         if wiki_subject_path is not None and not isinstance(wiki_subject_path, str):
@@ -390,6 +424,10 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexKnowled
                 kind=cast(CodexKnowledgeKind, kind),
                 title=title,
                 summary=summary,
+                lifecycle_status=lifecycle_status,
+                started_on=started_on,
+                ended_on=ended_on,
+                occurred_on=occurred_on,
                 wiki_update=wiki_update,
                 wiki_subject_path=wiki_subject_path,
                 new_wiki_reason=new_wiki_reason,
@@ -794,6 +832,10 @@ def _validate_entries(
             or entry.parent
             or entry.keywords
             or entry.central_question
+            or entry.lifecycle_status
+            or entry.started_on
+            or entry.ended_on
+            or entry.occurred_on
         ):
             raise WoonError(
                 "review-only Codex knowledge must not create links or entity side effects"
@@ -811,6 +853,13 @@ def _validate_entries(
         )
         _validate_people(entry.people)
         _validate_contents(entry.contents)
+        _validate_lifecycle(
+            entry.lifecycle_status,
+            entry.started_on,
+            entry.ended_on,
+            entry.occurred_on,
+            label="entry",
+        )
         _validate_projects(entry.projects)
         _validate_interview_answer_mention(vault, entry)
         if entry.projects and any(
@@ -919,10 +968,61 @@ def _validate_projects(projects: tuple[ProjectMention, ...]) -> None:
         _visible(project.objective, "project objective", _OBJECTIVE_LIMIT)
         if project.status not in _PROJECT_STATUSES:
             raise WoonError("Codex knowledge project status is invalid")
+        if project.lifecycle_status != _PROJECT_LIFECYCLE[project.status]:
+            raise WoonError("Codex knowledge project status and lifecycle_status conflict")
+        _validate_lifecycle(
+            project.lifecycle_status,
+            project.started_on,
+            project.ended_on,
+            project.occurred_on,
+            label="project",
+        )
         if len(project.materials) > 12 or len(set(project.materials)) != len(project.materials):
             raise WoonError("Codex knowledge project materials must be unique and bounded")
         for material in project.materials:
             _visible(material, "project material", 120)
+
+
+def _validate_lifecycle(
+    lifecycle_status: str | None,
+    started_on: date | None,
+    ended_on: date | None,
+    occurred_on: date | None,
+    *,
+    label: str,
+) -> None:
+    dates = (started_on, ended_on, occurred_on)
+    if lifecycle_status is None:
+        if any(value is not None for value in dates):
+            raise WoonError(f"Codex knowledge {label} dates require lifecycle_status")
+        return
+    if lifecycle_status not in _LIFECYCLE_STATES:
+        raise WoonError(f"Codex knowledge {label} lifecycle_status is invalid")
+    if occurred_on is not None and any(value is not None for value in (started_on, ended_on)):
+        raise WoonError(
+            f"Codex knowledge {label} occurred_on cannot be combined with a date range"
+        )
+    if started_on is not None and ended_on is not None and ended_on < started_on:
+        raise WoonError(f"Codex knowledge {label} ended_on cannot precede started_on")
+    if lifecycle_status in {"completed", "cancelled", "archived"} and not (
+        ended_on or occurred_on
+    ):
+        raise WoonError(
+            f"Codex knowledge {label} closed lifecycle requires ended_on or occurred_on"
+        )
+    if lifecycle_status in {"idea", "planned", "active", "paused"} and ended_on is not None:
+        raise WoonError(f"Codex knowledge {label} open lifecycle cannot have ended_on")
+
+
+def _record_date(value: object, field: str) -> date | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WoonError(f"Codex knowledge {field} must be YYYY-MM-DD or null")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise WoonError(f"Codex knowledge {field} must be YYYY-MM-DD or null") from error
 
 
 def _validate_interview_answer_mention(vault: Path, entry: CodexKnowledgeEntry) -> None:
@@ -1301,18 +1401,35 @@ def _projects_from_records(records: list[object]) -> tuple[ProjectMention, ...]:
     for raw in records:
         if not isinstance(raw, dict):
             raise WoonError("Codex knowledge project mention must be a mapping")
-        allowed = {"title", "objective", "status", "materials"}
+        allowed = {
+            "title",
+            "objective",
+            "status",
+            "materials",
+            "lifecycle_status",
+            "started_on",
+            "ended_on",
+            "occurred_on",
+        }
         required = {"title", "objective"}
         if set(raw).difference(allowed) or not required.issubset(raw):
             raise WoonError("Codex knowledge project mention has unsupported fields")
         title = raw["title"]
         objective = raw["objective"]
         status = raw.get("status", "Active")
+        lifecycle_status = raw.get(
+            "lifecycle_status",
+            _PROJECT_LIFECYCLE.get(status) if isinstance(status, str) else None,
+        )
+        started_on = _record_date(raw.get("started_on"), "project started_on")
+        ended_on = _record_date(raw.get("ended_on"), "project ended_on")
+        occurred_on = _record_date(raw.get("occurred_on"), "project occurred_on")
         materials = raw.get("materials", [])
         if (
             not isinstance(title, str)
             or not isinstance(objective, str)
             or not isinstance(status, str)
+            or not isinstance(lifecycle_status, str)
         ):
             raise WoonError("Codex knowledge project mention text fields must be strings")
         if not isinstance(materials, list) or not all(isinstance(item, str) for item in materials):
@@ -1323,6 +1440,10 @@ def _projects_from_records(records: list[object]) -> tuple[ProjectMention, ...]:
                 objective=objective,
                 status=status,
                 materials=tuple(materials),
+                lifecycle_status=lifecycle_status,
+                started_on=started_on,
+                ended_on=ended_on,
+                occurred_on=occurred_on,
             )
         )
     return tuple(projects)
@@ -1481,6 +1602,10 @@ def _entry_id(entry: CodexKnowledgeEntry) -> str:
             entry.parent or "",
             *entry.keywords,
             entry.central_question or "",
+            entry.lifecycle_status or "",
+            entry.started_on.isoformat() if entry.started_on else "",
+            entry.ended_on.isoformat() if entry.ended_on else "",
+            entry.occurred_on.isoformat() if entry.occurred_on else "",
             *entry.related_documents,
             *(
                 "\0".join(
@@ -1519,6 +1644,10 @@ def _entry_id(entry: CodexKnowledgeEntry) -> str:
                         project.title.strip(),
                         project.objective.strip(),
                         project.status,
+                        project.lifecycle_status,
+                        project.started_on.isoformat() if project.started_on else "",
+                        project.ended_on.isoformat() if project.ended_on else "",
+                        project.occurred_on.isoformat() if project.occurred_on else "",
                         *project.materials,
                     )
                 )
@@ -1565,6 +1694,10 @@ def _encode_entries(
                     "kind": entry.kind,
                     "title": entry.title,
                     "summary": entry.summary,
+                    "lifecycle_status": entry.lifecycle_status,
+                    "started_on": entry.started_on.isoformat() if entry.started_on else None,
+                    "ended_on": entry.ended_on.isoformat() if entry.ended_on else None,
+                    "occurred_on": entry.occurred_on.isoformat() if entry.occurred_on else None,
                     "wiki_update": entry.wiki_update,
                     "wiki_subject_path": entry.wiki_subject_path,
                     "new_wiki_reason": entry.new_wiki_reason,
@@ -1617,6 +1750,16 @@ def _encode_entries(
                             "title": project.title,
                             "objective": project.objective,
                             "status": project.status,
+                            "lifecycle_status": project.lifecycle_status,
+                            "started_on": (
+                                project.started_on.isoformat() if project.started_on else None
+                            ),
+                            "ended_on": (
+                                project.ended_on.isoformat() if project.ended_on else None
+                            ),
+                            "occurred_on": (
+                                project.occurred_on.isoformat() if project.occurred_on else None
+                            ),
                             "materials": list(project.materials),
                         }
                         for project in entry.projects
@@ -1693,6 +1836,10 @@ def _prepare_ledger_entry(vault: Path, entry: CodexKnowledgeEntry) -> tuple[Path
         "kind": entry.kind,
         "title": entry.title.strip(),
         "summary": entry.summary.strip(),
+        "lifecycle_status": entry.lifecycle_status,
+        "started_on": entry.started_on.isoformat() if entry.started_on else None,
+        "ended_on": entry.ended_on.isoformat() if entry.ended_on else None,
+        "occurred_on": entry.occurred_on.isoformat() if entry.occurred_on else None,
         "wiki_update": entry.wiki_update,
         "wiki_subject_path": identity[0] if identity is not None else None,
         "new_wiki_reason": entry.new_wiki_reason,
@@ -1752,6 +1899,10 @@ def _prepare_ledger_entry(vault: Path, entry: CodexKnowledgeEntry) -> tuple[Path
                 "title": project.title.strip(),
                 "objective": project.objective.strip(),
                 "status": project.status,
+                "lifecycle_status": project.lifecycle_status,
+                "started_on": project.started_on.isoformat() if project.started_on else None,
+                "ended_on": project.ended_on.isoformat() if project.ended_on else None,
+                "occurred_on": project.occurred_on.isoformat() if project.occurred_on else None,
                 "materials": list(project.materials),
             }
             for project in entry.projects
@@ -2117,6 +2268,10 @@ def _wiki_deltas(vault: Path, entries: tuple[CodexKnowledgeEntry, ...]) -> tuple
                     central_question=central_question,
                     node_kind=node_kind,
                     view_mode=view_mode,
+                    lifecycle_status=entry.lifecycle_status,
+                    started_on=entry.started_on,
+                    ended_on=entry.ended_on,
+                    occurred_on=entry.occurred_on,
                     interview_tracks=(interview.interview_tracks if interview is not None else ()),
                     question_topic=(interview.question_topic if interview is not None else None),
                     interview_answer=(
@@ -2212,6 +2367,10 @@ def _wiki_deltas(vault: Path, entries: tuple[CodexKnowledgeEntry, ...]) -> tuple
                 node_kind=project_node,
                 view_mode=project_view,
                 entity_kind="project",
+                lifecycle_status=project.lifecycle_status,
+                started_on=project.started_on,
+                ended_on=project.ended_on,
+                occurred_on=project.occurred_on,
                 project_status=project.status,
                 objective=project.objective,
                 materials=project.materials,

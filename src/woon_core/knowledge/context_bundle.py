@@ -167,16 +167,12 @@ def build_wiki_context_bundle(
         candidates.append(
             _tree_item(node, texts[node.relative_path], "child", "바로 아래 키워드", node.summary)
         )
-    # Entity landing pages are deliberately link-only. Their information and
-    # history children therefore participate in the same bounded context instead
-    # of forcing AI consumers to depend on a prose-heavy duplicate dashboard.
+    # Entity roots own current knowledge while their one history child owns
+    # chronology. Evidence may live on either the root or a focused child.
     context_nodes = (current, *children)
     for node in context_nodes:
         source = texts[node.relative_path]
-        metadata, body = split_markdown(strip_generated_wiki_views(source))
-        entity_section = str(metadata.get("entity_section", "")).strip()
-        if node is not current and entity_section == "information" and body.strip():
-            candidates.append(_tree_item(node, source, "information", "현재 정보", body.strip()))
+        _, body = split_markdown(strip_generated_wiki_views(source))
         timeline = _managed_body(
             source,
             "<!-- woon-wiki-timeline:start -->",

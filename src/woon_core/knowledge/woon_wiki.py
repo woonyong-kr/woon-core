@@ -27,6 +27,7 @@ from woon_core.knowledge.wiki_tree import (
     is_wiki_source_archive,
     iter_wiki_pages,
     preserve_generated_wiki_views,
+    split_markdown,
     strip_generated_wiki_views,
 )
 
@@ -131,6 +132,10 @@ class WikiDelta:
     view_mode: str = "tree"
     entity_kind: str | None = None
     entity_section: str | None = None
+    lifecycle_status: str | None = None
+    started_on: date | None = None
+    ended_on: date | None = None
+    occurred_on: date | None = None
     sequence: float | None = None
     interview_tracks: tuple[str, ...] = ()
     question_topic: str | None = None
@@ -242,6 +247,7 @@ def prepare_wiki_pages(vault: Path, deltas: tuple[WikiDelta, ...]) -> dict[Path,
             resolved.extend(_expanded_entity_deltas(root, path, delta))
         else:
             resolved.append((path, delta))
+    resolved = list(_assign_missing_sibling_sequences(root, tuple(resolved)))
     planned_paths = {path.relative_to(root).as_posix() for path, _ in resolved}
     grouped: dict[Path, list[WikiDelta]] = {}
     for path, delta in resolved:
@@ -260,33 +266,62 @@ def prepare_wiki_pages(vault: Path, deltas: tuple[WikiDelta, ...]) -> dict[Path,
     return pages
 
 
+def _assign_missing_sibling_sequences(
+    root: Path, resolved: tuple[tuple[Path, WikiDelta], ...]
+) -> tuple[tuple[Path, WikiDelta], ...]:
+    """Give newly created siblings a stable order without guessing semantic stages.
+
+    Explicit sequence values always win.  Dense parents with navigation groups
+    still fail the tree audit when a caller does not place the child in a stage;
+    this helper only prevents a new ungrouped sibling from becoming unordered.
+    """
+
+    next_by_parent: dict[str, int] = {}
+    for page in iter_wiki_pages(root / "wiki"):
+        metadata, _ = split_markdown(page.read_text(encoding="utf-8"))
+        parent = str(metadata.get("parent", "")).strip()
+        if not parent:
+            continue
+        target = _wikilink_page_path(parent)
+        sequence = metadata.get("sequence")
+        if target is None or not isinstance(sequence, (int, float)) or sequence >= 999:
+            continue
+        next_by_parent[target] = max(next_by_parent.get(target, 0), int(sequence))
+
+    assigned: list[tuple[Path, WikiDelta]] = []
+    for path, delta in resolved:
+        if delta.sequence is not None or delta.parent is None:
+            assigned.append((path, delta))
+            continue
+        target = _wikilink_page_path(delta.parent)
+        if target is None:
+            assigned.append((path, delta))
+            continue
+        next_sequence = next_by_parent.get(target, 0) + 1
+        next_by_parent[target] = next_sequence
+        assigned.append((path, replace(delta, sequence=float(next_sequence))))
+    return tuple(assigned)
+
+
+def _wikilink_page_path(value: str) -> str | None:
+    match = re.fullmatch(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]", value.strip())
+    if match is None:
+        return None
+    return f"{Path(match.group(1)).with_suffix('').as_posix()}.md"
+
+
 def _expanded_entity_deltas(
     root: Path, path: Path, landing: WikiDelta
 ) -> tuple[tuple[Path, WikiDelta], ...]:
-    """Route entity facts and dates below a link-only landing page."""
+    """Keep entity knowledge on its root and route only chronology to history."""
 
     relative = path.relative_to(root).as_posix()
     entity_path = Path(relative)
     stem = entity_path.stem
     title = landing.title.strip()
     parent = f"[[{entity_path.with_suffix('').as_posix()}|{title}]]"
-    information_title = f"{title} 정보"
     history_title = f"{title} 히스토리"
-    information_path = entity_path.with_name(f"{stem}-정보.md")
     history_path = entity_path.with_name(f"{stem}-히스토리.md")
-    information = replace(
-        landing,
-        title=information_title,
-        wiki_subject_path=information_path.as_posix(),
-        parent=parent,
-        keywords=(information_title,),
-        aliases=(),
-        node_kind="detail",
-        view_mode="article",
-        entity_kind=None,
-        entity_section="information",
-        sequence=1,
-    )
     history = replace(
         landing,
         title=history_title,
@@ -300,6 +335,10 @@ def _expanded_entity_deltas(
         view_mode="topic-timeline",
         entity_kind=None,
         entity_section="history",
+        lifecycle_status=None,
+        started_on=None,
+        ended_on=None,
+        occurred_on=None,
         sequence=999,
         intent=None,
         next_question=None,
@@ -315,13 +354,9 @@ def _expanded_entity_deltas(
     index = replace(
         landing,
         wiki_subject_path=relative,
-        related_documents=(),
-        intent=None,
-        next_question=None,
     )
     return (
         (path, index),
-        (root / information_path, information),
         (root / history_path, history),
     )
 
@@ -949,7 +984,7 @@ def compiled_wiki_contract(relative: Path, text: str) -> dict[str, object]:
         "state_reason": "accepted-evidence-receipt",
         "status": "Active",
         "record_owner": "choi-woonyoung",
-        "summary": _summary_from_document(text),
+        "summary": _frontmatter_text(text, "summary") or _summary_from_document(text),
     }
 
 
@@ -1028,6 +1063,15 @@ def _merge_delta(text: str, delta: WikiDelta) -> str:
         updated = _upsert_frontmatter_value(updated, "entity_kind", delta.entity_kind)
     if delta.entity_section is not None:
         updated = _upsert_frontmatter_value(updated, "entity_section", delta.entity_section)
+    for key, value in (
+        ("lifecycle_status", delta.lifecycle_status),
+        ("started_on", delta.started_on),
+        ("ended_on", delta.ended_on),
+        ("occurred_on", delta.occurred_on),
+    ):
+        if value is not None:
+            rendered = value.isoformat() if isinstance(value, date) else value
+            updated = _upsert_frontmatter_value(updated, key, rendered)
     if delta.sequence is not None:
         updated = _upsert_frontmatter_value(updated, "sequence", f"{delta.sequence:g}")
     if delta.interview_answer is not None:
@@ -1054,10 +1098,17 @@ def _merge_delta(text: str, delta: WikiDelta) -> str:
     updated = _merge_facet_properties(updated, delta)
 
     if delta.node_kind == "entity":
-        updated = _strip_managed_section(updated, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END)
+        current = "\n".join((WIKI_CURRENT_START, delta.summary.strip(), WIKI_CURRENT_END))
+        updated = _replace_or_append_managed_section(
+            updated, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END, current
+        )
         updated = _strip_managed_section(
             updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END
         )
+        if delta.intent:
+            updated = _replace_or_append_h2(updated, "남긴 의도", delta.intent.strip())
+        if delta.next_question:
+            updated = _replace_or_append_h2(updated, "다음 질문", delta.next_question.strip())
         if delta.related_documents:
             rows = [
                 f"- [[{Path(path).with_suffix('').as_posix()}]]" for path in delta.related_documents
@@ -1124,6 +1175,10 @@ def _render_new(delta: WikiDelta) -> str:
         f"view_mode: {delta.view_mode}",
         *((f"entity_kind: {delta.entity_kind}",) if delta.entity_kind is not None else ()),
         *((f"entity_section: {delta.entity_section}",) if delta.entity_section is not None else ()),
+        *((f"lifecycle_status: {delta.lifecycle_status}",) if delta.lifecycle_status else ()),
+        *((f"started_on: {delta.started_on.isoformat()}",) if delta.started_on else ()),
+        *((f"ended_on: {delta.ended_on.isoformat()}",) if delta.ended_on else ()),
+        *((f"occurred_on: {delta.occurred_on.isoformat()}",) if delta.occurred_on else ()),
         *((f"sequence: {delta.sequence:g}",) if delta.sequence is not None else ()),
         *(
             (f"central_question: {json.dumps(delta.central_question, ensure_ascii=False)}",)
@@ -1156,6 +1211,8 @@ def _render_new(delta: WikiDelta) -> str:
     if delta.node_kind == "entity":
         if delta.entity_kind == "book":
             lines.extend(("", "## 목차"))
+        else:
+            lines.extend(("", "## 현재 이해", "", current))
     elif delta.entity_section == "information":
         lines.extend(("", "## 현재 이해", "", current))
     elif delta.entity_section == "history":
@@ -1207,6 +1264,7 @@ def _validate_delta(vault: Path, delta: WikiDelta, *, planned_paths: set[str]) -
         raise WoonError("Wiki delta contains an unsupported entity_section")
     if delta.entity_section is not None and delta.node_kind != "detail":
         raise WoonError("Wiki entity_section requires node_kind detail")
+    _validate_lifecycle_delta(delta)
     if not delta.keywords or len(set(item.casefold() for item in delta.keywords)) != len(
         delta.keywords
     ):
@@ -1283,6 +1341,34 @@ def _validate_delta(vault: Path, delta: WikiDelta, *, planned_paths: set[str]) -
             raise WoonError("Wiki interview question_topic is required")
         _bounded_line(delta.question_topic, "interview question_topic", 120)
         _validate_interview_answer(delta.interview_answer)
+
+
+def _validate_lifecycle_delta(delta: WikiDelta) -> None:
+    states = {"idea", "planned", "active", "paused", "completed", "cancelled", "archived"}
+    state = delta.lifecycle_status
+    dates = (delta.started_on, delta.ended_on, delta.occurred_on)
+    if state is None:
+        if any(value is not None for value in dates):
+            raise WoonError("Wiki lifecycle dates require lifecycle_status")
+        return
+    if state not in states:
+        raise WoonError("Wiki lifecycle_status is invalid")
+    if delta.occurred_on is not None and any(
+        value is not None for value in (delta.started_on, delta.ended_on)
+    ):
+        raise WoonError("Wiki occurred_on cannot be combined with a date range")
+    if (
+        delta.started_on is not None
+        and delta.ended_on is not None
+        and delta.ended_on < delta.started_on
+    ):
+        raise WoonError("Wiki ended_on cannot precede started_on")
+    if state in {"completed", "cancelled", "archived"} and not (
+        delta.ended_on or delta.occurred_on
+    ):
+        raise WoonError("Wiki closed lifecycle requires ended_on or occurred_on")
+    if state in {"idea", "planned", "active", "paused"} and delta.ended_on is not None:
+        raise WoonError("Wiki open lifecycle cannot have ended_on")
 
 
 def _merge_interview_answer(text: str, delta: WikiDelta) -> str:
@@ -1611,58 +1697,25 @@ def _frontmatter_list(text: str, key: str) -> tuple[str, ...]:
 
 
 def _normalize_article_view(text: str) -> str:
-    """Render one compact, NamuWiki-style index from canonical metadata.
-
-    The callout is a view inside the same Markdown file, not another source of
-    truth.  It is regenerated from frontmatter on every compile or Wiki update
-    so the visible summary cannot drift from the canonical properties.
-    """
-
-    title = _frontmatter_text(text, "title")
-    summary = re.sub(r"\s+", " ", _frontmatter_text(text, "summary")).strip()
-    state = _frontmatter_text(text, "knowledge_state")
-    node_kind = _frontmatter_text(text, "node_kind")
-    view_mode = _frontmatter_text(text, "view_mode")
-    parent = _frontmatter_text(text, "parent")
-    if not title or not summary or not state:
-        return _normalize_timeline_heading(text)
-
-    rows = [
-        WIKI_OVERVIEW_START,
-        "> [!info] 한눈에 보기",
-        f"> **한 줄 정리** · {summary}",
-        f"> **종류** · {node_kind or 'topic'} · {view_mode or 'tree'}",
-        f"> **상태** · {state}",
-    ]
-    if parent:
-        rows.append("> **상위 키워드** · " + parent)
-    rows.append(WIKI_OVERVIEW_END)
-    overview = "\n".join(rows)
+    """Keep structural metadata in Properties instead of a repeated body card."""
 
     start_count = text.count(WIKI_OVERVIEW_START)
     end_count = text.count(WIKI_OVERVIEW_END)
     if start_count != end_count or start_count > 1:
         raise WoonError("Wiki article overview markers are malformed")
+    updated = text
     if start_count == 1:
-        pattern = re.compile(
-            re.escape(WIKI_OVERVIEW_START) + r".*?" + re.escape(WIKI_OVERVIEW_END),
-            re.DOTALL,
-        )
-        updated = pattern.sub(overview, text, count=1)
-    else:
-        h1 = re.search(rf"(?m)^# {re.escape(title)}\s*$", text)
-        if h1 is None:
-            return _normalize_timeline_heading(text)
-        insertion = h1.end()
-        breadcrumb = re.match(
-            r"\n+<!-- breadcrumb:start -->.*?<!-- breadcrumb:end -->",
-            text[insertion:],
+        updated = re.sub(
+            re.escape(WIKI_OVERVIEW_START) + r".*?" + re.escape(WIKI_OVERVIEW_END) + r"\n*",
+            "",
+            text,
+            count=1,
             flags=re.DOTALL,
         )
-        if breadcrumb is not None:
-            insertion += breadcrumb.end()
-        updated = text[:insertion].rstrip() + "\n\n" + overview + "\n" + text[insertion:].lstrip()
-
+    # Source bodies may contain several leading blank lines. The keyword-tree
+    # renderer canonicalizes the space below H1, so the compiler must emit the
+    # same bytes or every compile/refresh cycle invalidates its receipts.
+    updated = re.sub(r"(?m)^(# .+?)\n{3,}", r"\1\n\n", updated, count=1)
     return _normalize_timeline_heading(updated)
 
 

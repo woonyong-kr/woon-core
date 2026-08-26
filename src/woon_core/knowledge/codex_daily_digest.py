@@ -66,7 +66,7 @@ _SECTION_ORDER = (
     ("성장·학습", {"학습", "개념", "결정", "질문"}),
     ("커리어·창작·자료", {"커리어", "창작", "자료", "프로젝트"}),
 )
-_DIGEST_RENDER_REVISION = "21"
+_DIGEST_RENDER_REVISION = "22"
 _DAILY_ENTRY_LIMIT = 256
 _VISIBLE_LIMIT = 900
 _TITLE_LIMIT = 80
@@ -135,6 +135,7 @@ class CodexDailyExchange:
 
     question: str
     answer: str
+    understanding: str | None = None
     outcome: str | None = None
     attachments: tuple[str, ...] = ()
     facts: tuple[str, ...] = ()
@@ -265,6 +266,10 @@ def entries_from_records(records: list[dict[str, object]]) -> tuple[CodexDailyDi
             "kind",
             "title",
             "summary",
+            "lifecycle_status",
+            "started_on",
+            "ended_on",
+            "occurred_on",
             "wiki_update",
             "wiki_subject_path",
             "new_wiki_reason",
@@ -408,6 +413,8 @@ def _validate_entries(
         for exchange in entry.exchanges:
             _visible_text(exchange.question, "exchange question", _VISIBLE_LIMIT)
             _visible_text(exchange.answer, "exchange answer", _VISIBLE_LIMIT)
+            if exchange.understanding is not None:
+                _visible_text(exchange.understanding, "exchange understanding", _VISIBLE_LIMIT)
             if exchange.outcome is not None:
                 _visible_text(exchange.outcome, "exchange outcome", _VISIBLE_LIMIT)
             if len(exchange.attachments) > 6 or len(set(exchange.attachments)) != len(
@@ -478,6 +485,7 @@ def _entry_id(day: date, entry: CodexDailyDigestEntry) -> str:
                     (
                         exchange.question,
                         exchange.answer,
+                        exchange.understanding or "",
                         exchange.outcome or "",
                         *exchange.attachments,
                         *exchange.facts,
@@ -508,8 +516,7 @@ def _render_daily_block(
     lines = [
         "<!-- woon-codex-digest:start -->",
         "",
-        f"> [!info] {status_title}",
-        f"> {status_message}",
+        f"**{status_title}** — {status_message}",
     ]
     if not entries and not source_bundles:
         lines.extend(
@@ -563,10 +570,7 @@ def _render_daily_block(
         entry_linked_documents = []
     if source_bundles:
         lines.extend(["", "## 대화 찾아보기", ""])
-        lines.append(
-            "정확한 질문과 최종 답변은 로컬 증거 보관소에 보존하고, "
-            "여기에는 작업별 질문 색인과 첨부만 표시한다."
-        )
+        lines.append("원문은 로컬 증거로 보존하고, 여기에는 질문 색인과 Wiki 연결만 둔다.")
         lines.append("")
         lines.extend(
             _render_source_bundles(
@@ -801,14 +805,24 @@ def _daily_exchanges(records: object) -> tuple[CodexDailyExchange, ...]:
             "changes",
             "unresolved",
         }
-        allowed = {"question", "answer", "outcome", "attachments", *detail_fields}
+        allowed = {
+            "question",
+            "answer",
+            "understanding",
+            "outcome",
+            "attachments",
+            *detail_fields,
+        }
         if set(raw).difference(allowed) or not {"question", "answer"}.issubset(raw):
             raise WoonError("Codex daily digest exchange has unsupported fields")
         question, answer = raw["question"], raw["answer"]
+        understanding = raw.get("understanding")
         outcome = raw.get("outcome")
         attachments = raw.get("attachments", [])
         if not isinstance(question, str) or not isinstance(answer, str):
             raise WoonError("Codex daily digest exchange question and answer must be strings")
+        if understanding is not None and not isinstance(understanding, str):
+            raise WoonError("Codex daily digest exchange understanding must be a string or null")
         if outcome is not None and not isinstance(outcome, str):
             raise WoonError("Codex daily digest exchange outcome must be a string or null")
         if not isinstance(attachments, list) or not all(
@@ -823,6 +837,7 @@ def _daily_exchanges(records: object) -> tuple[CodexDailyExchange, ...]:
             CodexDailyExchange(
                 question=question,
                 answer=answer,
+                understanding=understanding,
                 outcome=outcome,
                 attachments=tuple(attachments),
                 facts=details["facts"],
@@ -876,6 +891,8 @@ def _render_entry(
                 f"- **답변** — {exchange.answer}",
             ]
         )
+        if exchange.understanding:
+            lines.append(f"- **내 판단** — {exchange.understanding}")
         if exchange.outcome:
             lines.append(f"- **결과** — {exchange.outcome}")
         if exchange.attachments:
@@ -994,25 +1011,30 @@ def _render_source_bundles(
             for label in _source_attachment_labels(attachments):
                 if label not in attachment_labels:
                     attachment_labels.append(label)
-        visible_title = _callout_text(_human_visible_source_text(title))
-        lines.append(
-            f"> [!note]- {visible_title} · 질문 {len(questions)}개 · 답변 {answer_count}개"
-        )
-        for time_label, question in questions[:_SOURCE_QUESTION_VISIBLE_LIMIT]:
-            lines.append(f"> - **{time_label}** · {question}")
-        hidden_count = len(questions) - _SOURCE_QUESTION_VISIBLE_LIMIT
-        if hidden_count > 0:
-            lines.append(f"> - 나머지 질문 {hidden_count}개는 로컬 원문에 보존됨")
-        if attachment_labels:
-            lines.append(f"> - **첨부** · {', '.join(attachment_labels)}")
+        visible_title = _human_visible_source_text(title)
         related_documents = tuple(
             path
             for path in _source_bundle_related_documents(vault, (bundle,))
             if path not in already_linked
         )
-        if related_documents:
-            links = " · ".join(_related_document_link(vault, path) for path in related_documents)
-            lines.append(f"> - **연결** · {links}")
+        heading = (
+            _related_document_link(vault, related_documents[0], display=visible_title)
+            if related_documents
+            else visible_title
+        )
+        lines.extend([f"### {heading}", "", f"- 질문 {len(questions)}개 · 답변 {answer_count}개"])
+        for time_label, question in questions[:_SOURCE_QUESTION_VISIBLE_LIMIT]:
+            lines.append(f"- **{time_label}** · {question}")
+        hidden_count = len(questions) - _SOURCE_QUESTION_VISIBLE_LIMIT
+        if hidden_count > 0:
+            lines.append(f"- 나머지 질문 {hidden_count}개는 로컬 원문에 보존됨")
+        if attachment_labels:
+            lines.append(f"- **첨부** · {', '.join(attachment_labels)}")
+        if len(related_documents) > 1:
+            links = " · ".join(
+                _related_document_link(vault, path) for path in related_documents[1:]
+            )
+            lines.append(f"- **추가 연결** · {links}")
         lines.append("")
     return lines
 
@@ -1047,10 +1069,6 @@ def _human_visible_source_text(value: str) -> str:
     # Markdown projection removes trailing blanks so restored chats do not
     # create thousands of Git whitespace violations or accidental hard breaks.
     return "\n".join(line.rstrip() for line in text.splitlines())
-
-
-def _callout_text(value: str) -> str:
-    return value.replace("\n", " ").replace("|", "¦").strip()
 
 
 def _source_time_label(value: object) -> str:

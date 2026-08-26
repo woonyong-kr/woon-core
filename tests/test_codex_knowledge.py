@@ -681,6 +681,7 @@ def test_indexes_non_book_resource_link_and_materializes_project_once(tmp_path: 
     assert "project_id: aice-associate-준비" in project_text
     assert 'objective: "회귀와 분류 문제를 스스로 풀고 자격을 취득한다."' in project_text
     assert 'materials: ["회귀 샘플", "분류 샘플", "실습 코드"]' in project_text
+    assert "lifecycle_status: active" in project_text
     assert (
         tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-19"
     ).stat().st_mode & 0o777 == 0o700
@@ -689,6 +690,68 @@ def test_indexes_non_book_resource_link_and_materializes_project_once(tmp_path: 
     assert "`프로젝트`" in daily
     assert "[[../../wiki/resources/ai|AI]]" in daily
     assert "[[../../wiki/personal/projects/aice-associate-준비|AICE Associate 준비]]" in daily
+
+
+def test_closed_project_requires_and_writes_a_verified_end_date(tmp_path: Path) -> None:
+    _settings(tmp_path)
+    invalid = entries_from_records(
+        [
+            {
+                "day": "2026-08-25",
+                "kind": "프로젝트",
+                "title": "하루 프로젝트를 종료한다",
+                "summary": "같은 날 시작하고 종료한 프로젝트다.",
+                "wiki_update": False,
+                "projects": [
+                    {
+                        "title": "하루 프로젝트",
+                        "objective": "하루 안에 검증을 끝낸다.",
+                        "status": "Completed",
+                    }
+                ],
+            }
+        ]
+    )
+    with pytest.raises(
+        WoonError,
+        match="project closed lifecycle requires ended_on or occurred_on",
+    ):
+        record_codex_knowledge_entries(
+            tmp_path,
+            source_range="codex-scope-20260825-closed-project-missing-date",
+            entries=invalid,
+        )
+
+    valid = entries_from_records(
+        [
+            {
+                "day": "2026-08-25",
+                "kind": "프로젝트",
+                "title": "하루 프로젝트를 종료한다",
+                "summary": "같은 날 시작하고 종료한 프로젝트다.",
+                "wiki_update": False,
+                "projects": [
+                    {
+                        "title": "하루 프로젝트",
+                        "objective": "하루 안에 검증을 끝낸다.",
+                        "status": "Completed",
+                        "occurred_on": "2026-08-25",
+                    }
+                ],
+            }
+        ]
+    )
+    record_codex_knowledge_entries(
+        tmp_path,
+        source_range="codex-scope-20260825-closed-project-with-date",
+        entries=valid,
+    )
+
+    project = (tmp_path / "wiki/personal/projects/하루-프로젝트.md").read_text(
+        encoding="utf-8"
+    )
+    assert "lifecycle_status: completed" in project
+    assert "occurred_on: 2026-08-25" in project
 
 
 def test_materializes_new_book_below_one_existing_genre_without_prose(tmp_path: Path) -> None:
@@ -1440,6 +1503,7 @@ def _settings(vault: Path):
 def _write_wiki(vault: Path, relative: str, title: str) -> None:
     path = vault / relative
     path.parent.mkdir(parents=True, exist_ok=True)
+    sequence = sum(1 for candidate in (vault / "wiki").rglob("*.md") if candidate.is_file()) + 1
     path.write_text(
         "---\n"
         "type: Wiki\n"
@@ -1448,6 +1512,7 @@ def _write_wiki(vault: Path, relative: str, title: str) -> None:
         f'summary: "{title}의 핵심 내용을 정리한다."\n'
         "node_kind: topic\n"
         'parent: "[[wiki/concepts/README|개념]]"\n'
+        f"sequence: {sequence}\n"
         f'keywords: ["{title}"]\n'
         "aliases: []\n"
         "view_mode: tree\n"
@@ -1466,17 +1531,32 @@ def _write_wiki(vault: Path, relative: str, title: str) -> None:
 
 def _write_tree_base(vault: Path) -> None:
     nodes = (
-        ("wiki/README.md", "Wiki", "wiki", "root", None),
-        ("wiki/concepts/README.md", "개념", "concepts/README", "hub", "[[wiki/README|Wiki]]"),
-        ("wiki/resources/README.md", "리소스", "resources/README", "hub", "[[wiki/README|Wiki]]"),
-        ("wiki/resources/ai.md", "AI", "resources/ai", "topic", "[[wiki/resources/README|리소스]]"),
-        ("wiki/books/README.md", "책", "books/README", "hub", "[[wiki/README|Wiki]]"),
+        ("wiki/README.md", "Wiki", "wiki", "root", None, None),
+        ("wiki/concepts/README.md", "개념", "concepts/README", "hub", "[[wiki/README|Wiki]]", 1),
+        (
+            "wiki/resources/README.md",
+            "리소스",
+            "resources/README",
+            "hub",
+            "[[wiki/README|Wiki]]",
+            2,
+        ),
+        (
+            "wiki/resources/ai.md",
+            "AI",
+            "resources/ai",
+            "topic",
+            "[[wiki/resources/README|리소스]]",
+            1,
+        ),
+        ("wiki/books/README.md", "책", "books/README", "hub", "[[wiki/README|Wiki]]", 3),
         (
             "wiki/books/ai-machine-learning.md",
             "AI·머신러닝",
             "books/ai-machine-learning",
             "hub",
             "[[wiki/books/README|책]]",
+            1,
         ),
         (
             "wiki/personal/projects/README.md",
@@ -1484,12 +1564,14 @@ def _write_tree_base(vault: Path) -> None:
             "personal/projects/README",
             "hub",
             "[[wiki/README|Wiki]]",
+            4,
         ),
     )
-    for relative, title, canonical_id, node_kind, parent in nodes:
+    for relative, title, canonical_id, node_kind, parent, sequence in nodes:
         path = vault / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         parent_line = f'parent: "{parent}"\n' if parent else ""
+        sequence_line = f"sequence: {sequence}\n" if sequence is not None else ""
         path.write_text(
             "---\n"
             "type: Wiki\n"
@@ -1498,6 +1580,7 @@ def _write_tree_base(vault: Path) -> None:
             f'summary: "{title} 키워드 트리다."\n'
             f"node_kind: {node_kind}\n"
             f"{parent_line}"
+            f"{sequence_line}"
             f'keywords: ["{title}"]\n'
             "aliases: []\n"
             "view_mode: tree\n"

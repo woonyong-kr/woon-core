@@ -9,6 +9,8 @@ batch atomically after reviewing the report.
 from __future__ import annotations
 
 import re
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -32,6 +34,18 @@ NODE_KINDS = {"root", "hub", "topic", "entity", "detail", "decision"}
 VIEW_MODES = {"tree", "linear", "project", "topic-timeline", "article"}
 TREE_VIEW_KINDS = {"root", "hub", "topic", "entity"}
 FLATTEN_GROUP_MAX_CHILDREN = 20
+STAGED_HUB_CHILD_THRESHOLD = 10
+STAGED_PROJECT_CHILD_THRESHOLD = 6
+LIFECYCLE_STATES = {
+    "idea",
+    "planned",
+    "active",
+    "paused",
+    "completed",
+    "cancelled",
+    "archived",
+}
+TEMPORAL_ENTITY_KINDS = {"project", "person", "career", "application"}
 LEGACY_TREE_FIELDS = {"parent_topics", "parent_moc", "map_role", "mindmap_role"}
 _WIKILINK_RE = re.compile(r"^\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]$")
 _BODY_WIKILINK_RE = re.compile(r"!?\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
@@ -61,6 +75,10 @@ class WikiTreeNode:
     sequence: float | None
     knowledge_state: str
     navigation_groups: tuple[WikiNavigationGroup, ...]
+    lifecycle_status: str
+    started_on: date | None
+    ended_on: date | None
+    occurred_on: date | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +242,23 @@ def load_wiki_tree(
                 issues.append(f"{relative}: only wiki/README.md may be root")
             parent_path = wikilink_path(parent, relative, issues)
         sequence = _optional_number(metadata.get("sequence"), relative, issues)
+        lifecycle_status = _optional_text(
+            metadata.get("lifecycle_status"), "lifecycle_status", relative, issues
+        ).casefold()
+        started_on = _optional_date(metadata.get("started_on"), "started_on", relative, issues)
+        ended_on = _optional_date(metadata.get("ended_on"), "ended_on", relative, issues)
+        occurred_on = _optional_date(
+            metadata.get("occurred_on"), "occurred_on", relative, issues
+        )
+        issues.extend(
+            _temporal_issues(
+                relative,
+                lifecycle_status=lifecycle_status,
+                started_on=started_on,
+                ended_on=ended_on,
+                occurred_on=occurred_on,
+            )
+        )
         if canonical_id:
             key = canonical_id.casefold()
             if key in canonical:
@@ -257,6 +292,10 @@ def load_wiki_tree(
                 sequence=sequence,
                 knowledge_state=state,
                 navigation_groups=navigation_groups,
+                lifecycle_status=lifecycle_status,
+                started_on=started_on,
+                ended_on=ended_on,
+                occurred_on=occurred_on,
             )
         )
     by_path = {node.relative_path: node for node in nodes}
@@ -282,30 +321,11 @@ def render_wiki_tree_view(
 
     descendants = _descendants(node.relative_path, children)
     direct = children.get(node.relative_path, ())
-    parent = nodes.get(node.parent_path) if node.parent_path else None
-    if node.node_kind in {"root", "hub", "entity"} or is_compact_link_page(node):
-        # Navigation pages are intentionally link-only. Metadata and summaries
-        # remain in frontmatter and the destination pages instead of being
-        # repeated in the index that a person scans.
-        updated = _normalize_h1_spacing(_strip_marker_block(text, OVERVIEW_START, OVERVIEW_END))
-    else:
-        overview_rows = [
-            OVERVIEW_START,
-            "> [!info] 한눈에 보기",
-            f"> **한 줄 정리** · {node.summary}",
-            f"> **종류** · {node.node_kind} · {node.view_mode}",
-            f"> **대표 키워드** · {' · '.join(node.keywords)}",
-            f"> **상태** · {node.knowledge_state}",
-        ]
-        if parent is not None:
-            overview_rows.append(
-                f"> **상위 키워드** · [[{_without_suffix(parent.relative_path)}|{parent.title}]]"
-            )
-        overview_rows.append(f"> **하위 문서** · 직접 {len(direct)}개")
-        overview_rows.append(OVERVIEW_END)
-        updated = _replace_or_insert_after_h1(
-            text, OVERVIEW_START, OVERVIEW_END, "\n".join(overview_rows)
-        )
+    # Structural properties belong to frontmatter/Obsidian Properties.  A
+    # generated callout repeated title, kind, state, parent, and child count
+    # without helping a reader understand the subject, so every Wiki page now
+    # keeps only its authored semantic summary and navigation in the body.
+    updated = _normalize_h1_spacing(_strip_marker_block(text, OVERVIEW_START, OVERVIEW_END))
 
     if node.entity_kind == "book":
         updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
@@ -337,20 +357,32 @@ def render_wiki_tree_view(
                 (item for item in descendants if item.relative_path not in direct_paths),
                 key=lambda item: (-item.updated.toordinal(), item.title),
             )[:10]
+            latest_heading = "최신 하위 문서"
+            if not latest and node.node_kind == "entity" and related:
+                latest = sorted(
+                    related.get(node.relative_path, ()),
+                    key=lambda item: (-item.updated.toordinal(), item.title.casefold()),
+                )[:10]
+                latest_heading = "최신 관련 문서"
             if latest:
                 latest_rows = [
                     LATEST_START,
-                    *(_render_keyword_link(item, include_sequence=False) for item in latest),
+                    *(
+                        _render_keyword_link(item, include_sequence=False, label=label)
+                        for item, label in zip(
+                            latest, _distinct_keyword_labels(latest), strict=True
+                        )
+                    ),
                     LATEST_END,
                 ]
                 updated = _replace_or_append_section(
                     updated,
-                    "최신 하위 문서",
+                    latest_heading,
                     LATEST_START,
                     LATEST_END,
                     "\n".join(latest_rows),
                 )
-                updated = _normalize_latest_heading(updated, "최신 하위 문서")
+                updated = _normalize_latest_heading(updated, latest_heading)
             else:
                 updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
     elif node.node_kind == "entity" and related and related.get(node.relative_path):
@@ -361,7 +393,10 @@ def render_wiki_tree_view(
         )[:10]
         latest_rows = [
             LATEST_START,
-            *(_render_keyword_link(item, include_sequence=False) for item in latest),
+            *(
+                _render_keyword_link(item, include_sequence=False, label=label)
+                for item, label in zip(latest, _distinct_keyword_labels(latest), strict=True)
+            ),
             LATEST_END,
         ]
         updated = _replace_or_append_section(
@@ -524,6 +559,43 @@ def _date_value(value: object, key: str, relative: str, issues: list[str]) -> da
     return date.min
 
 
+def _optional_date(
+    value: object, key: str, relative: str, issues: list[str]
+) -> date | None:
+    if value in {None, ""}:
+        return None
+    parsed = _date_value(value, key, relative, issues)
+    return None if parsed == date.min else parsed
+
+
+def _temporal_issues(
+    relative: str,
+    *,
+    lifecycle_status: str,
+    started_on: date | None,
+    ended_on: date | None,
+    occurred_on: date | None,
+) -> list[str]:
+    issues: list[str] = []
+    if not lifecycle_status:
+        if any(value is not None for value in (started_on, ended_on, occurred_on)):
+            issues.append(f"{relative}: temporal dates require lifecycle_status")
+        return issues
+    if lifecycle_status not in LIFECYCLE_STATES:
+        issues.append(f"{relative}: unsupported lifecycle_status {lifecycle_status!r}")
+    if occurred_on is not None and any(value is not None for value in (started_on, ended_on)):
+        issues.append(f"{relative}: occurred_on cannot be combined with a date range")
+    if started_on is not None and ended_on is not None and ended_on < started_on:
+        issues.append(f"{relative}: ended_on cannot precede started_on")
+    if lifecycle_status in {"completed", "cancelled", "archived"} and not (
+        ended_on or occurred_on
+    ):
+        issues.append(f"{relative}: closed lifecycle requires ended_on or occurred_on")
+    if lifecycle_status in {"idea", "planned", "active", "paused"} and ended_on is not None:
+        issues.append(f"{relative}: open lifecycle cannot have ended_on")
+    return issues
+
+
 def _optional_number(value: object, relative: str, issues: list[str]) -> float | None:
     if value is None:
         return None
@@ -590,7 +662,18 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
 
     for node in nodes:
         if node.node_kind == "entity" and node.entity_kind not in {"book", "resource"}:
-            issues.extend(_entity_link_index_issues(node, texts[node.relative_path]))
+            if node.entity_kind in TEMPORAL_ENTITY_KINDS and not node.lifecycle_status:
+                issues.append(
+                    f"{node.relative_path}: temporal entity requires lifecycle_status"
+                )
+            issues.extend(
+                _entity_root_issues(
+                    node,
+                    texts[node.relative_path],
+                    children.get(node.relative_path, ()),
+                    texts,
+                )
+            )
         if node.entity_kind == "book":
             if not _has_ancestor(node, books_path, by_path):
                 issues.append(f"{node.relative_path}: book entity must stay below the books root")
@@ -611,19 +694,52 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
 
 
 def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> list[str]:
-    """Keep explicit display groups complete and anchored to the canonical parent tree."""
+    """Require meaningful sibling order and staged navigation for dense subjects."""
 
     children = _children_by_parent(tuple(nodes))
     issues: list[str] = []
     for parent in nodes:
+        direct = children.get(parent.relative_path, ())
+        supports_groups = parent.node_kind in {"root", "hub", "topic"} or (
+            parent.node_kind == "entity" and parent.view_mode == "project"
+        )
+        if len(direct) > 1 and not parent.navigation_groups:
+            missing_sequence = tuple(child for child in direct if child.sequence is None)
+            if missing_sequence:
+                issues.append(
+                    f"{parent.relative_path}: ordered navigation requires sequence on every "
+                    "direct child: "
+                    + ", ".join(child.canonical_id for child in missing_sequence)
+                )
+            sequence_counts = Counter(
+                child.sequence for child in direct if child.sequence is not None
+            )
+            repeated = sorted(
+                sequence for sequence, count in sequence_counts.items() if count > 1
+            )
+            if repeated:
+                issues.append(
+                    f"{parent.relative_path}: direct child sequence values must be unique: "
+                    + ", ".join(_format_sequence(sequence) for sequence in repeated)
+                )
+        staged_threshold = (
+            STAGED_PROJECT_CHILD_THRESHOLD
+            if parent.node_kind == "entity" and parent.view_mode == "project"
+            else STAGED_HUB_CHILD_THRESHOLD
+        )
+        if supports_groups and len(direct) > staged_threshold and not parent.navigation_groups:
+            issues.append(
+                f"{parent.relative_path}: {len(direct)} direct children require explicit "
+                "stage groups instead of one flat list"
+            )
         if not parent.navigation_groups:
             continue
-        if parent.node_kind != "hub":
+        if not supports_groups:
             issues.append(
-                f"{parent.relative_path}: navigation_groups are allowed only on hub pages"
+                f"{parent.relative_path}: navigation_groups are allowed only on root, hub, "
+                "topic, or project entity pages"
             )
             continue
-        direct = children.get(parent.relative_path, ())
         direct_by_id = {child.canonical_id: child for child in direct}
         listed = [child_id for group in parent.navigation_groups for child_id in group.child_ids]
         duplicates = sorted(
@@ -664,6 +780,10 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
     return issues
 
 
+def _format_sequence(value: float) -> str:
+    return str(int(value)) if value.is_integer() else str(value)
+
+
 def _has_ancestor(node: WikiTreeNode, ancestor: str, by_path: dict[str, WikiTreeNode]) -> bool:
     current = node
     while current.parent_path is not None:
@@ -697,20 +817,52 @@ def _book_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
 
 
 def _resource_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
-    """Require resource keyword pages to contain hyperlinks and no explanation."""
+    """Require resource pages to contain links, optionally under one text keyword level."""
 
     _, body = split_markdown(strip_generated_wiki_views(text))
     body = re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
     body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    group_open = False
+    group_has_link = False
     for line in body.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
-        if re.fullmatch(r"-\s+\[\[[^\]]+\]\]", stripped):
+        indent = len(line) - len(line.lstrip())
+        if indent == 0 and re.fullmatch(r"-\s+[^\[\n][^\n]*", stripped):
+            if group_open and not group_has_link:
+                return [
+                    f"{node.relative_path}: every resource keyword must contain at least "
+                    "one indented hyperlink row"
+                ]
+            group_open = True
+            group_has_link = False
             continue
-        if re.fullmatch(r"-\s+\[[^\]]+\]\(https://[^\s)]+\)", stripped):
+        is_wikilink = re.fullmatch(r"-\s+\[\[[^\]]+\]\]", stripped) is not None
+        is_web_link = (
+            re.fullmatch(r"-\s+\[[^\]]+\]\(https://[^\s)]+\)", stripped) is not None
+        )
+        if (is_wikilink or is_web_link) and indent == 0:
+            if group_open and not group_has_link:
+                return [
+                    f"{node.relative_path}: every resource keyword must contain at least "
+                    "one indented hyperlink row"
+                ]
+            group_open = False
+            group_has_link = False
             continue
-        return [f"{node.relative_path}: resource topic body must contain only hyperlink rows"]
+        if (is_wikilink or is_web_link) and indent > 0 and group_open:
+            group_has_link = True
+            continue
+        return [
+            f"{node.relative_path}: resource topic body must contain only hyperlink rows "
+            "or one text keyword level"
+        ]
+    if group_open and not group_has_link:
+        return [
+            f"{node.relative_path}: every resource keyword must contain at least one "
+            "indented hyperlink row"
+        ]
     return []
 
 
@@ -727,23 +879,32 @@ def _resource_link_rows(text: str) -> tuple[str, ...]:
     )
 
 
-def _entity_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
-    """Keep every entity landing page as a compact keyword-link index."""
+def _entity_root_issues(
+    node: WikiTreeNode,
+    text: str,
+    direct: tuple[WikiTreeNode, ...],
+    texts: dict[str, str],
+) -> list[str]:
+    """Keep current knowledge on the entity root and chronology in one child."""
 
     _, body = split_markdown(strip_generated_wiki_views(text))
-    body = re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
-    body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
-    for line in body.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("##"):
-            continue
-        if re.fullmatch(r"-\s+\[\[[^\]]+\]\]", stripped):
-            continue
-        return [
-            f"{node.relative_path}: entity landing page must contain only "
-            "headings and hyperlink rows"
-        ]
-    return []
+    semantic = re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
+    semantic = re.sub(r"<!--.*?-->", "", semantic, flags=re.DOTALL).strip()
+    issues: list[str] = []
+    if not any(
+        line.strip() and not line.lstrip().startswith("#") for line in semantic.splitlines()
+    ):
+        issues.append(f"{node.relative_path}: entity root must contain current subject knowledge")
+    history = tuple(
+        child
+        for child in direct
+        if split_markdown(texts[child.relative_path])[0].get("entity_section") == "history"
+    )
+    if len(history) != 1:
+        issues.append(
+            f"{node.relative_path}: entity root requires exactly one separate history child"
+        )
+    return issues
 
 
 def _cycle_and_reachability_issues(nodes: list[WikiTreeNode]) -> list[str]:
@@ -869,10 +1030,44 @@ def _render_subtree(
     return rows
 
 
-def _render_keyword_link(node: WikiTreeNode, *, include_sequence: bool = True) -> str:
+def _render_keyword_link(
+    node: WikiTreeNode, *, include_sequence: bool = True, label: str | None = None
+) -> str:
     sequence = f"{node.sequence:g}. " if include_sequence and node.sequence is not None else ""
-    label = _compact_keyword_label(node.keywords[0])
-    return f"- {sequence}[[{_without_suffix(node.relative_path)}|{label}]]"
+    display_label = label or _compact_keyword_label(node.keywords[0])
+    period = _temporal_period(node)
+    suffix = f" · {period}" if period else ""
+    return f"- {sequence}[[{_without_suffix(node.relative_path)}|{display_label}]]{suffix}"
+
+
+def _temporal_period(node: WikiTreeNode) -> str:
+    if node.occurred_on is not None:
+        return node.occurred_on.isoformat()
+    if node.started_on is not None and node.ended_on is not None:
+        return f"{node.started_on.isoformat()} → {node.ended_on.isoformat()}"
+    if node.started_on is not None:
+        return f"{node.started_on.isoformat()} →"
+    if node.ended_on is not None:
+        return f"→ {node.ended_on.isoformat()}"
+    return ""
+
+
+def _distinct_keyword_labels(nodes: Sequence[WikiTreeNode]) -> tuple[str, ...]:
+    """Keep compact labels unless siblings would become indistinguishable."""
+
+    compact = tuple(_compact_keyword_label(node.keywords[0]) for node in nodes)
+    compact_counts = Counter(label.casefold() for label in compact)
+    candidates = tuple(
+        node.keywords[0].split(" — ", maxsplit=1)[1].strip()
+        if compact_counts[label.casefold()] > 1 and " — " in node.keywords[0]
+        else label
+        for node, label in zip(nodes, compact, strict=True)
+    )
+    candidate_counts = Counter(label.casefold() for label in candidates)
+    return tuple(
+        node.title if candidate_counts[label.casefold()] > 1 else label
+        for node, label in zip(nodes, candidates, strict=True)
+    )
 
 
 def _render_navigation_children(
@@ -891,6 +1086,13 @@ def _render_navigation_children(
         )
 
     rows: list[str] = []
+    labels = dict(
+        zip(
+            (child.relative_path for child in direct),
+            _distinct_keyword_labels(direct),
+            strict=True,
+        )
+    )
     for child in direct:
         grouped = children.get(child.relative_path, ())
         flatten = (
@@ -899,11 +1101,20 @@ def _render_navigation_children(
             and 0 < len(grouped) <= FLATTEN_GROUP_MAX_CHILDREN
         )
         if not flatten:
-            rows.append(_render_keyword_link(child, include_sequence=include_sequence))
+            rows.append(
+                _render_keyword_link(
+                    child,
+                    include_sequence=include_sequence,
+                    label=labels[child.relative_path],
+                )
+            )
             continue
         rows.append(f"- {_compact_keyword_label(child.keywords[0])}")
+        grouped_labels = _distinct_keyword_labels(grouped)
         rows.extend(
-            "  " + _render_keyword_link(item, include_sequence=include_sequence) for item in grouped
+            "  "
+            + _render_keyword_link(item, include_sequence=include_sequence, label=label)
+            for item, label in zip(grouped, grouped_labels, strict=True)
         )
     return tuple(rows)
 
@@ -919,6 +1130,13 @@ def _render_explicit_navigation_groups(
     """Render hub-owned text labels without changing canonical parent relations."""
 
     direct_by_id = {child.canonical_id: child for child in direct}
+    direct_labels = dict(
+        zip(
+            (child.canonical_id for child in direct),
+            _distinct_keyword_labels(direct),
+            strict=True,
+        )
+    )
     rows: list[str] = []
     for group in parent.navigation_groups:
         rows.append(f"- {group.label}")
@@ -927,7 +1145,14 @@ def _render_explicit_navigation_groups(
             if parent.canonical_id == "resources/README" and child.node_kind == "topic":
                 rows.extend("  " + row for row in _resource_link_rows(texts[child.relative_path]))
             else:
-                rows.append("  " + _render_keyword_link(child, include_sequence=include_sequence))
+                rows.append(
+                    "  "
+                    + _render_keyword_link(
+                        child,
+                        include_sequence=include_sequence,
+                        label=direct_labels[child_id],
+                    )
+                )
     return tuple(rows)
 
 
