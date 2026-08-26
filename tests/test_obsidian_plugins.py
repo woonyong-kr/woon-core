@@ -16,6 +16,11 @@ from woon_core.calendar.projection import (
 from woon_core.errors import WoonError
 from woon_core.knowledge import obsidian_plugins
 from woon_core.knowledge.obsidian_plugins import (
+    FULL_CALENDAR_REMASTERED_ID,
+    FULL_CALENDAR_SOURCE_COLOR,
+    LEGACY_CONTEXT_CALENDAR_ID,
+    LEGACY_CONTEXT_GRAPH_ID,
+    LEGACY_SIMPLE_CALENDAR_ID,
     LINK_CALENDAR_ID,
     LINK_CALENDAR_MANUAL_ATTESTATION_CHECKS,
     LINK_CALENDAR_PROFILE_ID,
@@ -23,11 +28,6 @@ from woon_core.knowledge.obsidian_plugins import (
     LINK_CALENDAR_SOURCE,
     LINK_CALENDAR_VERSION,
     LINKED_GRAPH_ID,
-    FULL_CALENDAR_REMASTERED_ID,
-    FULL_CALENDAR_SOURCE_COLOR,
-    LEGACY_CONTEXT_CALENDAR_ID,
-    LEGACY_CONTEXT_GRAPH_ID,
-    LEGACY_SIMPLE_CALENDAR_ID,
     LINKED_GRAPH_VERSION,
     NOTION_BASES_ID,
     PRISMA_CALENDAR_EVENTS_DIRECTORY,
