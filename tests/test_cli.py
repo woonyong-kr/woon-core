@@ -16,7 +16,6 @@ from woon_core.errors import WoonError
 from woon_core.knowledge.compiled_wiki import RevisionReconciliationReport
 from woon_core.knowledge.mail_schedule_automation import MailScheduleRecordResult
 from woon_core.knowledge.orchestration import OrchestratorSettings
-from woon_core.knowledge.reconciliation import ReconciliationAudit
 from woon_core.knowledge.schedule_bridge import ScheduleReceipt
 from woon_core.skills import RoutingCaseResult, RoutingEvalResult
 
@@ -24,7 +23,7 @@ from woon_core.skills import RoutingCaseResult, RoutingEvalResult
 def test_version() -> None:
     output = StringIO()
     run(["version"], output)
-    assert output.getvalue().strip() == "0.5.5"
+    assert output.getvalue().strip() == "0.5.6"
 
 
 def test_unknown_command_fails() -> None:
@@ -496,7 +495,7 @@ def test_knowledge_records_empty_mail_window_through_the_local_cli(
     assert '"candidate_count": 0' in output.getvalue()
 
 
-@pytest.mark.parametrize("command", ["source-plan", "source-audit", "source-verify-private"])
+@pytest.mark.parametrize("command", ["source-plan", "source-audit"])
 def test_knowledge_rejects_current_vault_as_external_source(tmp_path: Path, command: str) -> None:
     arguments = [
         "knowledge",
@@ -511,50 +510,6 @@ def test_knowledge_rejects_current_vault_as_external_source(tmp_path: Path, comm
 
     with pytest.raises(WoonError, match="self-source catalog is retired"):
         run(arguments, StringIO())
-
-
-def test_knowledge_verifies_private_source_catalog_without_reconciliation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = tmp_path / "source"
-    vault = tmp_path / "vault"
-    source.mkdir()
-    vault.mkdir()
-    captured: dict[str, Path] = {}
-
-    def verify(source_root: Path, target_root: Path, catalog: Path, ledger: Path):
-        captured.update(
-            source=source_root,
-            target=target_root,
-            catalog=catalog,
-            ledger=ledger,
-        )
-        return ReconciliationAudit(1, 0, 1, 0, 0, ())
-
-    monkeypatch.setattr(cli, "verify_private_source_catalog", verify)
-    output = StringIO()
-
-    run(
-        [
-            "knowledge",
-            "source-verify-private",
-            "--source",
-            str(source),
-            "--source-name",
-            "private-study",
-            "--vault",
-            str(vault),
-        ],
-        output,
-    )
-
-    assert captured == {
-        "source": source,
-        "target": vault,
-        "catalog": vault / "catalog/sources/private-study.yaml",
-        "ledger": vault / "catalog/reconciliation/private-study.yaml",
-    }
-    assert '"verified": 1' in output.getvalue()
 
 
 @pytest.mark.parametrize("source_kind", ["child", "parent", "symlink-child"])

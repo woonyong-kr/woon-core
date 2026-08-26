@@ -1383,6 +1383,70 @@ def wiki_base_contract_issues(vault: Path) -> list[str]:
     return issues
 
 
+def source_catalog_boundary_issues(vault: Path) -> list[str]:
+    """Reject catalogs that leave an approved private source outside the Wiki vault."""
+
+    issues: list[str] = []
+    catalog_root = vault / "catalog/sources"
+    for path in sorted(catalog_root.glob("*.yaml")):
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as error:
+            issues.append(f"{path.relative_to(vault)}: invalid source catalog: {error}")
+            continue
+        records = payload.get("records", []) if isinstance(payload, dict) else []
+        wiki_subject = payload.get("wiki_subject") if isinstance(payload, dict) else None
+        subject_text = ""
+        if not isinstance(wiki_subject, str) or not wiki_subject.startswith("wiki/"):
+            issues.append(
+                f"{path.relative_to(vault)}: source catalog requires a Wiki subject"
+            )
+        elif not (vault / wiki_subject).is_file():
+            issues.append(
+                f"{path.relative_to(vault)}: source catalog Wiki subject is missing"
+            )
+        else:
+            subject_text = (vault / wiki_subject).read_text(encoding="utf-8")
+        if not isinstance(records, list):
+            issues.append(f"{path.relative_to(vault)}: source catalog records must be a list")
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                issues.append(f"{path.relative_to(vault)}: invalid source catalog record")
+                continue
+            state = record.get("state")
+            if state in {"external-private", "external-private-existing"}:
+                issues.append(
+                    f"{path.relative_to(vault)}: external-private source must move into "
+                    "wiki/private/_sources/**"
+                )
+                continue
+            if state != "canonical":
+                continue
+            target = record.get("target")
+            expected = record.get("target_sha256")
+            if not isinstance(target, str) or not target.startswith(
+                "wiki/private/_sources/"
+            ):
+                issues.append(
+                    f"{path.relative_to(vault)}: canonical source target escapes the Wiki boundary"
+                )
+                continue
+            target_path = vault / target
+            if not target_path.is_file() or not isinstance(expected, str):
+                issues.append(f"{path.relative_to(vault)}: canonical source target is missing")
+                continue
+            digest = hashlib.sha256(target_path.read_bytes()).hexdigest()
+            if digest != expected:
+                issues.append(f"{path.relative_to(vault)}: canonical source target hash drift")
+            if subject_text and f"[[{target}" not in subject_text:
+                issues.append(
+                    f"{path.relative_to(vault)}: canonical source target is not linked "
+                    "from its Wiki subject"
+                )
+    return issues
+
+
 def main() -> int:
     files = [path for path in iter_markdown() if not is_calendar_projection_markdown(path)]
     index = target_index(files)
@@ -1447,6 +1511,7 @@ def main() -> int:
             "wiki/private/_sources/novel and navigation belongs in wiki/private/novel"
         )
     issues["source_boundary_violations"].extend(audit_source_boundary(VAULT))
+    issues["source_policy_violations"].extend(source_catalog_boundary_issues(VAULT))
 
     issues["retired_external_video_boundary_violations"].extend(
         retired_external_video_boundary_issues(VAULT)

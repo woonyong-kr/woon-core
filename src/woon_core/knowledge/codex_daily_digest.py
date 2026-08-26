@@ -78,7 +78,7 @@ _SENSITIVE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _RELATED_ROOTS = ("wiki/",)
-_CANONICAL_WIKI_PATH_RE = re.compile(r"(?P<path>(?:wiki|brain/wiki)/[^\s\]\)>\"'`]+?\.md)(?::\d+)?")
+_CANONICAL_WIKI_PATH_RE = re.compile(r"(?P<path>wiki/[^\s\]\)>\"'`]+?\.md)(?::\d+)?")
 _WIKI_TITLE_INDEX_CACHE: dict[str, tuple[tuple[int, int, int], tuple[tuple[str, str], ...]]] = {}
 _KEYWORD_CANDIDATES = (
     "Obsidian",
@@ -1245,19 +1245,7 @@ def _canonical_wiki_candidate(vault: Path, raw_path: str) -> str | None:
     candidate = raw_path.strip().lstrip("./")
     if candidate.startswith("wiki/") and (vault / candidate).is_file():
         return candidate
-    if not candidate.startswith("brain/wiki/"):
-        return None
-
-    # ``brain/wiki`` was retired.  A historical path can be mapped only when
-    # its basename resolves to exactly one current canonical Wiki page.
-    matches = tuple(
-        path
-        for path in (vault / "wiki").rglob(Path(candidate).name)
-        if "_sources" not in path.relative_to(vault / "wiki").parts
-    )
-    if len(matches) != 1 or not matches[0].is_file():
-        return None
-    return matches[0].relative_to(vault).as_posix()
+    return None
 
 
 def _wiki_title_index(vault: Path) -> tuple[tuple[str, str], ...]:

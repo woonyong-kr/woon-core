@@ -795,6 +795,51 @@ def test_resource_topic_allows_one_text_keyword_level_above_links(tmp_path: Path
     assert report.issues == ()
 
 
+def test_large_resource_topic_stays_as_one_link_on_the_flat_root(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/resources/README.md",
+        title="리소스",
+        canonical_id="resources/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("리소스",),
+        extra=(
+            "navigation_groups:\n- label: 저장소\n"
+            "  children:\n  - resources/repositories\n"
+        ),
+    )
+    links = "\n".join(
+        f"- [[assets/resource-{index}.pdf|자료 {index}]]" for index in range(21)
+    )
+    _write_page(
+        tmp_path,
+        "wiki/resources/repositories.md",
+        title="학습 저장소",
+        canonical_id="resources/repositories",
+        node_kind="topic",
+        parent="[[wiki/resources/README|리소스]]",
+        keywords=("학습 저장소",),
+        body=links,
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    catalog = report.pages[tmp_path / "wiki/resources/README.md"].decode("utf-8")
+    assert "- 저장소\n  - [[wiki/resources/repositories|학습 저장소]]" in catalog
+    assert "[[assets/resource-0.pdf|자료 0]]" not in catalog
+
+
 def test_resource_topic_rejects_keyword_without_a_link(tmp_path: Path) -> None:
     _write_page(
         tmp_path,

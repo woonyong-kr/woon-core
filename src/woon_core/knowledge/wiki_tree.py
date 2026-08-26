@@ -769,7 +769,8 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
                 if child is None:
                     continue
                 if parent.canonical_id == "resources/README" and child.node_kind == "topic":
-                    link_count += len(_resource_link_rows(texts[child.relative_path]))
+                    row_count = len(_resource_link_rows(texts[child.relative_path]))
+                    link_count += row_count if row_count <= FLATTEN_GROUP_MAX_CHILDREN else 1
                 else:
                     link_count += 1
             if link_count > FLATTEN_GROUP_MAX_CHILDREN:
@@ -1143,7 +1144,18 @@ def _render_explicit_navigation_groups(
         for child_id in group.child_ids:
             child = direct_by_id[child_id]
             if parent.canonical_id == "resources/README" and child.node_kind == "topic":
-                rows.extend("  " + row for row in _resource_link_rows(texts[child.relative_path]))
+                resource_rows = _resource_link_rows(texts[child.relative_path])
+                if len(resource_rows) <= FLATTEN_GROUP_MAX_CHILDREN:
+                    rows.extend("  " + row for row in resource_rows)
+                else:
+                    rows.append(
+                        "  "
+                        + _render_keyword_link(
+                            child,
+                            include_sequence=include_sequence,
+                            label=direct_labels[child_id],
+                        )
+                    )
             else:
                 rows.append(
                     "  "

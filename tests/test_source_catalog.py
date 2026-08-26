@@ -6,10 +6,7 @@ import pytest
 import yaml
 
 from woon_core.errors import WoonError
-from woon_core.knowledge.reconciliation import (
-    audit_reconciliation,
-    verify_private_source_catalog,
-)
+from woon_core.knowledge.reconciliation import audit_reconciliation
 from woon_core.knowledge.source_catalog import (
     load_source_catalog,
     plan_source_catalog,
@@ -42,12 +39,7 @@ def test_source_catalog_classifies_each_file_without_absolute_paths(tmp_path: Pa
     (source / ".gitkeep").touch()
     (source / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
 
-    plan = plan_source_catalog(
-        source,
-        target,
-        "vault",
-        protected_patterns=("private/**",),
-    )
+    plan = plan_source_catalog(source, target, "vault")
 
     states = {record.locator: record.state for record in plan.records}
     assert states == {
@@ -55,7 +47,7 @@ def test_source_catalog_classifies_each_file_without_absolute_paths(tmp_path: Pa
         "metadata.md": "metadata-only",
         "moved-title.md": "semantic-match",
         "new.md": "new",
-        "private/raw.txt": "external-private",
+        "private/raw.txt": "new",
         "renamed.md": "content-alias",
         "same.md": "identical",
     }
@@ -85,46 +77,6 @@ def test_source_catalog_output_is_deterministic_and_readable(tmp_path: Path) -> 
     assert raw["summary"] == {"new": 1}
     assert raw["records"][0]["locator"] == "한글 문서.md"
     assert "%ED%95%9C%EA%B8%80" in raw["records"][0]["source_id"]
-
-
-def test_verifies_external_private_catalog_without_copying_source_body(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    target = tmp_path / "target"
-    source.mkdir()
-    target.mkdir()
-    original = source / "private-study.ipynb"
-    original.write_text('{"cells": []}\n', encoding="utf-8")
-    catalog = target / "catalog/sources/private-study.yaml"
-    ledger = target / "catalog/reconciliation/private-study.yaml"
-    write_source_catalog(
-        plan_source_catalog(source, target, "private-study", protected_patterns=("**",)),
-        catalog,
-    )
-
-    audit = verify_private_source_catalog(source, target, catalog, ledger)
-
-    assert audit.complete is True
-    assert audit.verified == 1
-    assert not (target / "private-study.ipynb").exists()
-    recorded = yaml.safe_load(ledger.read_text(encoding="utf-8"))["records"][0]
-    assert recorded["action"] == "external-private"
-    assert recorded["target"] is None
-
-
-def test_private_verification_rejects_a_non_private_catalog(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    target = tmp_path / "target"
-    source.mkdir()
-    target.mkdir()
-    (source / "new.md").write_text("# 신규\n", encoding="utf-8")
-    catalog = target / "catalog/sources/source.yaml"
-    ledger = target / "catalog/reconciliation/source.yaml"
-    write_source_catalog(plan_source_catalog(source, target, "source"), catalog)
-
-    with pytest.raises(WoonError, match="external-private records only"):
-        verify_private_source_catalog(source, target, catalog, ledger)
-
-    assert not ledger.exists()
 
 
 @pytest.mark.parametrize("source_kind", ["same", "child", "parent", "symlink-child"])

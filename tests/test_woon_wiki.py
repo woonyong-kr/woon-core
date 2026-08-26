@@ -15,10 +15,8 @@ from woon_core.knowledge.woon_wiki import (
     WIKI_TIMELINE_START,
     InterviewAnswerRevision,
     WikiDelta,
-    apply_legacy_wiki_merge,
     apply_prepared_wiki_pages,
     compiled_wiki_contract,
-    prepare_legacy_wiki_merge,
     prepare_wiki_article_view_refresh,
     prepare_wiki_corpus_migration,
     prepare_wiki_pages,
@@ -731,31 +729,6 @@ def test_state_authorities_cannot_skip_verification_or_reopen_retired_page() -> 
             requested_state="근거 확인됨",
             authority="evidence-compiler",
         )
-
-
-def test_legacy_subject_roots_merge_into_wiki_and_rewrite_links(tmp_path: Path) -> None:
-    source = tmp_path / "projects/aice.md"
-    source.parent.mkdir(parents=True)
-    source.write_text(
-        "---\ntype: Project\ntitle: AICE 준비\n---\n\n# AICE 준비\n\n시험을 준비한다.\n",
-        encoding="utf-8",
-    )
-    index = tmp_path / "projects/README.md"
-    index.write_text("---\ntitle: 프로젝트\n---\n", encoding="utf-8")
-    home = tmp_path / "brain/home.md"
-    home.parent.mkdir(parents=True)
-    home.write_text("[[projects/aice|AICE 준비]]\n", encoding="utf-8")
-
-    report = prepare_legacy_wiki_merge(tmp_path, migration_day=date(2026, 8, 24))
-    apply_legacy_wiki_merge(tmp_path, report)
-
-    target = tmp_path / "wiki/personal/projects/aice-준비.md"
-    assert report.subject_count == 1
-    assert target.is_file()
-    assert not source.exists()
-    assert not index.exists()
-    assert _metadata(target.read_text(encoding="utf-8"))["facets"] == ["프로젝트"]
-    assert "[[wiki/personal/projects/aice-준비|AICE 준비]]" in home.read_text(encoding="utf-8")
 
 
 def test_interview_answer_keeps_current_and_archives_the_previous_revision(

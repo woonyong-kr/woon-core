@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import tempfile
 import unittest
@@ -18,6 +19,55 @@ SPEC = importlib.util.spec_from_file_location("audit_vault_health", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 AUDIT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIT)
+
+
+class SourceCatalogBoundaryTests(unittest.TestCase):
+    def test_rejects_external_private_and_verifies_canonical_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = root / "catalog/sources/example.yaml"
+            catalog.parent.mkdir(parents=True)
+            catalog.write_text(
+                "version: 1\nwiki_subject: wiki/example.md\nrecords:\n"
+                "- state: external-private\n  target: null\n",
+                encoding="utf-8",
+            )
+
+            issues = AUDIT.source_catalog_boundary_issues(root)
+
+            self.assertTrue(any("must move" in issue for issue in issues))
+
+            target = root / "wiki/private/_sources/knowledge/local-only/example/data.txt"
+            target.parent.mkdir(parents=True)
+            target.write_text("evidence\n", encoding="utf-8")
+            subject = root / "wiki/example.md"
+            subject.parent.mkdir(parents=True, exist_ok=True)
+            subject.write_text(
+                "# Example\n\n"
+                "[[wiki/private/_sources/knowledge/local-only/example/data.txt|Data]]\n",
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            catalog.write_text(
+                "version: 1\nwiki_subject: wiki/example.md\nrecords:\n"
+                "- state: canonical\n"
+                "  target: wiki/private/_sources/knowledge/local-only/example/data.txt\n"
+                f"  target_sha256: {digest}\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(AUDIT.source_catalog_boundary_issues(root), [])
+
+    def test_rejects_missing_wiki_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = root / "catalog/sources/example.yaml"
+            catalog.parent.mkdir(parents=True)
+            catalog.write_text("version: 1\nrecords: []\n", encoding="utf-8")
+
+            issues = AUDIT.source_catalog_boundary_issues(root)
+
+            self.assertTrue(any("requires a Wiki subject" in issue for issue in issues))
 
 
 class WikiBaseContractTests(unittest.TestCase):

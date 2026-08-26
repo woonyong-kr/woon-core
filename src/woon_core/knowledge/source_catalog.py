@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import os
 import re
@@ -72,7 +71,6 @@ def plan_source_catalog(
     target: Path,
     source_name: str,
     *,
-    protected_patterns: tuple[str, ...] = (),
     previous_records: tuple[SourceRecord, ...] = (),
 ) -> SourceCatalogPlan:
     """Compare every active source file with a target corpus by path and content."""
@@ -106,7 +104,6 @@ def plan_source_catalog(
             excluded.append((relative, reason))
             continue
         digest = _sha256(path)
-        protected = any(fnmatch.fnmatch(relative, pattern) for pattern in protected_patterns)
         role = _role(relative, path)
         same_path = target_root / relative
         target_path, target_digest, state = _compare(
@@ -117,7 +114,6 @@ def plan_source_catalog(
             target_root,
             target_hashes,
             target_titles,
-            protected,
             role,
         )
         records.append(
@@ -255,13 +251,8 @@ def _compare(
     target_root: Path,
     target_hashes: dict[str, list[str]],
     target_titles: dict[str, list[str]],
-    protected: bool,
     role: str,
 ) -> tuple[str | None, str | None, str]:
-    if protected:
-        if same_path.is_file():
-            return relative, _sha256(same_path), "external-private-existing"
-        return None, None, "external-private"
     if role == "repository-rule":
         if same_path.is_file():
             return relative, _sha256(same_path), "external-repository-rule"

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "woon-core"
-version = "0.5.5"
+version = "0.5.6"
 description = "Deterministic control plane for the Woon development system"
 readme = "README.md"
 requires-python = ">=3.12"

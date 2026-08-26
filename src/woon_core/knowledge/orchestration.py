@@ -300,7 +300,13 @@ def _validate_wiki_prompt_contract(lane: AutomationContract, prompt: str) -> Non
             "콘텐츠 subtree와 Facet을 만들지 않는다",
             "resource_keyword",
             "책 → 장르 키워드 → 책 제목",
-            "리소스 → 주제 키워드 → 원자료 링크",
+            "리소스 → 주제 텍스트 → 들여쓴 원자료 링크",
+            "lifecycle_status",
+            "started_on",
+            "ended_on",
+            "occurred_on",
+            "wiki/private/_sources/codex",
+            "Vault 밖 별도 source archive를 만들지 않는다",
         }
     elif lane.automation_id == "knowledge-curation":
         required = {
@@ -314,13 +320,22 @@ def _validate_wiki_prompt_contract(lane: AutomationContract, prompt: str) -> Non
             "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크",
             "콘텐츠 subtree와 Facet이 없는지",
             "책 → 장르 키워드 → 책 제목",
-            "리소스 → 주제 키워드 → 원자료 링크",
+            "리소스 → 주제 텍스트 → 들여쓴 원자료 링크",
+            "lifecycle_status",
+            "started_on",
+            "ended_on",
+            "occurred_on",
+            "wiki/private/_sources",
+            "Vault 밖 별도 보관소",
         }
     else:
         required = {
             "Wiki 문서를 새로 만들지 않는다",
             "단계별",
             "전체 완료 receipt를 만들지 않는다",
+            "일일 기록은 Wiki 승격 입력이 아니다",
+            "wiki/private/_sources/codex",
+            "자유 메모",
         }
     missing = tuple(sorted(term for term in required if term not in prompt))
     if missing:

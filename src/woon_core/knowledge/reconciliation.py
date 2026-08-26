@@ -157,48 +157,6 @@ def reconcile_catalog(
     )
 
 
-def verify_private_source_catalog(
-    source_root: Path,
-    target_root: Path,
-    catalog_path: Path,
-    ledger_path: Path,
-) -> ReconciliationAudit:
-    """Verify an external-private catalog without copying or interpreting files.
-
-    This path is intentionally narrower than reconciliation.  Every catalog
-    record must already be classified as external-private, have no Vault
-    target, and still match its recorded hash.  The resulting ledger proves
-    inventory coverage and privacy classification only; it never writes source
-    bodies or Markdown into the compiled knowledge Vault.
-    """
-
-    source = source_root.expanduser().resolve()
-    target = target_root.expanduser().resolve()
-    assert_disjoint_source_and_target(source, target)
-    catalog = _load_mapping(catalog_path)
-    records = catalog.get("records")
-    if not isinstance(records, list):
-        raise WoonError("source catalog records must be a list")
-    for raw in records:
-        record = _record(raw)
-        if record["state"] not in {"external-private", "external-private-existing"}:
-            raise WoonError("private source verification accepts external-private records only")
-        if record.get("target") is not None or record.get("target_sha256") is not None:
-            raise WoonError("external-private source record must not have a Vault target")
-        source_path = _inside(source, record["locator"], "private source")
-        if not source_path.is_file() or _sha256(source_path) != record["sha256"]:
-            raise WoonError(
-                f"source changed after cataloging: {record['locator']}; rebuild the catalog"
-            )
-
-    ledger = _load_ledger(ledger_path, str(catalog.get("source", "")))
-    lock = target / ".local/woon-knowledge/ingest.lock"
-    with exclusive_file_lock(lock):
-        if _checkpoint_static_records(source, target, records, ledger):
-            _write_yaml(ledger_path, ledger)
-    return audit_reconciliation(source, target, catalog_path, ledger_path)
-
-
 def _apply_source_decisions(
     source_root: Path,
     target_root: Path,
@@ -368,8 +326,6 @@ def _checkpoint_static_records(
         "identical": "keep-target",
         "metadata-only": "keep-target",
         "content-alias": "alias",
-        "external-private": "external-private",
-        "external-private-existing": "external-private",
         "external-repository-rule": "catalog-only",
     }
     for raw in records:
@@ -428,7 +384,7 @@ def _checkpoint_static_records(
             "target_after_sha256": target_hash,
             "attempts": 0,
             "checks": ["catalog-hash", "privacy-boundary"]
-            if action in {"external-private", "catalog-only"}
+            if action == "catalog-only"
             else ["catalog-hash", "content-equivalence"],
             "unresolved": [],
             "usage": {
@@ -797,8 +753,9 @@ def _reconcile_one(
             "vault는 read-only source corpus다. woon-knowledge는 private 지식 정본이며 "
             "Obsidian은 이를 직접 읽는다. 공개 Blog의 편집·build는 repo://site, 생성된 "
             "배포 결과는 repo://pages-output이 소유한다. Quartz 동기화 script와 "
-            "projects/writing 자동 공개는 현재 계약이 아니다. private 창작·인터뷰 원문은 "
-            "external-private이며 기술 Wiki에 복사하지 않는다. 학습 문서는 고정 H2 수가 아니라 "
+            "projects/writing 자동 공개는 현재 계약이 아니다. private 원문은 수집 승인 뒤 "
+            "wiki/private/_sources/**로 이동하며 일반 기술 Wiki 본문에 복제하지 않는다. "
+            "학습 문서는 고정 H2 수가 아니라 "
             "선수 개념, 실제 흐름, 코드·수치 예시, 검증 순서로 선형화한다. 설명 다이어그램은 "
             "Mermaid를 정본으로 하고 ASCII는 바이트·메모리 표처럼 더 명확할 때만 보조로 쓴다. "
             "같은 흐름을 Mermaid와 ASCII로 중복하지 않는다. 그림이 아직 없으면 기존 "

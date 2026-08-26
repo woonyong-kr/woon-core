@@ -1222,7 +1222,7 @@ def _validate_source(source: dict[str, Any]) -> None:
     _required_string(source, "locator")
     _required_digest(source, "original_sha256")
     _required_digest(source, "normalized_sha256")
-    if source.get("privacy") not in {"local-only", "private", "public", "external-private"}:
+    if source.get("privacy") not in {"local-only", "private", "public"}:
         raise WoonError("source privacy is invalid")
     lifecycle = source.get("lifecycle")
     if lifecycle not in {"captured", "compiled", "archived"}:

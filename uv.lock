@@ -1148,7 +1148,7 @@ wheels = [
 
 [[package]]
 name = "woon-core"
-version = "0.5.5"
+version = "0.5.6"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

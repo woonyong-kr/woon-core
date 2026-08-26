@@ -77,7 +77,6 @@ from woon_core.knowledge.orchestration import (
 from woon_core.knowledge.reconciliation import (
     audit_reconciliation,
     reconcile_catalog,
-    verify_private_source_catalog,
 )
 from woon_core.knowledge.research_intake import (
     create_research_intake_plan,
@@ -89,6 +88,7 @@ from woon_core.knowledge.schedule_apply import (
     receipt_record,
 )
 from woon_core.knowledge.second_brain_runtime import record_governance_preflight
+from woon_core.knowledge.source_archive import archive_private_source_corpus
 from woon_core.knowledge.source_catalog import (
     load_source_catalog,
     plan_source_catalog,
@@ -207,13 +207,13 @@ Usage:
     --source-ref <doi-or-arxiv> [--source-ref <doi-or-arxiv>...]
     --tool-revision <40-hex-commit> --output <markdown> --manifest <JSON>
     [--nlm <binary>]
-  woon knowledge source-plan --source <path> --source-name <name> [--protect <glob>]
+  woon knowledge source-plan --source <path> --source-name <name>
     [--vault <path>] [--output <relative-path>]
   woon knowledge source-reconcile --source <path> --source-name <name>
     [--vault <path>] [--limit <count>] [--model <model>] [--state <state>]
   woon knowledge source-audit --source <path> --source-name <name> [--vault <path>]
-  woon knowledge source-verify-private --source <path> --source-name <name>
-    [--vault <path>]
+  woon knowledge source-archive --source <path> --source-name <name>
+    --wiki-subject <wiki/path.md> [--vault <path>]
   woon knowledge validate-orchestrator [--vault <path>]
     [--automation-root <path>]
   woon knowledge governance-preflight [--vault <path>]
@@ -548,8 +548,8 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "source-audit":
         _run_knowledge_source_audit(raw_options, output)
         return
-    if command == "source-verify-private":
-        _run_knowledge_private_source_verification(raw_options, output)
+    if command == "source-archive":
+        _run_knowledge_source_archive(raw_options, output)
         return
     if command == "project-novel":
         _run_novel_wiki_projection(raw_options, output)
@@ -778,7 +778,11 @@ def _run_governance_preflight(arguments: list[str], output: TextIO) -> None:
     settings = load_orchestrator_settings(vault or resolve_knowledge_vault())
     verified = verify_codex_automation_registry(settings, automation_root)
     input_sha256, output_sha256 = _governance_preflight_evidence(
-        settings.vault, settings.policy_document, automation_root, verified
+        settings.vault,
+        settings.policy_document,
+        settings.wiki_contract,
+        automation_root,
+        verified,
     )
     result = record_governance_preflight(
         settings, input_sha256=input_sha256, output_sha256=output_sha256
@@ -801,6 +805,7 @@ def _run_governance_preflight(arguments: list[str], output: TextIO) -> None:
 def _governance_preflight_evidence(
     vault: Path,
     policy_document: Path,
+    wiki_contract: Path,
     automation_root: Path,
     verified: tuple[str, ...],
 ) -> tuple[str, str]:
@@ -830,7 +835,16 @@ def _governance_preflight_evidence(
     inventory: list[Path] = [
         vault / "config" / "second-brain-orchestrator.yaml",
         policy_document,
+        wiki_contract,
     ]
+    inventory.extend(sorted((vault / "docs").glob("*.md")))
+    inventory.extend(
+        sorted(
+            path
+            for path in (vault / "config").rglob("*")
+            if path.is_file() and path.suffix in {".json", ".md", ".yaml", ".yml"}
+        )
+    )
     for repository_name in ("woon-core", "woon-knowledge", "woon-skills"):
         repository = workspace / repository_name
         if not repository.is_dir():
@@ -873,12 +887,27 @@ def _governance_skill_inventory(
     catalog = repository / "catalog.json"
     if not catalog.is_file():
         raise WoonError("second-brain governance skill catalog is missing")
-    canonical = tuple(sorted((repository / "skills").rglob("SKILL.md")))
-    if not canonical:
+    canonical_skills = tuple(sorted((repository / "skills").rglob("SKILL.md")))
+    if not canonical_skills:
         raise WoonError("second-brain governance canonical skill inventory is empty")
+    canonical = tuple(
+        sorted(
+            path
+            for root in (
+                repository / "skills",
+                repository / "profiles",
+                repository / "conflicts",
+                repository / "standards",
+                repository / "evals",
+            )
+            for path in root.rglob("*")
+            if path.is_file()
+            and path.suffix in {".json", ".md", ".py", ".sh", ".yaml", ".yml"}
+        )
+    )
     active_root = installed_root or (Path.home() / ".codex/skills")
     installed: list[Path] = []
-    for source in canonical:
+    for source in canonical_skills:
         active = active_root / source.parent.name / "SKILL.md"
         if not active.exists():
             continue
@@ -1902,18 +1931,15 @@ def _quality_review_max_batch_chars(value: str) -> int:
 
 def _run_knowledge_source_plan(arguments: list[str], output: TextIO) -> None:
     values: dict[str, str] = {}
-    protected: list[str] = []
     index = 0
     while index < len(arguments):
         option = arguments[index]
-        if option not in {"--source", "--source-name", "--vault", "--output", "--protect"}:
+        if option not in {"--source", "--source-name", "--vault", "--output"}:
             raise WoonError(f"unexpected source-plan argument: {option}")
         if index + 1 >= len(arguments):
             raise WoonError(f"{option} requires a value")
         value = arguments[index + 1]
-        if option == "--protect":
-            protected.append(value)
-        elif option in values:
+        if option in values:
             raise WoonError(f"{option} may only be provided once")
         else:
             values[option] = value
@@ -1936,7 +1962,6 @@ def _run_knowledge_source_plan(arguments: list[str], output: TextIO) -> None:
         Path(values["--source"]),
         target,
         values["--source-name"],
-        protected_patterns=tuple(protected),
         previous_records=(
             load_source_catalog(destination).records if destination.is_file() else ()
         ),
@@ -2048,35 +2073,30 @@ def _run_knowledge_source_audit(arguments: list[str], output: TextIO) -> None:
         )
 
 
-def _run_knowledge_private_source_verification(arguments: list[str], output: TextIO) -> None:
+def _run_knowledge_source_archive(arguments: list[str], output: TextIO) -> None:
     values: dict[str, str] = {}
     index = 0
     while index < len(arguments):
         option = arguments[index]
-        if option not in {"--source", "--source-name", "--vault"}:
-            raise WoonError(f"unexpected source-verify-private argument: {option}")
+        if option not in {"--source", "--source-name", "--wiki-subject", "--vault"}:
+            raise WoonError(f"unexpected source-archive argument: {option}")
         if index + 1 >= len(arguments) or option in values:
             raise WoonError(f"{option} requires exactly one value")
         values[option] = arguments[index + 1]
         index += 2
-    if "--source" not in values or "--source-name" not in values:
-        raise WoonError("source-verify-private requires --source and --source-name")
-    target = Path(values.get("--vault", ".")).expanduser().resolve()
-    source = Path(values["--source"])
-    _reject_self_source_catalog(source, target)
-    name = values["--source-name"]
-    audit = verify_private_source_catalog(
-        source,
-        target,
-        target / f"catalog/sources/{name}.yaml",
-        target / f"catalog/reconciliation/{name}.yaml",
-    )
-    print(json.dumps(asdict(audit), ensure_ascii=False, indent=2), file=output)
-    if not audit.complete:
+    required = {"--source", "--source-name", "--wiki-subject"}
+    if not required.issubset(values):
         raise WoonError(
-            f"private source verification is incomplete: pending={audit.pending}, "
-            f"failed={audit.failed}, errors={len(audit.errors)}"
+            "source-archive requires --source, --source-name, and --wiki-subject"
         )
+    target = Path(values.get("--vault", ".")).expanduser().resolve()
+    result = archive_private_source_corpus(
+        Path(values["--source"]),
+        target,
+        values["--source-name"],
+        values["--wiki-subject"],
+    )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
 
 
 def _reject_self_source_catalog(source: Path, target: Path) -> None:
