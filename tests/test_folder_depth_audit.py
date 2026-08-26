@@ -29,6 +29,22 @@ def test_accepts_declared_semantic_wiki_collections(tmp_path: Path) -> None:
     _write(tmp_path / "wiki/personal/interview/ai-engineer/question.md")
     _write(tmp_path / "wiki/personal/career/README.md")
     _write(tmp_path / "wiki/personal/career/applications/company-role.md")
+    _write(tmp_path / "wiki/personal/linked-graph/information.md")
+
+    result = _run_audit(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "folder_depth_ok" in result.stdout
+
+
+def test_accepts_repository_owned_private_depth_exclusion(tmp_path: Path) -> None:
+    configuration = tmp_path / ".woon/repository.yaml"
+    configuration.parent.mkdir(parents=True)
+    configuration.write_text(
+        "folder_depth_audit_ignored_roots: [wiki/private/novel]\n",
+        encoding="utf-8",
+    )
+    _write(tmp_path / "wiki/private/novel/사건-히스토리/event-01.md")
 
     result = _run_audit(tmp_path)
 
@@ -45,4 +61,4 @@ def test_rejects_undeclared_or_retired_deep_collections(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "folder_depth_violations=2" in result.stdout
     assert "depth>3: wiki/canonical/retired/note.md" in result.stdout
-    assert "depth>3: wiki/personal/notes/deep/note.md" in result.stdout
+    assert "depth>4: wiki/personal/notes/deep/note.md" in result.stdout
