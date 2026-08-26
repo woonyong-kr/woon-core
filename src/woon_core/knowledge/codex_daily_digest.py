@@ -749,9 +749,9 @@ def _daily_status(*, input_state: str, entry_count: int) -> tuple[str, str]:
         )
     if input_state == "source-only":
         return (
-            "상세 기록 복원됨",
-            "이날의 질문과 최종 답변은 복원했다. 주제 요약과 Wiki 연결은 다음 지식화 "
-            "실행에서 보완한다.",
+            "현재까지 정리됨",
+            "이날의 질문과 최종 답변은 보존되어 있다. 주제 요약과 Wiki 연결은 다음 "
+            "지식화 실행에서 이어서 정리한다.",
         )
     if entry_count:
         return "정리 완료", "이날 Codex에서 나눈 질문과 답변을 주제별로 묶어 두었다."
@@ -774,7 +774,10 @@ def _daily_status(*, input_state: str, entry_count: int) -> tuple[str, str]:
             "이 날짜의 Codex 세션 원본을 현재 기기에서 찾지 못해 자동 대화 정리를 "
             "만들지 못했습니다.",
         ),
-        "source-only": ("상세 기록 복원됨", "이날의 질문과 최종 답변을 복원했습니다."),
+        "source-only": (
+            "현재까지 정리됨",
+            "이날의 질문과 최종 답변은 보존되어 있으며 주제 정리를 이어서 진행합니다.",
+        ),
     }
     return messages[input_state]
 
@@ -1127,7 +1130,7 @@ def _daily_metadata_summary(entries: tuple[CodexDailyDigestEntry, ...], *, input
         "partial": "오늘 대화를 정리하는 중이다.",
         "pending": "다음 자동 정리를 기다리는 중이다.",
         "unavailable": "이 날짜의 Codex 세션 원본을 찾지 못했다.",
-        "source-only": "이날의 대화 색인을 복원했다. 주제 정리는 보완 중이다.",
+        "source-only": "이날의 질문과 답변은 보존되어 있고 주제 정리를 이어가는 중이다.",
     }[input_state]
 
 
@@ -1141,7 +1144,7 @@ def _daily_status_label(entries: tuple[CodexDailyDigestEntry, ...], *, input_sta
         "no-meaningful": "남길 항목 없음",
         "pending": "다음 실행 대기",
         "unavailable": "원본 확인 필요",
-        "source-only": "대화 색인 복원됨",
+        "source-only": "현재까지 정리됨",
     }[input_state]
 
 

@@ -108,6 +108,7 @@ def test_creates_a_missing_daily_note_from_the_canonical_template(tmp_path: Path
         ("pending", "다음 실행 대기"),
         ("unavailable", "세션 원본을 찾지 못해 대기"),
         ("no-meaningful", "남길 항목 없음"),
+        ("source-only", "현재까지 정리됨"),
     ],
 )
 def test_empty_daily_digest_explains_its_honest_input_state(
@@ -116,6 +117,23 @@ def test_empty_daily_digest_explains_its_honest_input_state(
     _digest_settings(tmp_path)
     (tmp_path / "inbox/daily").mkdir(parents=True)
     (tmp_path / "inbox/daily/2026-08-17.md").write_text("# 2026-08-17\n", encoding="utf-8")
+
+    if input_state == "source-only":
+        record_codex_source_bundle(
+            tmp_path,
+            CodexSourceBundle(
+                day=date(2026, 8, 17),
+                source_locator="thread-fixture:2026-08-17",
+                title="보존된 대화",
+                messages=(
+                    CodexSourceMessage(
+                        role="assistant",
+                        text="최종 답변",
+                        created_at="2026-08-17T03:11:00Z",
+                    ),
+                ),
+            ),
+        )
 
     record_codex_daily_digest(
         tmp_path,
