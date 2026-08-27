@@ -1322,7 +1322,12 @@ def _run_novel_wiki_projection(arguments: list[str], output: TextIO) -> None:
             raise WoonError(f"{option} requires exactly one value")
         values[option] = arguments[index + 1]
         index += 2
-    vault = Path(values.get("--vault", resolve_knowledge_vault())).expanduser().resolve()
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
     try:
         projection_day = date.fromisoformat(values.get("--day", date.today().isoformat()))
     except ValueError as error:
@@ -1363,7 +1368,12 @@ def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
             raise WoonError(f"{option} requires exactly one value")
         values[option] = arguments[index + 1]
         index += 2
-    vault = Path(values.get("--vault", resolve_knowledge_vault())).expanduser().resolve()
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
     report = prepare_wiki_tree_refresh(vault)
     if report.issues:
         raise WoonError("Wiki tree refresh rejected: " + "; ".join(report.issues[:12]))

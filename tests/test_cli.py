@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -661,6 +661,11 @@ def test_knowledge_refresh_wiki_tree_validates_and_applies(
         "apply_wiki_tree_refresh",
         lambda actual, prepared: calls.extend((actual, prepared)),
     )
+    monkeypatch.setattr(
+        cli,
+        "resolve_knowledge_vault",
+        lambda: pytest.fail("explicit --vault must not resolve the default vault"),
+    )
 
     output = StringIO()
     run(["knowledge", "refresh-wiki-tree", "--vault", str(vault)], output)
@@ -668,6 +673,62 @@ def test_knowledge_refresh_wiki_tree_validates_and_applies(
     assert calls == [vault.resolve(), vault.resolve(), report]
     assert '"document_count": 9' in output.getvalue()
     assert '"changed_count": 2' in output.getvalue()
+
+
+def test_knowledge_project_novel_does_not_resolve_default_for_explicit_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    report = SimpleNamespace(
+        category_count=1,
+        source_count=2,
+        event_count=3,
+        judgment_count=4,
+        relation_count=5,
+        changed_count=0,
+        stale_pages=(),
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(
+        cli,
+        "prepare_novel_wiki_projection",
+        lambda actual, source, projection_day: (
+            calls.extend((actual, source, projection_day)) or report
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "apply_novel_wiki_projection",
+        lambda actual, prepared: calls.extend((actual, prepared)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "resolve_knowledge_vault",
+        lambda: pytest.fail("explicit --vault must not resolve the default vault"),
+    )
+
+    output = StringIO()
+    run(
+        [
+            "knowledge",
+            "project-novel",
+            "--vault",
+            str(vault),
+            "--day",
+            "2026-08-27",
+        ],
+        output,
+    )
+
+    assert calls == [
+        vault.resolve(),
+        vault.resolve() / "wiki/private/_sources/novel",
+        date(2026, 8, 27),
+        vault.resolve(),
+        report,
+    ]
+    assert '"changed_count": 0' in output.getvalue()
 
 
 def test_knowledge_evaluate_uses_explicit_cases_and_vault(
