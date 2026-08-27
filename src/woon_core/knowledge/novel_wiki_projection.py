@@ -83,6 +83,8 @@ def prepare_novel_wiki_projection(
     pages: dict[Path, bytes] = {}
     source_receipts: dict[str, dict[str, str]] = {}
     category_paths: dict[str, str] = {}
+    category_metadata: dict[str, dict[str, object]] = {}
+    category_source_children: dict[str, list[str]] = {}
     source_count = 0
     for sequence, category_file in enumerate(category_files, start=1):
         category = _h1(category_file)
@@ -100,6 +102,8 @@ def prepare_novel_wiki_projection(
             view_mode="tree",
             sequence=sequence,
         )
+        category_metadata[category_file.stem] = metadata
+        category_source_children[category_file.stem] = []
         category_path = root / category_relative
         pages[category_path] = _render_page(category_path, metadata, f"# 소설 · {category}\n")
         for item_sequence, match in enumerate(
@@ -114,11 +118,12 @@ def prepare_novel_wiki_projection(
                 f"wiki/private/novel/{category_slug}/{item_sequence:02d}-{_slug(label)}.md"
             )
             title = label
+            canonical_id = (
+                f"private/novel/{category_slug}/source-{item_sequence:02d}-{_slug(label)}"
+            )
             metadata = _metadata(
                 title=title,
-                canonical_id=(
-                    f"private/novel/{category_slug}/source-{item_sequence:02d}-{_slug(label)}"
-                ),
+                canonical_id=canonical_id,
                 parent=parent_link(category_relative, f"소설 · {category}"),
                 keyword=title,
                 summary=f"{label}의 local-only 원본 연결이다.",
@@ -140,6 +145,7 @@ def prepare_novel_wiki_projection(
             link = _file_link(source, page_path, root)
             body = f"# {title}\n\n## 원본\n\n- [{label}]({link})\n"
             pages[page_path] = _render_page(page_path, metadata, body)
+            category_source_children[category_file.stem].append(canonical_id)
             source_receipts[source_relative] = {
                 "wiki_path": page_relative,
                 "sha256": digest,
@@ -166,6 +172,30 @@ def prepare_novel_wiki_projection(
         project_subject=project_subject,
         projection_day=effective_day,
     )
+
+    event_metadata = category_metadata.get("사건-히스토리")
+    event_relative = category_paths.get("사건-히스토리")
+    if event_metadata is not None and event_relative is not None and event_count:
+        groups: list[dict[str, object]] = []
+        source_children = category_source_children.get("사건-히스토리", [])
+        if source_children:
+            groups.append({"label": "1. 근거·시간 원자료", "children": source_children})
+        event_ids = [f"private/novel/events/{number:02d}" for number in range(1, event_count + 1)]
+        for offset in range(0, len(event_ids), 12):
+            chunk = event_ids[offset : offset + 12]
+            groups.append(
+                {
+                    "label": f"{len(groups) + 1}. 사건 {offset + 1:02d}–{offset + len(chunk):02d}",
+                    "children": chunk,
+                }
+            )
+        event_metadata["navigation_groups"] = groups
+        event_path = root / event_relative
+        pages[event_path] = _render_page(
+            event_path,
+            event_metadata,
+            "# 소설 · 사건·히스토리\n",
+        )
 
     expected = set(pages)
     stale = (

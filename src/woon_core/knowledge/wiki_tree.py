@@ -247,9 +247,7 @@ def load_wiki_tree(
         ).casefold()
         started_on = _optional_date(metadata.get("started_on"), "started_on", relative, issues)
         ended_on = _optional_date(metadata.get("ended_on"), "ended_on", relative, issues)
-        occurred_on = _optional_date(
-            metadata.get("occurred_on"), "occurred_on", relative, issues
-        )
+        occurred_on = _optional_date(metadata.get("occurred_on"), "occurred_on", relative, issues)
         issues.extend(
             _temporal_issues(
                 relative,
@@ -559,9 +557,7 @@ def _date_value(value: object, key: str, relative: str, issues: list[str]) -> da
     return date.min
 
 
-def _optional_date(
-    value: object, key: str, relative: str, issues: list[str]
-) -> date | None:
+def _optional_date(value: object, key: str, relative: str, issues: list[str]) -> date | None:
     if value in {None, ""}:
         return None
     parsed = _date_value(value, key, relative, issues)
@@ -587,9 +583,7 @@ def _temporal_issues(
         issues.append(f"{relative}: occurred_on cannot be combined with a date range")
     if started_on is not None and ended_on is not None and ended_on < started_on:
         issues.append(f"{relative}: ended_on cannot precede started_on")
-    if lifecycle_status in {"completed", "cancelled", "archived"} and not (
-        ended_on or occurred_on
-    ):
+    if lifecycle_status in {"completed", "cancelled", "archived"} and not (ended_on or occurred_on):
         issues.append(f"{relative}: closed lifecycle requires ended_on or occurred_on")
     if lifecycle_status in {"idea", "planned", "active", "paused"} and ended_on is not None:
         issues.append(f"{relative}: open lifecycle cannot have ended_on")
@@ -663,9 +657,7 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
     for node in nodes:
         if node.node_kind == "entity" and node.entity_kind not in {"book", "resource"}:
             if node.entity_kind in TEMPORAL_ENTITY_KINDS and not node.lifecycle_status:
-                issues.append(
-                    f"{node.relative_path}: temporal entity requires lifecycle_status"
-                )
+                issues.append(f"{node.relative_path}: temporal entity requires lifecycle_status")
             issues.extend(
                 _entity_root_issues(
                     node,
@@ -708,15 +700,12 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
             if missing_sequence:
                 issues.append(
                     f"{parent.relative_path}: ordered navigation requires sequence on every "
-                    "direct child: "
-                    + ", ".join(child.canonical_id for child in missing_sequence)
+                    "direct child: " + ", ".join(child.canonical_id for child in missing_sequence)
                 )
             sequence_counts = Counter(
                 child.sequence for child in direct if child.sequence is not None
             )
-            repeated = sorted(
-                sequence for sequence, count in sequence_counts.items() if count > 1
-            )
+            repeated = sorted(sequence for sequence, count in sequence_counts.items() if count > 1)
             if repeated:
                 issues.append(
                     f"{parent.relative_path}: direct child sequence values must be unique: "
@@ -840,9 +829,7 @@ def _resource_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
             group_has_link = False
             continue
         is_wikilink = re.fullmatch(r"-\s+\[\[[^\]]+\]\]", stripped) is not None
-        is_web_link = (
-            re.fullmatch(r"-\s+\[[^\]]+\]\(https://[^\s)]+\)", stripped) is not None
-        )
+        is_web_link = re.fullmatch(r"-\s+\[[^\]]+\]\(https://[^\s)]+\)", stripped) is not None
         if (is_wikilink or is_web_link) and indent == 0:
             if group_open and not group_has_link:
                 return [
@@ -886,7 +873,14 @@ def _entity_root_issues(
     direct: tuple[WikiTreeNode, ...],
     texts: dict[str, str],
 ) -> list[str]:
-    """Keep current knowledge on the entity root and chronology in one child."""
+    """Keep current knowledge and a readable chronology on the entity root.
+
+    A separate history child used to be mandatory.  That split made people and
+    project pages harder to scan and produced navigation-only documents.  The
+    canonical entity now owns its dated history inline; focused children remain
+    valid only when they have an independent subject, not merely because they
+    contain dates.
+    """
 
     _, body = split_markdown(strip_generated_wiki_views(text))
     semantic = re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
@@ -896,15 +890,6 @@ def _entity_root_issues(
         line.strip() and not line.lstrip().startswith("#") for line in semantic.splitlines()
     ):
         issues.append(f"{node.relative_path}: entity root must contain current subject knowledge")
-    history = tuple(
-        child
-        for child in direct
-        if split_markdown(texts[child.relative_path])[0].get("entity_section") == "history"
-    )
-    if len(history) != 1:
-        issues.append(
-            f"{node.relative_path}: entity root requires exactly one separate history child"
-        )
     return issues
 
 
@@ -1113,8 +1098,7 @@ def _render_navigation_children(
         rows.append(f"- {_compact_keyword_label(child.keywords[0])}")
         grouped_labels = _distinct_keyword_labels(grouped)
         rows.extend(
-            "  "
-            + _render_keyword_link(item, include_sequence=include_sequence, label=label)
+            "  " + _render_keyword_link(item, include_sequence=include_sequence, label=label)
             for item, label in zip(grouped, grouped_labels, strict=True)
         )
     return tuple(rows)

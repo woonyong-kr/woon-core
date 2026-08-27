@@ -33,7 +33,8 @@ def _page(
         f"keywords:\n- {title}\naliases: []\nview_mode: tree\n"
         "updated: 2026-08-25\nsummary: 테스트 문서다.\n"
         "knowledge_state: 확인 필요\n---\n\n"
-        f"# {title}\n\n{body}".rstrip() + "\n",
+        f"# {title}\n\n{body}".rstrip()
+        + "\n",
         encoding="utf-8",
     )
 
@@ -128,3 +129,48 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
     changed = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 26))
     assert changed.changed_count == 6
     assert b'"projection_day": "2026-08-26"' in changed.manifest
+
+
+def test_groups_large_event_timeline_into_linear_stages(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    novel = vault / "wiki/private/_sources/novel"
+    _page(
+        vault / "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+    )
+    _page(
+        vault / "wiki/projects.md",
+        title="프로젝트",
+        canonical_id="projects",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+    )
+    _page(
+        vault / "wiki/personal/projects/(미정)소설-집필.md",
+        title="(미정)소설 집필",
+        canonical_id="private-novel",
+        node_kind="entity",
+        parent="[[wiki/projects|프로젝트]]",
+        entity_kind="project",
+        body="현재 사건 구조를 선형으로 관리한다.",
+    )
+    navigation = novel / "work/navigation/사건-히스토리.md"
+    navigation.parent.mkdir(parents=True)
+    navigation.write_text("# 사건·히스토리\n", encoding="utf-8")
+    ledger = novel / "work/analysis/event-evidence-ledger-2026-08-07.md"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        "# 사건\n\n" + "\n".join(f"## {number}. 사건 {number}\n\n근거" for number in range(1, 26)),
+        encoding="utf-8",
+    )
+
+    report = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 25))
+    apply_novel_wiki_projection(vault, report)
+
+    hub = (vault / "wiki/private/novel/사건-히스토리/README.md").read_text(encoding="utf-8")
+    assert "label: 1. 사건 01–12" in hub
+    assert "label: 2. 사건 13–24" in hub
+    assert "label: 3. 사건 25–25" in hub

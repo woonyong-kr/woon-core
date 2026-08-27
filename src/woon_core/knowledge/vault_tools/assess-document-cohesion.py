@@ -21,12 +21,8 @@ VAULT = Path.cwd().resolve()
 CONFIG = VAULT / "config/canonical-knowledge.yaml"
 FRONTMATTER = re.compile(r"\A---\n(?P<yaml>.*?)\n---\n", re.DOTALL)
 FENCED_BLOCK = re.compile(r"^```.*?^```\s*$", re.MULTILINE | re.DOTALL)
-GENERATED_BLOCK = re.compile(
-    r"<!-- generated:.*?-->.*?<!-- /generated:.*?-->", re.DOTALL
-)
-BREADCRUMB = re.compile(
-    r"<!-- breadcrumb:start -->.*?<!-- breadcrumb:end -->", re.DOTALL
-)
+GENERATED_BLOCK = re.compile(r"<!-- generated:.*?-->.*?<!-- /generated:.*?-->", re.DOTALL)
+BREADCRUMB = re.compile(r"<!-- breadcrumb:start -->.*?<!-- breadcrumb:end -->", re.DOTALL)
 WORD = re.compile(r"[가-힣A-Za-z0-9_]+")
 
 
@@ -84,11 +80,17 @@ def _visible_body(text: str) -> str:
     return GENERATED_BLOCK.sub("", body)
 
 
+def _is_source_archive(path: Path) -> bool:
+    return "_sources" in path.relative_to(VAULT).parts
+
+
 def _documents(settings: Settings) -> dict[Path, str]:
     documents: dict[Path, str] = {}
     for root_name in settings.roots:
         root = VAULT / root_name
         for path in root.rglob("*.md"):
+            if _is_source_archive(path):
+                continue
             if path.name in {"README.md", "index.md"}:
                 continue
             text = path.read_text(encoding="utf-8")
@@ -107,9 +109,7 @@ def _words(text: str, *, keep_code: bool) -> list[str]:
 def _shingles(words: list[str], size: int) -> set[tuple[str, ...]]:
     if len(words) < size:
         return set()
-    return {
-        tuple(words[index : index + size]) for index in range(len(words) - size + 1)
-    }
+    return {tuple(words[index : index + size]) for index in range(len(words) - size + 1)}
 
 
 def _paragraph_kind(paragraph: str) -> str:
@@ -143,9 +143,7 @@ def _paragraphs_with_kind(body: str) -> list[tuple[str, str]]:
     return paragraphs
 
 
-def _repeated_paragraphs(
-    documents: dict[Path, str], settings: Settings
-) -> list[dict[str, Any]]:
+def _repeated_paragraphs(documents: dict[Path, str], settings: Settings) -> list[dict[str, Any]]:
     owners: dict[str, set[Path]] = defaultdict(set)
     samples: dict[str, str] = {}
     kinds: dict[str, str] = {}
@@ -172,9 +170,7 @@ def _repeated_paragraphs(
     return sorted(groups, key=lambda item: (-len(item["paths"]), item["paths"]))
 
 
-def _similar_documents(
-    documents: dict[Path, str], settings: Settings
-) -> list[dict[str, Any]]:
+def _similar_documents(documents: dict[Path, str], settings: Settings) -> list[dict[str, Any]]:
     shingle_sets = {
         path: _shingles(_words(body, keep_code=False), settings.semantic_shingle_words)
         for path, body in documents.items()
@@ -227,15 +223,9 @@ def _boundary_candidates(
         plain_chars = len("".join(_words(body, keep_code=True)))
         h2_count = sum(line.startswith("## ") for line in body.splitlines())
         item = {"path": _relative(path), "plain_chars": plain_chars, "h2": h2_count}
-        if (
-            plain_chars > settings.long_plain_chars_review
-            and h2_count >= settings.long_h2_review
-        ):
+        if plain_chars > settings.long_plain_chars_review and h2_count >= settings.long_h2_review:
             long_documents.append(item)
-        if (
-            plain_chars < settings.short_plain_chars_review
-            and h2_count <= settings.short_h2_max
-        ):
+        if plain_chars < settings.short_plain_chars_review and h2_count <= settings.short_h2_max:
             short_documents.append(item)
     return (
         sorted(long_documents, key=lambda item: -item["plain_chars"]),

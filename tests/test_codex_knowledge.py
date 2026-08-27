@@ -82,7 +82,8 @@ def test_projects_one_safe_batch_to_single_wiki_and_daily_projection(tmp_path: P
     assert (tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-18").is_dir()
     rendered = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
     assert "대화 지식화는 한 번 분류하고 두 번 사용한다" in rendered
-    assert "대화 후보의 승격 기준을 어떻게 좁힐까" in rendered
+    assert "대화 후보의 승격 기준을 어떻게 좁힐까" not in rendered
+    assert "## 정본 변경" in rendered
     assert (
         "[[../../wiki/nodes/대화-지식화는-한-번-분류하고-두-번-사용한다|"
         "대화 지식화는 한 번 분류하고 두 번 사용한다]]"
@@ -686,9 +687,9 @@ def test_indexes_non_book_resource_link_and_materializes_project_once(tmp_path: 
         tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-19"
     ).stat().st_mode & 0o777 == 0o700
     daily = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
-    assert "## 오늘 기록" in daily
-    assert "`프로젝트`" in daily
-    assert "[[../../wiki/resources/ai|AI]]" in daily
+    assert "## 정본 변경" in daily
+    assert "`프로젝트`" not in daily
+    assert "[[../../wiki/resources/ai|AICE 자격 준비를 시작한다]]" in daily
     assert "[[../../wiki/personal/projects/aice-associate-준비|AICE Associate 준비]]" in daily
 
 
@@ -1325,9 +1326,9 @@ def test_projects_daily_activity_and_explicit_person_facts_without_identity_link
 
     rendered = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
     candidates = list((tmp_path / "brain/review/codex").glob("*.md"))
-    assert "## 오늘 기록" in rendered
-    assert "`활동`" in rendered
-    assert "**관련 인물** 민정" in rendered
+    assert "**남길 항목 없음**" in rendered
+    assert "`활동`" not in rendered
+    assert "**관련 인물** 민정" not in rendered
     person_candidate = next(
         candidate
         for candidate in candidates

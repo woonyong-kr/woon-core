@@ -19,6 +19,10 @@ SPEC.loader.exec_module(MODULE)
 
 
 class CohesionParagraphTests(unittest.TestCase):
+    def test_source_archive_path_is_excluded_from_reader_facing_corpus(self) -> None:
+        self.assertTrue(MODULE._is_source_archive(MODULE.VAULT / "wiki/_sources/raw.md"))
+        self.assertFalse(MODULE._is_source_archive(MODULE.VAULT / "wiki/concepts/raw.md"))
+
     def test_keeps_a_fenced_block_with_internal_blank_lines_as_code(self) -> None:
         body = """설명 문단입니다.
 

@@ -293,11 +293,10 @@ def record_codex_daily_digest_run(
 ) -> dict[str, object]:
     """Record one Korean block in the canonical daily record from opted-in Codex conclusions.
 
-    ``entries`` contain a short ``kind``, ``title``, ``summary``, optional
-    intent, readable question/answer/outcome exchanges, human attachment
-    labels, and links to existing canonical ``wiki/`` documents.  Exact
-    opted-in user/final-answer evidence is recorded separately through the
-    local source-archive CLI; never pass system/developer text, tool output,
+    ``entries`` contain a short ``kind``, ``title``, ``summary`` and links to
+    existing canonical ``wiki/`` documents. Only those canonical changes are
+    rendered. Questions, answers, timestamps and attachments stay in the
+    local source archive; never pass system/developer text, tool output,
     reasoning, tokens, or opaque locators here.
     """
 
@@ -332,9 +331,11 @@ def record_codex_knowledge_entries_run(
 
     Each entry has one Korean category such as ``활동``, ``일정``, ``인물``,
     ``학습``, ``개념``, ``커리어``, ``창작``, ``자료`` or
-    ``프로젝트`` plus a short title, summary, intent, and readable exchanges
-    containing the actual question, summarized answer, outcome, and human
-    attachment labels.  Every organized entry updates the local daily ledger.
+    ``프로젝트`` plus a short title and a conclusion-first summary. Raw
+    question/answer exchanges are evidence, not a daily record. Every
+    meaningful organized entry must first update or reuse one canonical Wiki
+    subject and include that path in ``related_documents``. Only those links
+    and the resulting conclusions are projected into the daily note.
     Set ``wiki_update=true`` only for a reusable,
     stable subject; then the same run creates or updates one canonical
     ``wiki/`` document.  Every ``wiki_update=true`` entry must provide exactly

@@ -167,8 +167,9 @@ def build_wiki_context_bundle(
         candidates.append(
             _tree_item(node, texts[node.relative_path], "child", "바로 아래 키워드", node.summary)
         )
-    # Entity roots own current knowledge while their one history child owns
-    # chronology. Evidence may live on either the root or a focused child.
+    # Entity roots own both current knowledge and their dated chronology.
+    # Focused children may still contribute evidence, but a dates-only history
+    # child is no longer required.
     context_nodes = (current, *children)
     for node in context_nodes:
         source = texts[node.relative_path]

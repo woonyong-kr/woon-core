@@ -1,11 +1,9 @@
-"""Codex conversation projections for one canonical daily note.
+"""Project canonical Wiki changes into one daily navigation note.
 
-The semantic ledger keeps the readable summary.  A separate local-only source
-archive preserves user questions and assistant final answers.  The daily note
-shows the semantic summary plus a compact conversation index; it never copies
-the full transcript and therefore cannot become a second source of truth.
-System instructions, reasoning, tool payloads, secrets, and opaque locators are
-never rendered.
+The semantic ledger keeps conclusions and canonical document links. A separate
+local-only archive preserves the conversation evidence needed to regenerate
+them. The daily note renders only what changed in the Wiki; questions, answers,
+timestamps and attachment inventories never become a second archive.
 """
 
 from __future__ import annotations
@@ -59,27 +57,16 @@ _INPUT_STATES = {
     "unavailable",
     "source-only",
 }
-_SECTION_ORDER = (
-    ("일정·할 일", {"일정", "할 일", "다음 행동", "완료"}),
-    ("하루의 활동", {"활동", "생활", "건강", "여행·구매", "재정·행정", "회고"}),
-    ("사람·관계", {"인물", "관계"}),
-    ("성장·학습", {"학습", "개념", "결정", "질문"}),
-    ("커리어·창작·자료", {"커리어", "창작", "자료", "프로젝트"}),
-)
-_DIGEST_RENDER_REVISION = "22"
+_DIGEST_RENDER_REVISION = "25"
 _DAILY_ENTRY_LIMIT = 256
 _VISIBLE_LIMIT = 900
 _TITLE_LIMIT = 80
 _ATTACHMENT_LIMIT = 220
-_SOURCE_QUESTION_EXCERPT_LIMIT = 180
-_SOURCE_QUESTION_VISIBLE_LIMIT = 12
 _SENSITIVE_RE = re.compile(
     r"(?:\b(?:api[_-]?key|token|secret|password|bearer)\b|sk-[A-Za-z0-9_-]{12,})",
     flags=re.IGNORECASE,
 )
 _RELATED_ROOTS = ("wiki/",)
-_CANONICAL_WIKI_PATH_RE = re.compile(r"(?P<path>wiki/[^\s\]\)>\"'`]+?\.md)(?::\d+)?")
-_WIKI_TITLE_INDEX_CACHE: dict[str, tuple[tuple[int, int, int], tuple[tuple[str, str], ...]]] = {}
 _KEYWORD_CANDIDATES = (
     "Obsidian",
     "Wiki",
@@ -194,6 +181,13 @@ def record_codex_daily_digest(
     if set(contract.owned_paths) != {"inbox/daily", "inbox/calendar", "brain/review/activity"}:
         raise WoonError("daily record materialization has an unsafe write boundary")
     _validate_entries(settings.vault, entries, input_state=input_state)
+    canonical_entries = tuple(entry for entry in entries if entry.related_documents)
+    # A processed legacy ledger can contain operational one-off records that
+    # were explicitly marked ``wiki_update=false``. Those records remain in
+    # local evidence, but their existence must not turn the human Daily into a
+    # permanent promotion queue. ``source-only`` is reserved for an explicit
+    # incomplete-promotion state written by the ingestion lane.
+    rendered_input_state = input_state
     source_bundles = load_codex_source_bundles(settings.vault, day=day)
     if input_state == "source-only" and not source_bundles:
         raise WoonError("source-only daily record requires local conversation evidence")
@@ -222,8 +216,8 @@ def record_codex_daily_digest(
     destination = settings.vault / "inbox" / "daily" / f"{day.isoformat()}.md"
     content = _render_daily_block(
         settings.vault,
-        entries,
-        input_state=input_state,
+        canonical_entries,
+        input_state=rendered_input_state,
         source_bundles=source_bundles,
     )
 
@@ -237,18 +231,22 @@ def record_codex_daily_digest(
             allow_legacy_embed=replace_generated_digest,
         )
         updated = _normalize_daily_shell(updated)
-        updated = _update_daily_metadata(updated, entries, input_state=input_state)
+        updated = _update_daily_metadata(
+            updated,
+            canonical_entries,
+            input_state=rendered_input_state,
+        )
         if updated != existing:
             atomic_write(destination, updated.encode("utf-8"), mode=0o600)
         return RunOutcome(
-            candidate_ids=tuple(_entry_id(day, entry) for entry in entries),
+            candidate_ids=tuple(_entry_id(day, entry) for entry in canonical_entries),
             output_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
         )
 
     result = AutomationRunStore(settings).run("daily-record-materialization", request, produce)
     return CodexDailyDigestResult(
         day=day.isoformat(),
-        entry_count=len(entries),
+        entry_count=len(canonical_entries),
         receipt_id=result.receipt_id,
         replayed=result.replayed,
         relative_path=destination.relative_to(settings.vault).as_posix(),
@@ -528,11 +526,7 @@ def _render_daily_block(
         )
         return "\n".join(lines)
     if entries:
-        lines.extend(["", "## 오늘 한눈에", "", _daily_summary(entries)])
-        keywords = _daily_keywords(entries)
-        if keywords:
-            lines.extend(["", "**키워드** " + " · ".join(f"`{item}`" for item in keywords)])
-        lines.extend(["", "## 오늘 기록", ""])
+        lines.extend(["", "## 정본 변경", ""])
         subjects = tuple(
             _combine_subject_entries(same_subject)
             for same_subject in _group_section_entries(list(entries))
@@ -568,17 +562,6 @@ def _render_daily_block(
             )
     else:
         entry_linked_documents = []
-    if source_bundles:
-        lines.extend(["", "## 대화 찾아보기", ""])
-        lines.append("원문은 로컬 증거로 보존하고, 여기에는 질문 색인과 Wiki 연결만 둔다.")
-        lines.append("")
-        lines.extend(
-            _render_source_bundles(
-                vault,
-                source_bundles,
-                already_linked=tuple(entry_linked_documents),
-            )
-        )
     lines.extend(["", "<!-- woon-codex-digest:end -->", ""])
     return "\n".join(lines)
 
@@ -744,17 +727,15 @@ def _daily_status(*, input_state: str, entry_count: int) -> tuple[str, str]:
     if input_state == "partial":
         return (
             "현재까지 정리됨",
-            "오늘은 아직 진행 중이다. 지금까지 끝난 대화만 먼저 묶었고, 다음 실행에서 "
-            "새 내용만 이어 붙인다.",
+            "오늘은 아직 진행 중이다. 지금까지 확인된 정본 변경만 먼저 연결했다.",
         )
     if input_state == "source-only":
         return (
-            "현재까지 정리됨",
-            "이날의 질문과 최종 답변은 보존되어 있다. 주제 요약과 Wiki 연결은 다음 "
-            "지식화 실행에서 이어서 정리한다.",
+            "정본 반영 필요",
+            "원문은 로컬 증거로 보존했지만 Wiki에 반영할 내용을 아직 확정하지 못했다.",
         )
     if entry_count:
-        return "정리 완료", "이날 Codex에서 나눈 질문과 답변을 주제별로 묶어 두었다."
+        return "정본 반영 완료", "이날 갱신된 내용을 주제별 정본 문서에 연결했다."
     messages = {
         "processed": (
             "남길 항목 없음",
@@ -775,8 +756,8 @@ def _daily_status(*, input_state: str, entry_count: int) -> tuple[str, str]:
             "만들지 못했습니다.",
         ),
         "source-only": (
-            "현재까지 정리됨",
-            "이날의 질문과 최종 답변은 보존되어 있으며 주제 정리를 이어서 진행합니다.",
+            "정본 반영 필요",
+            "원문은 보존했지만 Wiki 정본 반영은 아직 완료되지 않았습니다.",
         ),
     }
     return messages[input_state]
@@ -867,39 +848,25 @@ def _render_entry(
     primary_document: str | None = None,
     supporting_documents: tuple[str, ...] = (),
 ) -> str:
-    keywords = _entry_keywords(entry)
+    display_title = entry.title.replace("Woon Wiki", "Wiki")
     heading = (
-        _related_document_link(vault, primary_document, display=entry.title)
+        _related_document_link(vault, primary_document, display=display_title)
         if primary_document is not None
-        else entry.title
+        else display_title
     )
     lines = [f"### {heading}"]
-    if keywords:
-        lines.extend(["", " ".join(f"`{item}`" for item in keywords)])
     lines.extend(["", entry.summary])
-    if entry.intent and entry.intent.strip() != entry.summary.strip():
-        lines.extend(["", entry.intent])
     if supporting_documents:
         links = " · ".join(_related_document_link(vault, path) for path in supporting_documents)
-        lines.extend(["", f"**연결된 기준** — {links}"])
+        lines.extend(["", f"**관련** — {links}"])
     if entry.people:
         lines.extend(["", f"**관련 인물** {', '.join(entry.people)}"])
-    for index, exchange in enumerate(entry.exchanges, start=1):
-        if len(entry.exchanges) > 1:
-            lines.extend(["", f"#### 대화 {index}"])
-        lines.extend(
-            [
-                "",
-                f"- **질문** — {exchange.question}",
-                f"- **답변** — {exchange.answer}",
-            ]
-        )
+    rendered_details: list[tuple[str, str]] = []
+    for exchange in entry.exchanges:
         if exchange.understanding:
-            lines.append(f"- **내 판단** — {exchange.understanding}")
+            rendered_details.append(("판단", exchange.understanding))
         if exchange.outcome:
-            lines.append(f"- **결과** — {exchange.outcome}")
-        if exchange.attachments:
-            lines.append(f"- **자료** — {', '.join(exchange.attachments)}")
+            rendered_details.append(("결과", exchange.outcome))
         for label, values in (
             ("확인한 사실", exchange.facts),
             ("판단 기준", exchange.criteria),
@@ -909,7 +876,11 @@ def _render_entry(
             ("남은 문제", exchange.unresolved),
         ):
             if values:
-                lines.append(f"- **{label}** — {' · '.join(values)}")
+                rendered_details.append((label, " · ".join(values)))
+    unique_details = tuple(dict.fromkeys(rendered_details))
+    if unique_details:
+        lines.append("")
+        lines.extend(f"- **{label}** — {value}" for label, value in unique_details)
     return "\n".join(lines)
 
 
@@ -954,7 +925,7 @@ def _primary_related_document(vault: Path, entry: CodexDailyDigestEntry) -> str 
         document_title = _related_document_title(vault, path).strip().casefold()
         if document_title == entry.title.strip().casefold():
             return path
-    return None
+    return entry.related_documents[0] if entry.related_documents else None
 
 
 def _entry_document_links(
@@ -973,150 +944,9 @@ def _entry_document_links(
     return primary_document, supporting_documents
 
 
-def _render_source_bundles(
-    vault: Path,
-    bundles: tuple[dict[str, object], ...],
-    *,
-    already_linked: tuple[str, ...] = (),
-) -> list[str]:
-    """Render a compact, privacy-safe index instead of copying transcripts.
-
-    The hidden local source archive retains the redacted evidence needed for
-    regeneration.  The Obsidian projection lists every task and enough user
-    question text to identify it, while assistant answers remain represented
-    by the semantic daily entries above.  This keeps exact evidence available
-    without making one daily Markdown file hundreds of thousands of
-    characters long.
-    """
-
-    lines: list[str] = []
-    for bundle in bundles:
-        title = bundle.get("title")
-        messages = bundle.get("messages")
-        if not isinstance(title, str) or not isinstance(messages, list):
-            raise WoonError("Codex source bundle is invalid for daily rendering")
-        questions: list[tuple[str, str]] = []
-        answer_count = 0
-        attachment_labels: list[str] = []
-        for message in messages:
-            if not isinstance(message, dict):
-                raise WoonError("Codex source message is invalid for daily rendering")
-            role = message.get("role")
-            text = message.get("text")
-            created_at = message.get("created_at")
-            attachments = message.get("attachments", [])
-            if role not in {"user", "assistant"} or not isinstance(text, str):
-                raise WoonError("Codex source message role or text is invalid")
-            if role == "user":
-                questions.append((_source_time_label(created_at), _source_excerpt(text)))
-            else:
-                answer_count += 1
-            for label in _source_attachment_labels(attachments):
-                if label not in attachment_labels:
-                    attachment_labels.append(label)
-        visible_title = _human_visible_source_text(title)
-        related_documents = tuple(
-            path
-            for path in _source_bundle_related_documents(vault, (bundle,))
-            if path not in already_linked
-        )
-        heading = (
-            _related_document_link(vault, related_documents[0], display=visible_title)
-            if related_documents
-            else visible_title
-        )
-        lines.extend([f"### {heading}", "", f"- 질문 {len(questions)}개 · 답변 {answer_count}개"])
-        for time_label, question in questions[:_SOURCE_QUESTION_VISIBLE_LIMIT]:
-            lines.append(f"- **{time_label}** · {question}")
-        hidden_count = len(questions) - _SOURCE_QUESTION_VISIBLE_LIMIT
-        if hidden_count > 0:
-            lines.append(f"- 나머지 질문 {hidden_count}개는 로컬 원문에 보존됨")
-        if attachment_labels:
-            lines.append(f"- **첨부** · {', '.join(attachment_labels)}")
-        if len(related_documents) > 1:
-            links = " · ".join(
-                _related_document_link(vault, path) for path in related_documents[1:]
-            )
-            lines.append(f"- **추가 연결** · {links}")
-        lines.append("")
-    return lines
-
-
-def _source_excerpt(value: str) -> str:
-    """Return one readable line that identifies a user question."""
-
-    visible = _human_visible_source_text(value)
-    compact = re.sub(r"\s+", " ", visible).strip()
-    return _summary_excerpt(compact, limit=_SOURCE_QUESTION_EXCERPT_LIMIT)
-
-
-def _human_visible_source_text(value: str) -> str:
-    """Remove machine locators while preserving the surrounding explanation."""
-
-    text = re.sub(r"\[([^\]]+)\]\((?:<)?/(?:Users|home)/[^)\n]+(?:>)?\)", r"\1", value)
-    text = re.sub(
-        r"(?<![\w.])/(?:Users|var/folders|home)/[^\s`<>\]\[)\"']+",
-        "[로컬 경로]",
-        text,
-    )
-    replacements = {
-        "ai-reference/": "[폐기된 AI 지시 경로]",
-        ".local/woon-brain": "[폐기된 로컬 지식 경로]",
-        ".local/codex-write-vault": "[폐기된 임시 Vault 경로]",
-        "sync-llm-wiki-pilot": "[폐기된 동기화 스크립트]",
-        "Woon Wiki": "Wiki",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    # The local archive retains the redacted evidence exactly.  The generated
-    # Markdown projection removes trailing blanks so restored chats do not
-    # create thousands of Git whitespace violations or accidental hard breaks.
-    return "\n".join(line.rstrip() for line in text.splitlines())
-
-
-def _source_time_label(value: object) -> str:
-    if not isinstance(value, str):
-        raise WoonError("Codex source message timestamp is missing")
-    try:
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise WoonError("Codex source message timestamp is invalid") from error
-    return parsed.astimezone(ZoneInfo("Asia/Seoul")).strftime("%H:%M")
-
-
-def _source_attachment_labels(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise WoonError("Codex source attachments are invalid")
-    labels: list[str] = []
-    for item in value:
-        if not isinstance(item, dict) or not isinstance(item.get("label"), str):
-            raise WoonError("Codex source attachment is invalid")
-        labels.append(item["label"].strip())
-    return tuple(labels)
-
-
-def _daily_summary(entries: tuple[CodexDailyDigestEntry, ...]) -> str:
-    summaries = list(dict.fromkeys(entry.summary.strip() for entry in entries))
-    return "\n".join(f"- {_summary_excerpt(summary)}" for summary in summaries[:5])
-
-
-def _summary_excerpt(value: str, *, limit: int = 160) -> str:
-    """Keep the overview scannable without cutting through a word."""
-
-    if len(value) <= limit:
-        return value
-    candidate = value[: limit + 1]
-    if " " in candidate:
-        candidate = candidate.rsplit(" ", 1)[0]
-    return candidate.rstrip(" -–—·:;,.\n\t") + "…"
-
-
 def _daily_metadata_summary(entries: tuple[CodexDailyDigestEntry, ...], *, input_state: str) -> str:
     if entries:
-        titles = list(dict.fromkeys(entry.title.rstrip(". ") for entry in entries))
+        titles = list(dict.fromkeys(entry.summary.rstrip(". ") for entry in entries))
         selected: list[str] = []
         for title in titles:
             candidate = " · ".join((*selected, title))
@@ -1130,7 +960,7 @@ def _daily_metadata_summary(entries: tuple[CodexDailyDigestEntry, ...], *, input
         "partial": "오늘 대화를 정리하는 중이다.",
         "pending": "다음 자동 정리를 기다리는 중이다.",
         "unavailable": "이 날짜의 Codex 세션 원본을 찾지 못했다.",
-        "source-only": "이날의 질문과 답변은 보존되어 있고 주제 정리를 이어가는 중이다.",
+        "source-only": "원문은 보존했지만 Wiki 정본 반영은 아직 완료되지 않았다.",
     }[input_state]
 
 
@@ -1138,13 +968,13 @@ def _daily_status_label(entries: tuple[CodexDailyDigestEntry, ...], *, input_sta
     if input_state == "partial":
         return "진행 중"
     if entries:
-        return "정리 완료"
+        return "정본 반영 완료"
     return {
         "processed": "남길 항목 없음",
         "no-meaningful": "남길 항목 없음",
         "pending": "다음 실행 대기",
         "unavailable": "원본 확인 필요",
-        "source-only": "현재까지 정리됨",
+        "source-only": "정본 반영 필요",
     }[input_state]
 
 
@@ -1203,89 +1033,3 @@ def _related_document_link(
 
     title = display or _related_document_title(vault, relative_path)
     return f"[[../../{relative_path[:-3]}|{title}]]"
-
-
-def _source_bundle_related_documents(
-    vault: Path, bundles: tuple[dict[str, object], ...]
-) -> tuple[str, ...]:
-    """Recover only explicit links from allowed conversation evidence.
-
-    Historical ledgers did not always persist ``related_documents``.  A daily
-    projection may therefore recover an existing canonical Wiki link when the
-    allowed user/final-answer text contains its exact path or its unique full
-    title.  This deliberately avoids fuzzy similarity: merely discussing a
-    nearby topic must not attach an unrelated canonical page.
-    """
-
-    visible_parts: list[str] = []
-    for bundle in bundles:
-        title = bundle.get("title")
-        messages = bundle.get("messages")
-        if isinstance(title, str):
-            visible_parts.append(title)
-        if not isinstance(messages, list):
-            continue
-        for message in messages:
-            if isinstance(message, dict) and isinstance(message.get("text"), str):
-                visible_parts.append(str(message["text"]))
-    if not visible_parts:
-        return ()
-
-    source_text = "\n".join(visible_parts)
-    related: list[str] = []
-    for match in _CANONICAL_WIKI_PATH_RE.finditer(source_text):
-        candidate = _canonical_wiki_candidate(vault, match.group("path"))
-        if candidate is not None and candidate not in related:
-            related.append(candidate)
-
-    for title, relative_path in _wiki_title_index(vault):
-        if title in source_text and relative_path not in related:
-            related.append(relative_path)
-    return tuple(related[:64])
-
-
-def _canonical_wiki_candidate(vault: Path, raw_path: str) -> str | None:
-    candidate = raw_path.strip().lstrip("./")
-    if candidate.startswith("wiki/") and (vault / candidate).is_file():
-        return candidate
-    return None
-
-
-def _wiki_title_index(vault: Path) -> tuple[tuple[str, str], ...]:
-    wiki_root = vault / "wiki"
-    paths = (
-        tuple(
-            path
-            for path in sorted(wiki_root.rglob("*.md"))
-            if "_sources" not in path.relative_to(wiki_root).parts
-        )
-        if wiki_root.is_dir()
-        else ()
-    )
-    fingerprint = (
-        len(paths),
-        max((path.stat().st_mtime_ns for path in paths), default=0),
-        sum(path.stat().st_size for path in paths),
-    )
-    cache_key = str(vault.resolve())
-    cached = _WIKI_TITLE_INDEX_CACHE.get(cache_key)
-    if cached is not None and cached[0] == fingerprint:
-        return cached[1]
-
-    by_title: dict[str, list[str]] = {}
-    for path in paths:
-        text = path.read_text(encoding="utf-8")
-        match = re.search(r'^title:\s*["\']?(.+?)["\']?\s*$', text, flags=re.MULTILINE)
-        if match is None:
-            match = re.search(r"^#\s+(.+?)\s*$", text, flags=re.MULTILINE)
-        if match is None:
-            continue
-        title = match.group(1).strip().strip("\"'")
-        if len(title) < 8 or title in {"Wiki", "Woon Wiki"}:
-            continue
-        by_title.setdefault(title, []).append(path.relative_to(vault).as_posix())
-    index = tuple(
-        sorted((title, values[0]) for title, values in by_title.items() if len(values) == 1)
-    )
-    _WIKI_TITLE_INDEX_CACHE[cache_key] = (fingerprint, index)
-    return index
