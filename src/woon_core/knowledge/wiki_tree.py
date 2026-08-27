@@ -689,6 +689,7 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
     """Require meaningful sibling order and staged navigation for dense subjects."""
 
     children = _children_by_parent(tuple(nodes))
+    by_path = {node.relative_path: node for node in nodes}
     issues: list[str] = []
     for parent in nodes:
         direct = children.get(parent.relative_path, ())
@@ -711,11 +712,15 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
                     f"{parent.relative_path}: direct child sequence values must be unique: "
                     + ", ".join(_format_sequence(sequence) for sequence in repeated)
                 )
-        staged_threshold = (
-            STAGED_PROJECT_CHILD_THRESHOLD
-            if parent.node_kind == "entity" and parent.view_mode == "project"
-            else STAGED_HUB_CHILD_THRESHOLD
+        concept_subtree = parent.relative_path != "wiki/concepts/README.md" and _has_ancestor(
+            parent, "wiki/concepts/README.md", by_path
         )
+        if concept_subtree:
+            staged_threshold = 1
+        elif parent.node_kind == "entity" and parent.view_mode == "project":
+            staged_threshold = STAGED_PROJECT_CHILD_THRESHOLD
+        else:
+            staged_threshold = STAGED_HUB_CHILD_THRESHOLD
         if supports_groups and len(direct) > staged_threshold and not parent.navigation_groups:
             issues.append(
                 f"{parent.relative_path}: {len(direct)} direct children require explicit "

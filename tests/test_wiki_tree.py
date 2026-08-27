@@ -989,6 +989,52 @@ def test_large_grouping_hub_must_define_reading_stages(tmp_path: Path) -> None:
     )
 
 
+def test_concept_subtree_requires_groups_for_two_or_more_children(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/concepts/README.md",
+        title="개념",
+        canonical_id="concepts/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("개념",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/concepts/network.md",
+        title="네트워크",
+        canonical_id="concepts/network",
+        node_kind="topic",
+        parent="[[wiki/concepts/README|개념]]",
+        keywords=("네트워크",),
+    )
+    for index in range(2):
+        _write_page(
+            tmp_path,
+            f"wiki/concepts/network-{index}.md",
+            title=f"네트워크 주제 {index}",
+            canonical_id=f"concepts/network-{index}",
+            node_kind="topic",
+            parent="[[wiki/concepts/network|네트워크]]",
+            keywords=(f"네트워크 주제 {index}",),
+        )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert any(
+        "2 direct children require explicit stage groups" in issue for issue in report.issues
+    )
+
+
 def test_book_page_rejects_repeated_explanation(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
