@@ -271,7 +271,7 @@ def test_daily_digest_coalesces_incremental_updates_for_the_same_subject(tmp_pat
 
     rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
     assert rendered.count("자동화는 실제 산출물로 검증한다") == 1
-    assert "실제 Wiki와 일일 기록" in rendered
+    assert "실제 Wiki와 일일 기록" not in rendered
     assert "재실행에서 문서가 변하지 않아야" in rendered
     assert "내부 식별자는 충돌하지 않게" not in rendered
 
@@ -317,8 +317,8 @@ def test_daily_digest_renders_only_semantic_outcome_not_question_answer_or_attac
     rendered = (tmp_path / "inbox/daily/2026-08-24.md").read_text(encoding="utf-8")
     assert "**질문** —" not in rendered
     assert "**답변** —" not in rendered
-    assert "**판단** — 자료 보관이 아니라 재실행 가능한 학습 흐름" in rendered
-    assert "**결과** —" in rendered
+    assert "자료 보관이 아니라 재실행 가능한 학습 흐름" not in rendered
+    assert "회귀·분류 자료와 실습 코드가 학습 순서에 연결됐다" not in rendered
     assert "회귀 샘플 문항 PDF" not in rendered
 
 
@@ -383,8 +383,9 @@ def test_daily_digest_renders_detailed_semantics_without_source_index(
     record_codex_daily_digest(tmp_path, day=date(2026, 8, 24), entries=entries)
 
     rendered = daily.read_text(encoding="utf-8")
-    assert "**확인한 사실** — 편하게 입은 기존 바지가 있다." in rendered
-    assert "**판단 기준** — 실제 착용감 · 원하는 실루엣" in rendered
+    assert "사이즈 표보다 실제 착용감을 우선했다." in rendered
+    assert "편하게 입은 기존 바지가 있다." not in rendered
+    assert "실제 착용감 · 원하는 실루엣" not in rendered
     assert "## 대화 찾아보기" not in rendered
     assert "> [!note]" not in rendered
     assert "### [[../../wiki/personal/denim-fit|데님 핏을 실제 착용 기준으로 비교했다]]" in rendered
@@ -502,9 +503,58 @@ def test_daily_digest_places_canonical_links_with_their_subject(tmp_path: Path) 
 
     rendered = daily.read_text(encoding="utf-8")
     assert "### [[../../wiki/personal/link-calendar|Link Calendar 사용 원칙]]" in rendered
-    assert "**관련** — [[../../wiki/personal/wiki|Wiki]]" in rendered
+    assert "**변경 문서**\n- [[../../wiki/personal/wiki|Wiki]]" in rendered
     assert "## 관련 문서" not in rendered
     assert rendered.count("[[../../wiki/personal/link-calendar") == 1
+
+
+def test_daily_digest_groups_project_children_under_one_canonical_root(tmp_path: Path) -> None:
+    _digest_settings(tmp_path)
+    daily = tmp_path / "inbox/daily/2026-08-24.md"
+    daily.parent.mkdir(parents=True)
+    daily.write_text("# 2026-08-24\n", encoding="utf-8")
+    project = tmp_path / "wiki/personal/project.md"
+    project.parent.mkdir(parents=True)
+    project.write_text(
+        "---\ntitle: 프로젝트\nnode_kind: entity\nentity_kind: project\n"
+        "summary: 프로젝트의 현재 목표다.\n---\n\n# 프로젝트\n",
+        encoding="utf-8",
+    )
+    for slug, title in (("architecture", "아키텍처"), ("verification", "검증")):
+        (tmp_path / f"wiki/personal/{slug}.md").write_text(
+            "---\n"
+            f"title: {title}\nnode_kind: topic\n"
+            "parent: '[[wiki/personal/project|프로젝트]]'\n"
+            "---\n\n"
+            f"# {title}\n",
+            encoding="utf-8",
+        )
+
+    record_codex_daily_digest(
+        tmp_path,
+        day=date(2026, 8, 24),
+        entries=(
+            CodexDailyDigestEntry(
+                kind="프로젝트",
+                title="아키텍처를 정했다",
+                summary="구성 요소의 경계를 정했다.",
+                related_documents=("wiki/personal/architecture.md",),
+            ),
+            CodexDailyDigestEntry(
+                kind="프로젝트",
+                title="검증 기준을 정했다",
+                summary="완료 조건을 정했다.",
+                related_documents=("wiki/personal/verification.md",),
+            ),
+        ),
+    )
+
+    rendered = daily.read_text(encoding="utf-8")
+    assert rendered.count("### [[../../wiki/personal/project|프로젝트]]") == 1
+    assert "프로젝트의 현재 목표다." in rendered
+    assert "[[../../wiki/personal/architecture|아키텍처]]" in rendered
+    assert "[[../../wiki/personal/verification|검증]]" in rendered
+    assert "구성 요소의 경계를 정했다." not in rendered
 
 
 def test_daily_digest_populates_native_base_metadata(tmp_path: Path) -> None:

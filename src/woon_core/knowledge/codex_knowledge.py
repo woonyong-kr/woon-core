@@ -999,14 +999,10 @@ def _validate_lifecycle(
     if lifecycle_status not in _LIFECYCLE_STATES:
         raise WoonError(f"Codex knowledge {label} lifecycle_status is invalid")
     if occurred_on is not None and any(value is not None for value in (started_on, ended_on)):
-        raise WoonError(
-            f"Codex knowledge {label} occurred_on cannot be combined with a date range"
-        )
+        raise WoonError(f"Codex knowledge {label} occurred_on cannot be combined with a date range")
     if started_on is not None and ended_on is not None and ended_on < started_on:
         raise WoonError(f"Codex knowledge {label} ended_on cannot precede started_on")
-    if lifecycle_status in {"completed", "cancelled", "archived"} and not (
-        ended_on or occurred_on
-    ):
+    if lifecycle_status in {"completed", "cancelled", "archived"} and not (ended_on or occurred_on):
         raise WoonError(
             f"Codex knowledge {label} closed lifecycle requires ended_on or occurred_on"
         )

@@ -69,6 +69,37 @@ class SourceCatalogBoundaryTests(unittest.TestCase):
 
             self.assertTrue(any("requires a Wiki subject" in issue for issue in issues))
 
+    def test_one_archive_index_link_covers_a_verified_local_only_corpus(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "wiki/private/_sources/knowledge/local-only/example"
+            archive.mkdir(parents=True)
+            readme = archive / "README.md"
+            data = archive / "data.txt"
+            readme.write_text("# 원자료\n", encoding="utf-8")
+            data.write_text("evidence\n", encoding="utf-8")
+            subject = root / "wiki/example.md"
+            subject.parent.mkdir(parents=True, exist_ok=True)
+            subject.write_text(
+                "# Example\n\n"
+                "[[wiki/private/_sources/knowledge/local-only/example/README|원자료]]\n",
+                encoding="utf-8",
+            )
+            catalog = root / "catalog/sources/example.yaml"
+            catalog.parent.mkdir(parents=True)
+            catalog.write_text(
+                "version: 1\nsource: example\nwiki_subject: wiki/example.md\nrecords:\n"
+                "- state: canonical\n"
+                "  target: wiki/private/_sources/knowledge/local-only/example/README.md\n"
+                f"  target_sha256: {hashlib.sha256(readme.read_bytes()).hexdigest()}\n"
+                "- state: canonical\n"
+                "  target: wiki/private/_sources/knowledge/local-only/example/data.txt\n"
+                f"  target_sha256: {hashlib.sha256(data.read_bytes()).hexdigest()}\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(AUDIT.source_catalog_boundary_issues(root), [])
+
 
 class WikiBaseContractTests(unittest.TestCase):
     def test_accepts_semantically_equal_quoted_or_plain_yaml_scalars(self) -> None:
@@ -175,6 +206,92 @@ flowchart TD
             ["wiki/example.md: line 4"],
         )
         self.assertEqual(AUDIT.mermaid_color_issues("wiki/example.md", semantic), [])
+
+
+class CanonicalSectionQualityTests(unittest.TestCase):
+    def test_rejects_duplicate_h2_and_timeline_row(self) -> None:
+        headings, timeline = AUDIT.canonical_section_quality_issues(
+            "wiki/example.md",
+            """# 예제
+
+## 판단
+
+첫 판단.
+
+## 판단
+
+두 번째 판단.
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-27 · 변경 — 같은 내용
+- 2026-08-27 · 변경 — 같은 내용
+<!-- woon-wiki-timeline:end -->
+""",
+        )
+
+        self.assertEqual(headings, ["wiki/example.md: duplicated H2 '판단' x2"])
+        self.assertEqual(len(timeline), 1)
+
+    def test_ignores_heading_like_text_inside_code_fence(self) -> None:
+        headings, timeline = AUDIT.canonical_section_quality_issues(
+            "wiki/example.md",
+            """# 예제
+
+## 판단
+
+```markdown
+## 판단
+```
+""",
+        )
+
+        self.assertEqual(headings, [])
+        self.assertEqual(timeline, [])
+
+    def test_rejects_duplicate_paragraph_empty_h2_and_false_link_heading(self) -> None:
+        issues = AUDIT.canonical_body_quality_issues(
+            "wiki/example.md",
+            """---
+title: 예제
+---
+
+# 예제
+
+같은 설명을 두 번 쓰면 탐색할 때 잡음이 된다.
+
+같은 설명을 두 번 쓰면 탐색할 때 잡음이 된다.
+
+## 핵심 링크
+
+- 링크가 아닌 설명
+
+## 비어 있음
+""",
+        )
+
+        self.assertTrue(any("duplicated consecutive paragraph" in issue for issue in issues))
+        self.assertTrue(any("contains no hyperlink" in issue for issue in issues))
+        self.assertTrue(any("empty H2" in issue for issue in issues))
+
+    def test_accepts_linked_and_code_backed_sections(self) -> None:
+        issues = AUDIT.canonical_body_quality_issues(
+            "wiki/example.md",
+            """# 예제
+
+## 핵심 링크
+
+- [[wiki/topic|주제]]
+
+## 순서도
+
+```mermaid
+flowchart LR
+  A --> B
+```
+""",
+        )
+
+        self.assertEqual(issues, [])
 
 
 class VaultRootDirectoryTests(unittest.TestCase):
@@ -901,6 +1018,21 @@ profile: woon-apple-calendar
 
 
 class RetiredAiInstructionBoundaryTests(unittest.TestCase):
+    def test_ignores_legacy_locator_inside_source_inventory_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_catalog = root / "catalog/sources/legacy-vault.yaml"
+            reconciliation = root / "catalog/reconciliation/legacy-vault.yaml"
+            source_catalog.parent.mkdir(parents=True)
+            reconciliation.parent.mkdir(parents=True)
+            source_catalog.write_text("path: ai-reference/legacy.md\n", encoding="utf-8")
+            reconciliation.write_text("source: ai-reference/legacy.md\n", encoding="utf-8")
+
+            self.assertEqual(
+                AUDIT.retired_ai_instruction_boundary_issues(root),
+                [],
+            )
+
     def test_ignores_preserved_source_history_but_rejects_active_stale_locator(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

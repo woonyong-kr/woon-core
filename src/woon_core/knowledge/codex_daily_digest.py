@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
+import yaml
+
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
 from woon_core.knowledge.codex_source_archive import load_codex_source_bundles
@@ -57,7 +59,7 @@ _INPUT_STATES = {
     "unavailable",
     "source-only",
 }
-_DIGEST_RENDER_REVISION = "25"
+_DIGEST_RENDER_REVISION = "26"
 _DAILY_ENTRY_LIMIT = 256
 _VISIBLE_LIMIT = 900
 _TITLE_LIMIT = 80
@@ -67,6 +69,14 @@ _SENSITIVE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _RELATED_ROOTS = ("wiki/",)
+_DAILY_GROUP_ENTITY_KINDS = {
+    "project",
+    "person",
+    "book",
+    "career",
+    "application",
+    "career-application",
+}
 _KEYWORD_CANDIDATES = (
     "Obsidian",
     "Wiki",
@@ -528,8 +538,8 @@ def _render_daily_block(
     if entries:
         lines.extend(["", "## 정본 변경", ""])
         subjects = tuple(
-            _combine_subject_entries(same_subject)
-            for same_subject in _group_section_entries(list(entries))
+            _combine_subject_entries(vault, same_subject)
+            for same_subject in _group_section_entries(vault, list(entries))
         )
         primary_documents = tuple(
             path
@@ -857,67 +867,112 @@ def _render_entry(
     lines = [f"### {heading}"]
     lines.extend(["", entry.summary])
     if supporting_documents:
-        links = " · ".join(_related_document_link(vault, path) for path in supporting_documents)
-        lines.extend(["", f"**관련** — {links}"])
+        links = tuple(_related_document_link(vault, path) for path in supporting_documents)
+        lines.extend(["", "**변경 문서**"])
+        for offset in range(0, len(links), 6):
+            lines.append("- " + " · ".join(links[offset : offset + 6]))
     if entry.people:
         lines.extend(["", f"**관련 인물** {', '.join(entry.people)}"])
-    rendered_details: list[tuple[str, str]] = []
-    for exchange in entry.exchanges:
-        if exchange.understanding:
-            rendered_details.append(("판단", exchange.understanding))
-        if exchange.outcome:
-            rendered_details.append(("결과", exchange.outcome))
-        for label, values in (
-            ("확인한 사실", exchange.facts),
-            ("판단 기준", exchange.criteria),
-            ("비교한 대안", exchange.alternatives),
-            ("근거", exchange.evidence),
-            ("변경·산출물", exchange.changes),
-            ("남은 문제", exchange.unresolved),
-        ):
-            if values:
-                rendered_details.append((label, " · ".join(values)))
-    unique_details = tuple(dict.fromkeys(rendered_details))
-    if unique_details:
-        lines.append("")
-        lines.extend(f"- **{label}** — {value}" for label, value in unique_details)
     return "\n".join(lines)
 
 
 def _group_section_entries(
+    vault: Path,
     entries: list[CodexDailyDigestEntry],
 ) -> tuple[tuple[CodexDailyDigestEntry, ...], ...]:
-    """Keep one visible row per canonical subject inside a daily section.
+    """Keep one visible row per canonical subject or owning entity.
 
-    Incremental runs may add a later conclusion for the same Wiki subject.  The
-    ledger deliberately preserves both conclusions, but the human-facing daily
-    note must not look as if two independent documents were created.  Exact
-    titles are therefore coalesced only inside the same semantic section.
+    A project, person, book, career item, or application may update many focused
+    children in one day. The ledger preserves every conclusion, while the Daily
+    shows one owning entity summary and a compact list of changed Wiki links.
     """
 
     grouped: dict[str, list[CodexDailyDigestEntry]] = {}
     for entry in entries:
-        grouped.setdefault(entry.title.strip(), []).append(entry)
+        primary = _primary_related_document(vault, entry)
+        key = _daily_anchor_document(vault, primary) if primary is not None else entry.title.strip()
+        grouped.setdefault(key, []).append(entry)
     return tuple(tuple(items) for items in grouped.values())
 
 
-def _combine_subject_entries(entries: tuple[CodexDailyDigestEntry, ...]) -> CodexDailyDigestEntry:
+def _combine_subject_entries(
+    vault: Path, entries: tuple[CodexDailyDigestEntry, ...]
+) -> CodexDailyDigestEntry:
     if len(entries) == 1:
         return entries[0]
+    first_primary = _primary_related_document(vault, entries[0])
+    anchor = _daily_anchor_document(vault, first_primary) if first_primary is not None else None
+    anchor_entries = tuple(
+        entry for entry in entries if _primary_related_document(vault, entry) == anchor
+    )
+    representative = anchor_entries[-1] if anchor_entries else entries[-1]
+    title = _related_document_title(vault, anchor) if anchor is not None else representative.title
+    summary = (
+        representative.summary
+        if anchor_entries or anchor is None
+        else _related_document_summary(vault, anchor) or representative.summary
+    )
     return CodexDailyDigestEntry(
         kind="·".join(dict.fromkeys(entry.kind for entry in entries)),
-        title=entries[0].title,
-        summary=" ".join(dict.fromkeys(entry.summary for entry in entries)),
+        title=title,
+        summary=summary,
         intent=" ".join(
             dict.fromkeys(entry.intent for entry in entries if entry.intent is not None)
         )
         or None,
         exchanges=tuple(exchange for entry in entries for exchange in entry.exchanges),
         related_documents=tuple(
-            dict.fromkeys(path for entry in entries for path in entry.related_documents)
+            dict.fromkeys(
+                path
+                for path in ((anchor,) if anchor is not None else ())
+                + tuple(path for entry in entries for path in entry.related_documents)
+                if path is not None
+            )
         ),
         people=tuple(dict.fromkeys(person for entry in entries for person in entry.people)),
     )
+
+
+def _daily_anchor_document(vault: Path, relative_path: str) -> str:
+    """Return the nearest time-owning entity without inventing a second tree."""
+
+    current = relative_path
+    seen: set[str] = set()
+    while current not in seen:
+        seen.add(current)
+        metadata = _related_document_metadata(vault, current)
+        if (
+            metadata.get("node_kind") == "entity"
+            and str(metadata.get("entity_kind", "")) in _DAILY_GROUP_ENTITY_KINDS
+        ):
+            return current
+        parent = metadata.get("parent")
+        if not isinstance(parent, str):
+            break
+        match = re.fullmatch(r"\[\[(?P<target>[^]|#]+)(?:#[^]|]+)?(?:\|[^]]+)?]]", parent)
+        if match is None:
+            break
+        target = match.group("target")
+        current = target if target.endswith(".md") else f"{target}.md"
+        if not current.startswith("wiki/") or not (vault / current).is_file():
+            break
+    return relative_path
+
+
+def _related_document_metadata(vault: Path, relative_path: str) -> dict[str, object]:
+    text = _related_document(vault, relative_path).read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        return {}
+    boundary = text.find("\n---\n", 4)
+    if boundary < 0:
+        return {}
+    payload = yaml.safe_load(text[4:boundary]) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _related_document_summary(vault: Path, relative_path: str) -> str:
+    summary = _related_document_metadata(vault, relative_path).get("summary")
+    return str(summary).strip() if summary is not None else ""
 
 
 def _primary_related_document(vault: Path, entry: CodexDailyDigestEntry) -> str | None:

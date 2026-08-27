@@ -471,7 +471,9 @@ def test_accepts_new_single_wiki_prompt_contracts() -> None:
         "new_wiki_reason parent keywords central_question wiki/** "
         "일일 기록은 Wiki 승격 입력이 아니다 "
         "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크 "
-        "콘텐츠 subtree와 Facet을 만들지 않는다 resource_keyword "
+        "direct child가 2개 이상이면 navigation_groups "
+        "콘텐츠 subtree와 Facet 탐색 페이지를 만들지 않는다 "
+        "facets metadata는 분류 보조 속성 resource_keyword "
         "책 → 장르 키워드 → 책 제목 리소스 → 주제 텍스트 → 들여쓴 원자료 링크 "
         "lifecycle_status started_on ended_on occurred_on wiki/private/_sources/codex "
         "Vault 밖 별도 source archive를 만들지 않는다",
@@ -480,7 +482,9 @@ def test_accepts_new_single_wiki_prompt_contracts() -> None:
         _prompt_contract("knowledge-curation"),
         "canonical_id parent keywords view_mode 하위 키워드 최신 문서 wiki/README.md "
         "작은 순수 분류 허브는 일반 텍스트 불릿 아래 직접 하위 키워드 링크 "
-        "콘텐츠 subtree와 Facet이 없는지 "
+        "direct child가 2개 이상이면 navigation_groups "
+        "콘텐츠 subtree와 Facet 탐색 페이지가 없는지 "
+        "facets metadata는 분류 보조 속성 "
         "책 → 장르 키워드 → 책 제목 리소스 → 주제 텍스트 → 들여쓴 원자료 링크 "
         "lifecycle_status started_on ended_on occurred_on wiki/private/_sources "
         "Vault 밖 별도 보관소",

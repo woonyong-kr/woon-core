@@ -34,8 +34,13 @@ NODE_KINDS = {"root", "hub", "topic", "entity", "detail", "decision"}
 VIEW_MODES = {"tree", "linear", "project", "topic-timeline", "article"}
 TREE_VIEW_KINDS = {"root", "hub", "topic", "entity"}
 FLATTEN_GROUP_MAX_CHILDREN = 20
-STAGED_HUB_CHILD_THRESHOLD = 10
-STAGED_PROJECT_CHILD_THRESHOLD = 6
+UNGROUPED_NAVIGATION_EXCEPTIONS = {
+    "wiki/README.md",
+    "wiki/books/README.md",
+    "wiki/books/ai-machine-learning.md",
+    "wiki/books/programming-languages.md",
+    "wiki/concepts/README.md",
+}
 LIFECYCLE_STATES = {
     "idea",
     "planned",
@@ -324,6 +329,10 @@ def render_wiki_tree_view(
     # without helping a reader understand the subject, so every Wiki page now
     # keeps only its authored semantic summary and navigation in the body.
     updated = _normalize_h1_spacing(_strip_marker_block(text, OVERVIEW_START, OVERVIEW_END))
+    # Latest indexes are projections. Remove every stale variant first and
+    # rebuild only the heading that still has rows in the current graph.
+    updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
+    updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
 
     if node.entity_kind == "book":
         updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
@@ -686,16 +695,19 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
 
 
 def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> list[str]:
-    """Require meaningful sibling order and staged navigation for dense subjects."""
+    """Require one visible grouping axis whenever a page owns multiple children.
+
+    A few compact catalog roots intentionally render a two-level bullet tree from
+    their canonical parent relations. Every other multi-child page must name the
+    reading axis explicitly so the human view and AI context cannot degrade into
+    an alphabetic or creation-order link dump.
+    """
 
     children = _children_by_parent(tuple(nodes))
-    by_path = {node.relative_path: node for node in nodes}
     issues: list[str] = []
     for parent in nodes:
         direct = children.get(parent.relative_path, ())
-        supports_groups = parent.node_kind in {"root", "hub", "topic"} or (
-            parent.node_kind == "entity" and parent.view_mode == "project"
-        )
+        supports_groups = parent.node_kind in TREE_VIEW_KINDS
         if len(direct) > 1 and not parent.navigation_groups:
             missing_sequence = tuple(child for child in direct if child.sequence is None)
             if missing_sequence:
@@ -712,26 +724,22 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
                     f"{parent.relative_path}: direct child sequence values must be unique: "
                     + ", ".join(_format_sequence(sequence) for sequence in repeated)
                 )
-        concept_subtree = parent.relative_path != "wiki/concepts/README.md" and _has_ancestor(
-            parent, "wiki/concepts/README.md", by_path
+        requires_groups = (
+            supports_groups
+            and len(direct) > 1
+            and parent.relative_path not in UNGROUPED_NAVIGATION_EXCEPTIONS
         )
-        if concept_subtree:
-            staged_threshold = 1
-        elif parent.node_kind == "entity" and parent.view_mode == "project":
-            staged_threshold = STAGED_PROJECT_CHILD_THRESHOLD
-        else:
-            staged_threshold = STAGED_HUB_CHILD_THRESHOLD
-        if supports_groups and len(direct) > staged_threshold and not parent.navigation_groups:
+        if requires_groups and not parent.navigation_groups:
             issues.append(
                 f"{parent.relative_path}: {len(direct)} direct children require explicit "
-                "stage groups instead of one flat list"
+                "navigation groups instead of one flat list"
             )
         if not parent.navigation_groups:
             continue
         if not supports_groups:
             issues.append(
                 f"{parent.relative_path}: navigation_groups are allowed only on root, hub, "
-                "topic, or project entity pages"
+                "topic, or entity pages"
             )
             continue
         direct_by_id = {child.canonical_id: child for child in direct}
@@ -792,23 +800,43 @@ def _has_ancestor(node: WikiTreeNode, ancestor: str, by_path: dict[str, WikiTree
 
 
 def _book_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
-    """Require book landing pages to be headings and links, not repeated prose."""
+    """Require book landing pages to be a flat or two-level linked contents list."""
 
     _, body = split_markdown(strip_generated_wiki_views(text))
     body = re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
     body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
-    issues: list[str] = []
+    group_open = False
+    group_has_link = False
     for line in body.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("##"):
             continue
-        if re.fullmatch(r"-\s+\[\[[^\]]+\]\]", stripped):
+        indent = len(line) - len(line.lstrip())
+        if indent == 0 and re.fullmatch(r"-\s+[^\[\n][^\n]*", stripped):
+            if group_open and not group_has_link:
+                return [
+                    f"{node.relative_path}: every book contents group must contain at least "
+                    "one indented hyperlink row"
+                ]
+            group_open = True
+            group_has_link = False
             continue
-        issues.append(
+        if re.fullmatch(r"-\s+\[\[[^\]]+\]\]", stripped):
+            if group_open and indent == 0:
+                return [
+                    f"{node.relative_path}: grouped book links must be indented below their label"
+                ]
+            group_has_link = True
+            continue
+        return [
             f"{node.relative_path}: book page body must contain only headings and hyperlink rows"
-        )
-        break
-    return issues
+        ]
+    if group_open and not group_has_link:
+        return [
+            f"{node.relative_path}: every book contents group must contain at least one "
+            "indented hyperlink row"
+        ]
+    return []
 
 
 def _resource_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
@@ -1198,6 +1226,9 @@ def _replace_or_append_section(text: str, heading: str, start: str, end: str, bl
         return re.sub(
             re.escape(start) + r".*?" + re.escape(end), block, text, count=1, flags=re.DOTALL
         )
+    empty_heading = re.compile(rf"(?ms)^## {re.escape(heading)}\s*\n\s*(?=^## |\Z)")
+    if empty_heading.search(text):
+        return empty_heading.sub(f"## {heading}\n\n{block}\n", text, count=1)
     return text.rstrip() + f"\n\n## {heading}\n\n{block}\n"
 
 
@@ -1214,7 +1245,12 @@ def _strip_section(text: str, heading: str, start: str, end: str) -> str:
     if text.count(start) != text.count(end) or text.count(start) > 1:
         raise WoonError(f"malformed managed markers: {start}")
     if start not in text:
-        return text
+        return re.sub(
+            rf"(?ms)^## {re.escape(heading)}\s*\n\s*(?=^## |\Z)",
+            "",
+            text,
+            count=1,
+        )
     pattern = re.compile(
         rf"(?ms)^## {re.escape(heading)}\s*\n+{re.escape(start)}.*?{re.escape(end)}\s*\n?"
     )

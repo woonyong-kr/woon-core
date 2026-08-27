@@ -211,6 +211,11 @@ ALLOWED_VISIBLE_ROOT_DIRECTORIES = {
     "wiki",
 }
 DAILY_DIGEST_EMBED_RE = re.compile(r"!\[\[\.\./daily-digests/(\d{4}-\d{2}-\d{2})\]\]")
+H2_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
+TIMELINE_BLOCK_RE = re.compile(
+    r"<!-- woon-wiki-timeline:start -->(.*?)<!-- woon-wiki-timeline:end -->",
+    re.DOTALL,
+)
 
 
 def rel(path: Path) -> str:
@@ -694,7 +699,9 @@ def calendar_projection_issues(vault: Path) -> list[str]:
                     or not str(metadata["calendar"]).strip()
                 ):
                     issues.append(f"{relative}: calendar projection calendar is required")
-                if not isinstance(metadata.get("Date"), str) or not str(metadata["Date"]).strip():
+                if not isinstance(metadata.get("Date"), (str, date, datetime)) or not str(
+                    metadata["Date"]
+                ).strip():
                     issues.append(f"{relative}: calendar projection requires Date")
                 if (
                     not isinstance(metadata.get("Category"), str)
@@ -705,7 +712,7 @@ def calendar_projection_issues(vault: Path) -> list[str]:
                 if all_day is False:
                     for field in ("Start Date", "End Date"):
                         if (
-                            not isinstance(metadata.get(field), str)
+                            not isinstance(metadata.get(field), (str, date, datetime))
                             or not str(metadata[field]).strip()
                         ):
                             issues.append(f"{relative}: timed calendar projection requires {field}")
@@ -821,33 +828,11 @@ def parse_frontmatter(text: str) -> dict[str, object]:
     end = text.find("\n---", 4)
     if end == -1:
         return {}
-    raw = text[4:end].splitlines()
-    data: dict[str, object] = {}
-    current_key: str | None = None
-    for line in raw:
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        list_item = re.match(r"^\s*-\s+(.*)$", line)
-        if list_item and current_key:
-            current_value = data.get(current_key)
-            if isinstance(current_value, list):
-                values = current_value
-            else:
-                values = []
-                data[current_key] = values
-            values.append(clean_value(list_item.group(1)))
-            continue
-        match = re.match(r"^([A-Za-z0-9가-힣 _-]+):\s*(.*)$", line)
-        if match:
-            current_key = match.group(1).strip()
-            value = match.group(2).strip()
-            if value == "":
-                data[current_key] = ""
-            elif value == "[]":
-                data[current_key] = []
-            else:
-                data[current_key] = clean_value(value)
-    return data
+    try:
+        data = yaml.safe_load(text[4:end])
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def clean_value(value: str) -> object:
@@ -906,6 +891,13 @@ def retired_ai_instruction_boundary_issues(vault: Path) -> list[str]:
             continue
         relative = path.relative_to(vault)
         if excluded_roots.intersection(relative.parts):
+            continue
+        if relative.parts[:2] in {
+            ("catalog", "sources"),
+            ("catalog", "reconciliation"),
+        }:
+            # Source inventory and reconciliation receipts must retain exact legacy
+            # locators as evidence, but they are not executable AI instructions.
             continue
         if path.suffix not in {".md", ".yaml", ".yml", ".json", ".toml"}:
             continue
@@ -1100,6 +1092,71 @@ def strip_fenced_blocks(text: str) -> str:
 
 def strip_inline_code(text: str) -> str:
     return re.sub(r"`[^`]*`", "", text)
+
+
+def canonical_section_quality_issues(relative: str, text: str) -> tuple[list[str], list[str]]:
+    """Reject duplicated section labels and repeated canonical timeline rows."""
+
+    visible = strip_fenced_blocks(text)
+    headings: dict[str, int] = {}
+    for heading in H2_RE.findall(visible):
+        normalized = re.sub(r"\s+", " ", heading).strip().casefold()
+        headings[normalized] = headings.get(normalized, 0) + 1
+    repeated_headings = [
+        f"{relative}: duplicated H2 {heading!r} x{count}"
+        for heading, count in sorted(headings.items())
+        if count > 1
+    ]
+
+    repeated_timeline: list[str] = []
+    for block in TIMELINE_BLOCK_RE.findall(visible):
+        rows: dict[str, int] = {}
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("- "):
+                continue
+            normalized = re.sub(r"\s+", " ", stripped).casefold()
+            rows[normalized] = rows.get(normalized, 0) + 1
+        repeated_timeline.extend(
+            f"{relative}: duplicated timeline row {row[:120]!r} x{count}"
+            for row, count in sorted(rows.items())
+            if count > 1
+        )
+    return repeated_headings, repeated_timeline
+
+
+def canonical_body_quality_issues(relative: str, text: str) -> list[str]:
+    """Reject empty or misleading sections and consecutive prose duplication."""
+
+    body = re.sub(r"\A---\s*\n.*?\n---\s*\n?", "", text, count=1, flags=re.DOTALL)
+    issues: list[str] = []
+    paragraphs: list[str] = []
+    for block in re.split(r"\n\s*\n", strip_fenced_blocks(body)):
+        lines = [line.rstrip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        if any(
+            line.startswith((" ", "\t", "#", "- ", "* ", ">", "<!--", "|"))
+            or re.match(r"\d+\.\s", line)
+            for line in lines
+        ):
+            continue
+        paragraphs.append(re.sub(r"\s+", " ", " ".join(lines)).strip())
+    for previous, current in zip(paragraphs, paragraphs[1:], strict=False):
+        if current == previous and len(current) >= 20:
+            issues.append(f"{relative}: duplicated consecutive paragraph {current[:120]!r}")
+
+    headings = [(match.start(), match.end(), match.group(1).strip()) for match in H2_RE.finditer(body)]
+    for index, (_, end, heading) in enumerate(headings):
+        section_end = headings[index + 1][0] if index + 1 < len(headings) else len(body)
+        section = re.sub(r"<!--.*?-->", "", body[end:section_end], flags=re.DOTALL).strip()
+        if not section:
+            issues.append(f"{relative}: empty H2 {heading!r}")
+        if heading == "핵심 링크" and section and not (
+            "[[" in section or MARKDOWN_LINK_RE.search(section)
+        ):
+            issues.append(f"{relative}: '핵심 링크' contains no hyperlink")
+    return issues
 
 
 def as_list(value: object) -> list[object]:
@@ -1407,6 +1464,17 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
             )
         else:
             subject_text = (vault / wiki_subject).read_text(encoding="utf-8")
+        source_name = payload.get("source") if isinstance(payload, dict) else None
+        archive_prefix = (
+            f"wiki/private/_sources/knowledge/local-only/{source_name}/"
+            if isinstance(source_name, str) and source_name
+            else ""
+        )
+        subject_links = set(WIKILINK_RE.findall(subject_text)) if subject_text else set()
+        links_archive_index = bool(
+            archive_prefix
+            and any(link.startswith(archive_prefix) for link in subject_links)
+        )
         if not isinstance(records, list):
             issues.append(f"{path.relative_to(vault)}: source catalog records must be a list")
             continue
@@ -1439,7 +1507,11 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
             digest = hashlib.sha256(target_path.read_bytes()).hexdigest()
             if digest != expected:
                 issues.append(f"{path.relative_to(vault)}: canonical source target hash drift")
-            if subject_text and f"[[{target}" not in subject_text:
+            if (
+                subject_text
+                and target not in subject_links
+                and not (target.startswith(archive_prefix) and links_archive_index)
+            ):
                 issues.append(
                     f"{path.relative_to(vault)}: canonical source target is not linked "
                     "from its Wiki subject"
@@ -1469,6 +1541,9 @@ def main() -> int:
         "published_wiki_without_map_link": [],
         "thin_published_wiki_docs": [],
         "manual_toc_duplicates_headings": [],
+        "duplicate_section_headings": [],
+        "duplicate_timeline_entries": [],
+        "body_quality_violations": [],
         "missing_asset_refs": [],
         "table_in_map_docs": [],
         "link_list_slug_exposure": [],
@@ -2111,6 +2186,14 @@ def main() -> int:
                 issues["source_policy_violations"].append(
                     f"{r}: lifecycle must be one of {sorted(SOURCE_LIFECYCLES)}"
                 )
+
+        if r.startswith("wiki/"):
+            heading_issues, timeline_issues = canonical_section_quality_issues(r, texts[path])
+            issues["duplicate_section_headings"].extend(heading_issues)
+            issues["duplicate_timeline_entries"].extend(timeline_issues)
+            issues["body_quality_violations"].extend(
+                canonical_body_quality_issues(r, texts[path])
+            )
 
     for book_map, _ in book_sources:
         book_targets = {

@@ -1,6 +1,54 @@
 from pathlib import Path
 
-from woon_core.knowledge.wiki_tree import prepare_wiki_tree_refresh
+from woon_core.knowledge.wiki_tree import (
+    CHILDREN_END,
+    CHILDREN_START,
+    prepare_wiki_tree_refresh,
+    preserve_generated_wiki_views,
+)
+
+
+def test_preserved_view_reuses_an_empty_managed_heading() -> None:
+    rendered = "---\ntype: Wiki\n---\n\n# 프로젝트\n\n## 하위 키워드\n"
+    existing = (
+        "---\ntype: Wiki\n---\n\n# 프로젝트\n\n## 하위 키워드\n\n"
+        f"{CHILDREN_START}\n- [[wiki/example|예시]]\n{CHILDREN_END}\n"
+    )
+
+    preserved = preserve_generated_wiki_views(existing, rendered)
+
+    assert preserved.count("## 하위 키워드") == 1
+    assert preserved.count(CHILDREN_START) == 1
+
+
+def test_refresh_removes_stale_empty_latest_heading(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/person.md",
+        title="사람",
+        canonical_id="person",
+        node_kind="entity",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("사람",),
+        body="## 현재 이해\n\n현재 확인한 사람 정보다.\n\n## 최신 관련 문서",
+        extra="entity_kind: person\nlifecycle_status: active\n",
+    )
+    _write_history(tmp_path, "wiki/person.md", "사람")
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / "wiki/person.md"].decode("utf-8")
+
+    assert "## 최신 관련 문서" not in rendered
 
 
 def _write_page(
@@ -231,6 +279,16 @@ def test_temporal_children_render_open_range_closed_range_and_single_day(tmp_pat
         node_kind="hub",
         parent="[[wiki/README|Wiki]]",
         keywords=("커리어",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: 진행 중\n"
+            "  children:\n"
+            "  - career/active\n"
+            "- label: 종료\n"
+            "  children:\n"
+            "  - career/completed\n"
+            "  - career/one-day\n"
+        ),
     )
     for relative, title, canonical_id, temporal in (
         (
@@ -300,11 +358,7 @@ def test_temporal_contract_rejects_incomplete_or_inverted_lifecycle(tmp_path: Pa
         node_kind="topic",
         parent="[[wiki/README|Wiki]]",
         keywords=("역전된 기간",),
-        extra=(
-            "lifecycle_status: completed\n"
-            "started_on: 2026-08-25\n"
-            "ended_on: 2026-08-24\n"
-        ),
+        extra=("lifecycle_status: completed\nstarted_on: 2026-08-25\nended_on: 2026-08-24\n"),
     )
 
     report = prepare_wiki_tree_refresh(tmp_path)
@@ -364,7 +418,18 @@ def test_sibling_links_use_unique_suffixes_when_compact_labels_collide(tmp_path:
         keywords=("개인 AI 원격 제어 앱 아이디어",),
         view_mode="project",
         body="원격 제어 제품의 문제와 검증 기준을 관리한다.",
-        extra="entity_kind: project\nlifecycle_status: idea\n",
+        extra=(
+            "entity_kind: project\n"
+            "lifecycle_status: idea\n"
+            "navigation_groups:\n"
+            "- label: 설계\n"
+            "  children:\n"
+            "  - security\n"
+            "  - runtime\n"
+            "- label: 이력\n"
+            "  children:\n"
+            "  - project/history\n"
+        ),
     )
     _write_history(tmp_path, "wiki/project.md", "개인 AI 원격 제어 앱 아이디어")
     _write_page(
@@ -656,7 +721,7 @@ def test_dense_hub_requires_explicit_stage_groups(tmp_path: Path) -> None:
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert any(
-        "11 direct children require explicit stage groups" in issue for issue in report.issues
+        "11 direct children require explicit navigation groups" in issue for issue in report.issues
     )
 
 
@@ -813,14 +878,9 @@ def test_large_resource_topic_stays_as_one_link_on_the_flat_root(tmp_path: Path)
         node_kind="hub",
         parent="[[wiki/README|Wiki]]",
         keywords=("리소스",),
-        extra=(
-            "navigation_groups:\n- label: 저장소\n"
-            "  children:\n  - resources/repositories\n"
-        ),
+        extra=("navigation_groups:\n- label: 저장소\n  children:\n  - resources/repositories\n"),
     )
-    links = "\n".join(
-        f"- [[assets/resource-{index}.pdf|자료 {index}]]" for index in range(21)
-    )
+    links = "\n".join(f"- [[assets/resource-{index}.pdf|자료 {index}]]" for index in range(21))
     _write_page(
         tmp_path,
         "wiki/resources/repositories.md",
@@ -985,7 +1045,7 @@ def test_large_grouping_hub_must_define_reading_stages(tmp_path: Path) -> None:
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert any(
-        "21 direct children require explicit stage groups" in issue for issue in report.issues
+        "21 direct children require explicit navigation groups" in issue for issue in report.issues
     )
 
 
@@ -1031,7 +1091,7 @@ def test_concept_subtree_requires_groups_for_two_or_more_children(tmp_path: Path
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert any(
-        "2 direct children require explicit stage groups" in issue for issue in report.issues
+        "2 direct children require explicit navigation groups" in issue for issue in report.issues
     )
 
 
@@ -1082,6 +1142,52 @@ def test_book_page_rejects_repeated_explanation(tmp_path: Path) -> None:
     assert report.issues == (
         "wiki/books/llm.md: book page body must contain only headings and hyperlink rows",
     )
+
+
+def test_book_page_accepts_text_group_with_indented_chapter_links(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai.md",
+        title="AI",
+        canonical_id="books/ai",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("AI",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai/llm.md",
+        title="LLM 책",
+        canonical_id="books/llm",
+        node_kind="entity",
+        parent="[[wiki/books/ai|AI]]",
+        keywords=("LLM 책",),
+        view_mode="linear",
+        extra="entity_kind: book\n",
+        body="- 1. 기초\n  - [[wiki/books/ch-1|Ch 1]]",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
 
 
 def test_people_hub_rejects_topic_as_direct_person(tmp_path: Path) -> None:

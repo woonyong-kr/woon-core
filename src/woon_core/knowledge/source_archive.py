@@ -200,9 +200,7 @@ def _catalog_bytes(
     return yaml.safe_dump(payload, allow_unicode=True, sort_keys=False).encode("utf-8")
 
 
-def _ledger_bytes(
-    source_name: str, wiki_subject: str, records: list[dict[str, object]]
-) -> bytes:
+def _ledger_bytes(source_name: str, wiki_subject: str, records: list[dict[str, object]]) -> bytes:
     payload = {
         "version": 1,
         "source": source_name,
@@ -266,9 +264,7 @@ def _verify_records(vault: Path, records: list[dict[str, object]]) -> None:
             raise WoonError(f"Wiki-owned source byte mismatch: {record['target']}")
 
 
-def _verify_catalog(
-    path: Path, expected: list[dict[str, object]], wiki_subject: str
-) -> None:
+def _verify_catalog(path: Path, expected: list[dict[str, object]], wiki_subject: str) -> None:
     if not path.is_file():
         raise WoonError("Wiki-owned source catalog is missing")
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}

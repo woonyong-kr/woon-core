@@ -50,6 +50,19 @@ def test_governance_skill_inventory_rejects_installed_copy_drift(tmp_path: Path)
     assert inventory == (catalog, source, installed)
 
 
+def test_active_instruction_files_excludes_archived_source_evidence(tmp_path: Path) -> None:
+    repository = tmp_path / "woon-knowledge"
+    active = repository / "AGENTS.md"
+    nested = repository / "docs/CLAUDE.md"
+    archived = repository / "wiki/private/_sources/legacy/AGENTS.md"
+    local = repository / ".local/snapshot/CLAUDE.md"
+    for path in (active, nested, archived, local):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("instruction", encoding="utf-8")
+
+    assert cli._active_instruction_files(repository) == (active, nested)
+
+
 def test_retired_daily_digest_commands_are_not_cli_entrypoints() -> None:
     with pytest.raises(WoonError, match="unknown knowledge command"):
         run(["knowledge", "materialize-codex-daily-digest"], StringIO())
@@ -629,6 +642,32 @@ def test_knowledge_reconcile_superseded_revisions_uses_compiler_service(
 
     assert '"archived_sources": 2' in output.getvalue()
     assert '"superseded_claims": 2' in output.getvalue()
+
+
+def test_knowledge_refresh_wiki_tree_validates_and_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    report = SimpleNamespace(document_count=9, changed_count=2, issues=())
+    calls: list[object] = []
+    monkeypatch.setattr(
+        cli,
+        "prepare_wiki_tree_refresh",
+        lambda actual: calls.append(actual) or report,
+    )
+    monkeypatch.setattr(
+        cli,
+        "apply_wiki_tree_refresh",
+        lambda actual, prepared: calls.extend((actual, prepared)),
+    )
+
+    output = StringIO()
+    run(["knowledge", "refresh-wiki-tree", "--vault", str(vault)], output)
+
+    assert calls == [vault.resolve(), vault.resolve(), report]
+    assert '"document_count": 9' in output.getvalue()
+    assert '"changed_count": 2' in output.getvalue()
 
 
 def test_knowledge_evaluate_uses_explicit_cases_and_vault(

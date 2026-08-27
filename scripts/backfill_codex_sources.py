@@ -168,9 +168,7 @@ def _messages(path: Path) -> dict[str, list[CodexSourceMessage]]:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if record.get("type") != "response_item" or not isinstance(
-                record.get("payload"), dict
-            ):
+            if record.get("type") != "response_item" or not isinstance(record.get("payload"), dict):
                 continue
             payload = record["payload"]
             if payload.get("type") != "message":
@@ -193,9 +191,7 @@ def _messages(path: Path) -> dict[str, list[CodexSourceMessage]]:
                         )
                     )
             elif (
-                role == "assistant"
-                and payload.get("phase") == "final_answer"
-                and accept_assistant
+                role == "assistant" and payload.get("phase") == "final_answer" and accept_assistant
             ):
                 text = _clean_assistant_content(payload.get("content"))
                 if text:

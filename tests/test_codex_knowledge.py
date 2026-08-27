@@ -748,9 +748,7 @@ def test_closed_project_requires_and_writes_a_verified_end_date(tmp_path: Path) 
         entries=valid,
     )
 
-    project = (tmp_path / "wiki/personal/projects/하루-프로젝트.md").read_text(
-        encoding="utf-8"
-    )
+    project = (tmp_path / "wiki/personal/projects/하루-프로젝트.md").read_text(encoding="utf-8")
     assert "lifecycle_status: completed" in project
     assert "occurred_on: 2026-08-25" in project
 

@@ -133,14 +133,8 @@ def build_wiki_context_bundle(
         cursor = by_path[cursor.parent_path]
         ancestors.append(cursor)
     ancestors.reverse()
-    children = sorted(
-        (node for node in nodes if node.parent_path == current.relative_path),
-        key=lambda node: (
-            node.sequence is None,
-            node.sequence if node.sequence is not None else 0,
-            node.title.casefold(),
-        ),
-    )
+    direct_children = tuple(node for node in nodes if node.parent_path == current.relative_path)
+    children = _ordered_wiki_children(current, direct_children)
 
     candidates: list[ContextItem] = []
     for node in ancestors:
@@ -163,6 +157,22 @@ def build_wiki_context_bundle(
             current_body.strip(),
         )
     )
+    for index, group in enumerate(current.navigation_groups, start=1):
+        grouped = tuple(
+            node
+            for child_id in group.child_ids
+            for node in children
+            if node.canonical_id == child_id
+        )
+        candidates.append(
+            _navigation_group_item(
+                current,
+                texts[current.relative_path],
+                index,
+                group.label,
+                grouped,
+            )
+        )
     for node in children:
         candidates.append(
             _tree_item(node, texts[node.relative_path], "child", "바로 아래 키워드", node.summary)
@@ -197,6 +207,57 @@ def build_wiki_context_bundle(
         items.append(candidate)
         total += len(candidate.text)
     return ContextBundle((subject.strip(),), tuple(items), total, truncated)
+
+
+def _ordered_wiki_children(
+    parent: WikiTreeNode, direct: tuple[WikiTreeNode, ...]
+) -> tuple[WikiTreeNode, ...]:
+    """Use exactly the same explicit group order exposed by the human Wiki view."""
+
+    by_id = {node.canonical_id: node for node in direct}
+    if parent.navigation_groups:
+        return tuple(
+            by_id[child_id]
+            for group in parent.navigation_groups
+            for child_id in group.child_ids
+            if child_id in by_id
+        )
+    return tuple(
+        sorted(
+            direct,
+            key=lambda node: (
+                node.sequence is None,
+                node.sequence if node.sequence is not None else 0,
+                node.title.casefold(),
+            ),
+        )
+    )
+
+
+def _navigation_group_item(
+    parent: WikiTreeNode,
+    source: str,
+    index: int,
+    label: str,
+    children: tuple[WikiTreeNode, ...],
+) -> ContextItem:
+    """Project a complete group index before bounded child summaries are added."""
+
+    rows = "\n".join(
+        f"- {position}. {node.title} ({node.canonical_id})"
+        for position, node in enumerate(children, start=1)
+    )
+    return ContextItem(
+        query=parent.title,
+        document_id=f"{parent.canonical_id}#navigation-{index}",
+        relative_path=parent.relative_path,
+        title=label,
+        source_type="canonical-wiki-navigation",
+        revision=hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        heading=f"탐색 단계 {index}. {label}",
+        text=rows,
+        role="navigation-group",
+    )
 
 
 def _resolve_wiki_subject(nodes: tuple[WikiTreeNode, ...], subject: str) -> WikiTreeNode:

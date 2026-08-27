@@ -17,6 +17,7 @@ def _page(
     entity_kind: str | None = None,
     entity_section: str | None = None,
     sequence: int | None = None,
+    navigation_groups: str = "",
     body: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,7 +30,7 @@ def _page(
         "---\n"
         f"type: Wiki\ntitle: {title}\ncanonical_id: {canonical_id}\n"
         f"node_kind: {node_kind}\n{entity_row}{entity_section_row}{lifecycle_row}"
-        f"{sequence_row}{parent_row}"
+        f"{sequence_row}{navigation_groups}{parent_row}"
         f"keywords:\n- {title}\naliases: []\nview_mode: tree\n"
         "updated: 2026-08-25\nsummary: 테스트 문서다.\n"
         "knowledge_state: 확인 필요\n---\n\n"
@@ -66,16 +67,14 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
         parent="[[wiki/projects|프로젝트]]",
         entity_kind="project",
         body="현재 목표와 집필 기준을 관리한다.",
-    )
-    _page(
-        vault / "wiki/personal/projects/(미정)소설-집필-히스토리.md",
-        title="(미정)소설 집필 히스토리",
-        canonical_id="private-novel/history",
-        node_kind="detail",
-        parent="[[wiki/personal/projects/(미정)소설-집필|(미정)소설 집필]]",
-        entity_section="history",
-        sequence=99,
-        body="아직 기록 없음",
+        navigation_groups=(
+            "navigation_groups:\n"
+            "- label: 작품 탐색\n"
+            "  children:\n"
+            "  - private/novel/장면-원고\n"
+            "  - private/novel/집필-계획\n"
+            "  - private/novel/인물\n"
+        ),
     )
     source = novel / "vault-source/scene.md"
     source.parent.mkdir(parents=True)
@@ -171,6 +170,6 @@ def test_groups_large_event_timeline_into_linear_stages(tmp_path: Path) -> None:
     apply_novel_wiki_projection(vault, report)
 
     hub = (vault / "wiki/private/novel/사건-히스토리/README.md").read_text(encoding="utf-8")
-    assert "label: 1. 사건 01–12" in hub
-    assert "label: 2. 사건 13–24" in hub
-    assert "label: 3. 사건 25–25" in hub
+    assert "label: 사건 01–12" in hub
+    assert "label: 사건 13–24" in hub
+    assert "label: 사건 25–25" in hub

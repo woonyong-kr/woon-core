@@ -84,7 +84,7 @@ def prepare_novel_wiki_projection(
     source_receipts: dict[str, dict[str, str]] = {}
     category_paths: dict[str, str] = {}
     category_metadata: dict[str, dict[str, object]] = {}
-    category_source_children: dict[str, list[str]] = {}
+    category_source_groups: dict[str, list[dict[str, object]]] = {}
     source_count = 0
     for sequence, category_file in enumerate(category_files, start=1):
         category = _h1(category_file)
@@ -103,14 +103,13 @@ def prepare_novel_wiki_projection(
             sequence=sequence,
         )
         category_metadata[category_file.stem] = metadata
-        category_source_children[category_file.stem] = []
+        category_source_groups[category_file.stem] = []
+        source_group_children: dict[str, list[str]] = {}
         category_path = root / category_relative
         pages[category_path] = _render_page(category_path, metadata, f"# 소설 · {category}\n")
-        for item_sequence, match in enumerate(
-            _LINK.finditer(category_file.read_text(encoding="utf-8")), start=1
-        ):
-            label = match.group("label").strip()
-            source = (category_file.parent / match.group("target")).resolve()
+        entries = _navigation_entries(category_file)
+        for item_sequence, (group_label, label, target) in enumerate(entries, start=1):
+            source = (category_file.parent / target).resolve()
             if not source.is_relative_to(novel_root) or not source.is_file():
                 raise WoonError(f"Novel navigation target is missing or escapes root: {source}")
             source_relative = source.relative_to(novel_root).as_posix()
@@ -145,17 +144,22 @@ def prepare_novel_wiki_projection(
             link = _file_link(source, page_path, root)
             body = f"# {title}\n\n## 원본\n\n- [{label}]({link})\n"
             pages[page_path] = _render_page(page_path, metadata, body)
-            category_source_children[category_file.stem].append(canonical_id)
+            if group_label not in source_group_children:
+                source_group_children[group_label] = []
+                category_source_groups[category_file.stem].append(
+                    {"label": group_label, "children": source_group_children[group_label]}
+                )
+            source_group_children[group_label].append(canonical_id)
             source_receipts[source_relative] = {
                 "wiki_path": page_relative,
                 "sha256": digest,
             }
             source_count += 1
 
-    event_count = _add_event_pages(
+    event_ids = _add_event_pages(
         root, novel_root, pages, category_paths, projection_day=effective_day
     )
-    judgment_count = _add_judgment_pages(
+    judgment_ids = _add_judgment_pages(
         root,
         novel_root,
         pages,
@@ -163,7 +167,7 @@ def prepare_novel_wiki_projection(
         project_subject=project_subject,
         projection_day=effective_day,
     )
-    relation_count = _add_relation_pages(
+    relation_ids = _add_relation_pages(
         root,
         novel_root,
         pages,
@@ -173,29 +177,36 @@ def prepare_novel_wiki_projection(
         projection_day=effective_day,
     )
 
-    event_metadata = category_metadata.get("사건-히스토리")
-    event_relative = category_paths.get("사건-히스토리")
-    if event_metadata is not None and event_relative is not None and event_count:
-        groups: list[dict[str, object]] = []
-        source_children = category_source_children.get("사건-히스토리", [])
-        if source_children:
-            groups.append({"label": "1. 근거·시간 원자료", "children": source_children})
-        event_ids = [f"private/novel/events/{number:02d}" for number in range(1, event_count + 1)]
-        for offset in range(0, len(event_ids), 12):
-            chunk = event_ids[offset : offset + 12]
-            groups.append(
-                {
-                    "label": f"{len(groups) + 1}. 사건 {offset + 1:02d}–{offset + len(chunk):02d}",
-                    "children": chunk,
-                }
-            )
-        event_metadata["navigation_groups"] = groups
-        event_path = root / event_relative
-        pages[event_path] = _render_page(
-            event_path,
-            event_metadata,
-            "# 소설 · 사건·히스토리\n",
+    generated_groups: dict[str, list[dict[str, object]]] = {
+        "사건-히스토리": _chunk_groups("사건", event_ids, size=12),
+        "집필-계획": (
+            [{"label": "판단·집필 순서", "children": list(judgment_ids)}] if judgment_ids else []
+        ),
+        "인물": (
+            [{"label": "작품에 연결된 인물", "children": list(relation_ids)}]
+            if relation_ids
+            else []
+        ),
+    }
+    for category_name, metadata in category_metadata.items():
+        groups = [*category_source_groups[category_name], *generated_groups.get(category_name, [])]
+        child_count = 0
+        for group in groups:
+            children = group.get("children")
+            if isinstance(children, list):
+                child_count += len(children)
+        if child_count > 1:
+            metadata["navigation_groups"] = groups
+        category_path = root / category_paths[category_name]
+        pages[category_path] = _render_page(
+            category_path,
+            metadata,
+            f"# {metadata['title']}\n",
         )
+
+    event_count = len(event_ids)
+    judgment_count = len(judgment_ids)
+    relation_count = len(relation_ids)
 
     expected = set(pages)
     stale = (
@@ -274,13 +285,14 @@ def _add_event_pages(
     categories: dict[str, str],
     *,
     projection_day: date,
-) -> int:
+) -> tuple[str, ...]:
     ledger = novel / "work/analysis/event-evidence-ledger-2026-08-07.md"
     parent = categories.get("사건-히스토리")
     if parent is None or not ledger.is_file():
-        return 0
+        return ()
     text = ledger.read_text(encoding="utf-8")
     matches = list(_NUMBERED_H2.finditer(text))
+    identifiers: list[str] = []
     for index, match in enumerate(matches):
         number = int(match.group("number"))
         title = match.group("title").strip()
@@ -306,7 +318,8 @@ def _add_event_pages(
             f"- [사건 장부]({_file_link(ledger, page_path, root)})\n"
         )
         pages[page_path] = _render_page(page_path, metadata, body)
-    return len(matches)
+        identifiers.append(str(metadata["canonical_id"]))
+    return tuple(identifiers)
 
 
 def _add_judgment_pages(
@@ -317,13 +330,14 @@ def _add_judgment_pages(
     *,
     project_subject: str,
     projection_day: date,
-) -> int:
+) -> tuple[str, ...]:
     source = novel / "work/planning/corpus-reading-2026-08-07.md"
     parent = categories.get("집필-계획")
     if parent is None or not source.is_file():
-        return 0
+        return ()
     text = source.read_text(encoding="utf-8")
     matches = list(_H2.finditer(text))
+    identifiers: list[str] = []
     for index, match in enumerate(matches):
         heading = match.group("title").strip()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
@@ -348,7 +362,8 @@ def _add_judgment_pages(
             f"- [전체 독해와 집필 판단]({_file_link(source, page_path, root)})\n"
         )
         pages[page_path] = _render_page(page_path, metadata, body)
-    return len(matches)
+        identifiers.append(str(metadata["canonical_id"]))
+    return tuple(identifiers)
 
 
 def _add_relation_pages(
@@ -360,11 +375,11 @@ def _add_relation_pages(
     *,
     project_subject: str,
     projection_day: date,
-) -> int:
+) -> tuple[str, ...]:
     source = novel / "work/people/person-link-ledger.yaml"
     parent = categories.get("인물")
     if parent is None or not source.is_file():
-        return 0
+        return ()
     payload = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
     people = payload.get("people", [])
     if not isinstance(people, list):
@@ -374,7 +389,7 @@ def _add_relation_pages(
         "kim-heejun": ("김희준", "wiki/personal/김희준"),
         "lee-minjeong": ("이민정", "wiki/private/이민정"),
     }
-    count = 0
+    identifiers: list[str] = []
     for sequence, item in enumerate(people, start=1):
         if not isinstance(item, dict):
             raise WoonError("Novel person ledger entry must be a mapping")
@@ -414,8 +429,39 @@ def _add_relation_pages(
         body = f"# {title}\n\n## 연결\n\n" + "\n".join(rows) + "\n"
         page_path = root / relative
         pages[page_path] = _render_page(page_path, metadata, body)
-        count += 1
-    return count
+        identifiers.append(str(metadata["canonical_id"]))
+    return tuple(identifiers)
+
+
+def _navigation_entries(path: Path) -> tuple[tuple[str, str, str], ...]:
+    """Read link order and its human-authored H2 grouping axis."""
+
+    current_group = ""
+    entries: list[tuple[str, str, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            current_group = line.removeprefix("## ").strip()
+            continue
+        match = _LINK.fullmatch(line)
+        if match is None:
+            continue
+        entries.append((current_group, match.group("label").strip(), match.group("target")))
+    if len(entries) > 1 and any(not group for group, _, _ in entries):
+        raise WoonError(f"Novel navigation links require H2 groups: {path}")
+    return tuple((group or "원자료", label, target) for group, label, target in entries)
+
+
+def _chunk_groups(label: str, child_ids: tuple[str, ...], *, size: int) -> list[dict[str, object]]:
+    groups: list[dict[str, object]] = []
+    for offset in range(0, len(child_ids), size):
+        chunk = child_ids[offset : offset + size]
+        groups.append(
+            {
+                "label": f"{label} {offset + 1:02d}–{offset + len(chunk):02d}",
+                "children": list(chunk),
+            }
+        )
+    return groups
 
 
 def _metadata(

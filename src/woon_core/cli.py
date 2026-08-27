@@ -94,6 +94,7 @@ from woon_core.knowledge.source_catalog import (
     plan_source_catalog,
     write_source_catalog,
 )
+from woon_core.knowledge.wiki_tree import apply_wiki_tree_refresh, prepare_wiki_tree_refresh
 from woon_core.people.cli import run_people
 from woon_core.registry import Registry
 from woon_core.skills import ClaudeRoutingSelector, CodexRoutingSelector, evaluate_routing
@@ -167,6 +168,7 @@ Usage:
   woon knowledge reconcile-superseded-revisions [--vault <path>]
   woon knowledge compile [--force] [--vault <path>]
   woon knowledge compile-audit [--vault <path>]
+  woon knowledge refresh-wiki-tree [--vault <path>]
   woon knowledge project-novel [--day <YYYY-MM-DD>] [--vault <path>]
   woon knowledge evaluate --cases <path> [--output <path>] [--vault <path>]
   woon knowledge evaluate-answers --cases <path> --answers <path>
@@ -554,6 +556,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "project-novel":
         _run_novel_wiki_projection(raw_options, output)
         return
+    if command == "refresh-wiki-tree":
+        _run_wiki_tree_refresh(raw_options, output)
+        return
     if command in {
         "migrate-compiled",
         "initialize-curation",
@@ -849,8 +854,7 @@ def _governance_preflight_evidence(
         repository = workspace / repository_name
         if not repository.is_dir():
             continue
-        inventory.extend(sorted(repository.rglob("AGENTS.md")))
-        inventory.extend(sorted(repository.rglob("CLAUDE.md")))
+        inventory.extend(_active_instruction_files(repository))
     inventory.extend(_governance_skill_inventory(workspace))
     inventory.extend(sorted(automation_root.glob("*/automation.toml")))
     digest = hashlib.sha256()
@@ -874,6 +878,20 @@ def _governance_preflight_evidence(
     output.update(audit.stdout.encode("utf-8"))
     output.update("\n".join(verified).encode("utf-8"))
     return digest.hexdigest(), output.hexdigest()
+
+
+def _active_instruction_files(repository: Path) -> tuple[Path, ...]:
+    """Return live instructions without reactivating archived source evidence."""
+
+    ignored_parts = {".git", ".local", "node_modules", "archive", "_sources"}
+    candidates = (*repository.rglob("AGENTS.md"), *repository.rglob("CLAUDE.md"))
+    return tuple(
+        sorted(
+            path
+            for path in candidates
+            if not ignored_parts.intersection(path.relative_to(repository).parts)
+        )
+    )
 
 
 def _governance_skill_inventory(
@@ -901,8 +919,7 @@ def _governance_skill_inventory(
                 repository / "evals",
             )
             for path in root.rglob("*")
-            if path.is_file()
-            and path.suffix in {".json", ".md", ".py", ".sh", ".yaml", ".yml"}
+            if path.is_file() and path.suffix in {".json", ".md", ".py", ".sh", ".yaml", ".yml"}
         )
     )
     active_root = installed_root or (Path.home() / ".codex/skills")
@@ -1325,6 +1342,38 @@ def _run_novel_wiki_projection(arguments: list[str], output: TextIO) -> None:
                 "relation_count": report.relation_count,
                 "changed_count": report.changed_count,
                 "retired_stale_pages": len(report.stale_pages),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
+    """Refresh every generated navigation block after validating the whole tree."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option != "--vault":
+            raise WoonError(f"unexpected knowledge refresh-wiki-tree argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault = Path(values.get("--vault", resolve_knowledge_vault())).expanduser().resolve()
+    report = prepare_wiki_tree_refresh(vault)
+    if report.issues:
+        raise WoonError("Wiki tree refresh rejected: " + "; ".join(report.issues[:12]))
+    apply_wiki_tree_refresh(vault, report)
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "document_count": report.document_count,
+                "changed_count": report.changed_count,
             },
             ensure_ascii=False,
             indent=2,
@@ -2086,9 +2135,7 @@ def _run_knowledge_source_archive(arguments: list[str], output: TextIO) -> None:
         index += 2
     required = {"--source", "--source-name", "--wiki-subject"}
     if not required.issubset(values):
-        raise WoonError(
-            "source-archive requires --source, --source-name, and --wiki-subject"
-        )
+        raise WoonError("source-archive requires --source, --source-name, and --wiki-subject")
     target = Path(values.get("--vault", ".")).expanduser().resolve()
     result = archive_private_source_corpus(
         Path(values["--source"]),

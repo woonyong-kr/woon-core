@@ -103,6 +103,7 @@ def test_wiki_context_follows_tree_and_includes_history_and_evidence(tmp_path: P
         entity_kind: str | None = None,
         entity_section: str | None = None,
         sequence: int | None = None,
+        extra: str = "",
     ) -> None:
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +119,7 @@ def test_wiki_context_follows_tree_and_includes_history_and_evidence(tmp_path: P
             f"{lifecycle_row}{sequence_row}"
             f"{parent_row}keywords: [{title}]\naliases: []\n"
             "view_mode: tree\nupdated: 2026-08-25\nsummary: 문맥 요약이다.\n"
-            "knowledge_state: 확인 필요\n---\n\n"
+            f"knowledge_state: 확인 필요\n{extra}---\n\n"
             f"# {title}\n\n{body}\n",
             encoding="utf-8",
         )
@@ -152,6 +153,15 @@ def test_wiki_context_follows_tree_and_includes_history_and_evidence(tmp_path: P
         "- [[wiki/project-detail|복구 계약]]",
         node_kind="entity",
         entity_kind="project",
+        extra=(
+            "navigation_groups:\n"
+            "- label: 이해 순서\n"
+            "  children:\n"
+            "  - project-detail\n"
+            "- label: 변경 이력\n"
+            "  children:\n"
+            "  - project-history\n"
+        ),
     )
     write(
         "wiki/project-history.md",
@@ -179,6 +189,7 @@ def test_wiki_context_follows_tree_and_includes_history_and_evidence(tmp_path: P
 
     roles = [item.role for item in bundle.items]
     assert roles[:3] == ["ancestor", "ancestor", "current"]
+    assert roles.count("navigation-group") == 2
     assert roles.count("child") == 2
     assert "information" not in roles
     assert "history" in roles
