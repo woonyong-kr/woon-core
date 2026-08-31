@@ -35,6 +35,8 @@ from woon_core.knowledge.obsidian_plugins import (
     PRISMA_READONLY_CONTEXT_MENU,
     PRISMA_READONLY_TOOLBAR,
     PRISMA_VIRTUAL_EVENTS_STEM,
+    RUNNABLE_CODE_BLOCKS_ID,
+    RUNNABLE_CODE_BLOCKS_VERSION,
     ObsidianPluginService,
 )
 
@@ -453,6 +455,47 @@ def _local_link_calendar_build(root: Path, version: str = LINK_CALENDAR_VERSION)
     return source
 
 
+def _local_runnable_code_blocks_build(
+    root: Path, version: str = RUNNABLE_CODE_BLOCKS_VERSION
+) -> Path:
+    source = root / "runnable-code-blocks-build"
+    source.mkdir()
+    (source / "main.js").write_text("module.exports = { version: 'new' };\n", encoding="utf-8")
+    (source / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": RUNNABLE_CODE_BLOCKS_ID,
+                "name": "Runnable Code Blocks",
+                "version": version,
+                "minAppVersion": "1.13.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (source / "styles.css").write_text(".rcb { display: block; }\n", encoding="utf-8")
+    subprocess.run(("git", "init", "-q", str(source)), check=True)
+    subprocess.run(("git", "-C", str(source), "config", "user.name", "Woon Test"), check=True)
+    subprocess.run(
+        ("git", "-C", str(source), "config", "user.email", "test@example.invalid"),
+        check=True,
+    )
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(source),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/woonyong-kr/runnable-code-blocks.git",
+        ),
+        check=True,
+    )
+    subprocess.run(("git", "-C", str(source), "add", "."), check=True)
+    subprocess.run(("git", "-C", str(source), "commit", "-q", "-m", "fixture"), check=True)
+    return source
+
+
 def _install_link_calendar(vault: Path, build_root: Path) -> ObsidianPluginService:
     service = ObsidianPluginService(vault)
     service.install_local_build(
@@ -500,6 +543,26 @@ def test_install_local_build_preserves_settings_backup_hashes_and_enabled_config
         (vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")
     )
     assert list((vault / ".local/woon-knowledge/obsidian-plugins/receipts").glob("*.json"))
+
+
+def test_runnable_code_blocks_local_build_uses_approved_git_source(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    source = _local_runnable_code_blocks_build(tmp_path)
+
+    receipt = ObsidianPluginService(vault).install_local_build(
+        RUNNABLE_CODE_BLOCKS_ID,
+        source,
+        RUNNABLE_CODE_BLOCKS_VERSION,
+    )
+
+    assert receipt["plugin"]["id"] == RUNNABLE_CODE_BLOCKS_ID
+    assert receipt["plugin"]["version"] == RUNNABLE_CODE_BLOCKS_VERSION
+    assert receipt["plugin"]["source"]["repository"] == (
+        "https://github.com/woonyong-kr/runnable-code-blocks.git"
+    )
+    assert RUNNABLE_CODE_BLOCKS_ID in json.loads(
+        (vault / ".obsidian/community-plugins.json").read_text(encoding="utf-8")
+    )
 
 
 def test_install_local_build_keeps_plugin_runtime_state_user_only(tmp_path: Path) -> None:
