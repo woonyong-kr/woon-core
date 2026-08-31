@@ -14,6 +14,7 @@ from woon_core.calendar.projection import (
 from woon_core.errors import WoonError
 from woon_core.knowledge.codex_daily_digest import record_daily_digest_from_codex_ledger
 from woon_core.knowledge.codex_knowledge import (
+    _validate_monotonic_source_range,
     entries_from_records,
     load_daily_entries,
     load_daily_input_status,
@@ -1252,6 +1253,42 @@ def test_rejects_a_backward_completed_turn_boundary_without_writes(tmp_path: Pat
     assert {record["title"] for record in load_daily_entries(tmp_path, day=date(2026, 8, 24))} == {
         "새 경계까지 정리했다"
     }
+
+
+def test_rejects_a_new_future_completed_turn_boundary(tmp_path: Path) -> None:
+    future = int(datetime.now(UTC).timestamp()) + 3600
+
+    with pytest.raises(WoonError, match="must not use a future boundary"):
+        _validate_monotonic_source_range(
+            tmp_path / "missing-checkpoint.json",
+            f"codex-kst-2026-08-31-scan-through-{future}-v9",
+        )
+
+
+def test_recovers_from_a_same_day_future_checkpoint_without_editing_it(tmp_path: Path) -> None:
+    now_epoch = int(datetime.now(UTC).timestamp())
+    checkpoint = tmp_path / "second-brain-checkpoints.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "lanes": {
+                    "codex-conversation-ingest": {
+                        "cursor": (f"codex-kst-2026-08-31-through-{now_epoch + 3600}-legacy-v9")
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _validate_monotonic_source_range(
+        checkpoint,
+        f"codex-kst-2026-08-31-scan-through-{now_epoch}-v9",
+    )
+
+    unchanged = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert unchanged["lanes"]["codex-conversation-ingest"]["cursor"].endswith("-legacy-v9")
 
 
 def test_can_repair_only_a_previously_empty_daily_digest(tmp_path: Path) -> None:

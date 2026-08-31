@@ -52,6 +52,21 @@ def test_accepts_repository_owned_private_depth_exclusion(tmp_path: Path) -> Non
     assert "folder_depth_ok" in result.stdout
 
 
+def test_accepts_repository_declared_purpose_owned_depth_limit(tmp_path: Path) -> None:
+    configuration = tmp_path / ".woon/repository.yaml"
+    configuration.parent.mkdir(parents=True)
+    configuration.write_text(
+        "folder_depth_audit_prefix_max_parts:\n  wiki/personal/kotlin-in-action: 5\n",
+        encoding="utf-8",
+    )
+    _write(tmp_path / "wiki/personal/kotlin-in-action/chapter-02/lesson.md")
+
+    result = _run_audit(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "folder_depth_ok" in result.stdout
+
+
 def test_rejects_undeclared_or_retired_deep_collections(tmp_path: Path) -> None:
     _write(tmp_path / "wiki/personal/notes/deep/note.md")
     _write(tmp_path / "wiki/canonical/retired/note.md")

@@ -34,6 +34,7 @@ _LINK = re.compile(r"(?m)^- \[(?P<label>[^]]+)]\((?P<target>[^)]+)\)\s*$")
 _NUMBERED_H2 = re.compile(r"(?m)^## (?P<number>\d+)\. (?P<title>.+?)\s*$")
 _H2 = re.compile(r"(?m)^## (?P<title>.+?)\s*$")
 _SLUG = re.compile(r"[^0-9A-Za-z가-힣_-]+")
+_PROJECTION_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,18 +153,15 @@ def prepare_novel_wiki_projection(
     relation_count = len(related_people)
 
     expected = set(pages)
-    stale = (
-        tuple(path for path in sorted(output_root.rglob("*.md")) if path not in expected)
-        if output_root.is_dir()
-        else ()
-    )
+    previously_owned = _previously_owned_pages(root, output_root)
+    stale = tuple(path for path in sorted(previously_owned - expected) if path.is_file())
     changed = sum(
         1 for path, content in pages.items() if not path.is_file() or path.read_bytes() != content
     ) + len(stale)
     manifest = (
         json.dumps(
             {
-                "version": 2,
+                "version": _PROJECTION_SCHEMA_VERSION,
                 "projection_day": effective_day.isoformat(),
                 "input_sha256": input_sha256,
                 "category_count": len(category_files),
@@ -172,6 +170,7 @@ def prepare_novel_wiki_projection(
                 "judgment_count": judgment_count,
                 "relation_count": relation_count,
                 "source_receipts": dict(sorted(source_receipts.items())),
+                "owned_pages": [path.relative_to(root).as_posix() for path in sorted(expected)],
                 "stale_pages": [path.relative_to(root).as_posix() for path in stale],
             },
             ensure_ascii=False,
@@ -359,9 +358,17 @@ def _h1(path: Path) -> str:
 
 
 def _render_page(path: Path, metadata: dict[str, object], body: str) -> bytes:
-    rendered = render_markdown(metadata, body)
+    effective_metadata = dict(metadata)
     if path.is_file():
-        rendered = preserve_generated_wiki_views(path.read_text(encoding="utf-8"), rendered)
+        existing = path.read_text(encoding="utf-8")
+        existing_metadata, _ = split_markdown(existing)
+        navigation_groups = existing_metadata.get("navigation_groups")
+        if isinstance(navigation_groups, list) and navigation_groups:
+            effective_metadata["navigation_groups"] = navigation_groups
+        rendered = render_markdown(effective_metadata, body)
+        rendered = preserve_generated_wiki_views(existing, rendered)
+    else:
+        rendered = render_markdown(effective_metadata, body)
     return rendered.encode("utf-8")
 
 
@@ -434,3 +441,34 @@ def _effective_projection_day(vault: Path, input_sha256: str, requested: date) -
         return date.fromisoformat(str(payload["projection_day"]))
     except (KeyError, TypeError, ValueError) as error:
         raise WoonError("Novel Wiki projection receipt has an invalid projection_day") from error
+
+
+def _previously_owned_pages(vault: Path, output_root: Path) -> set[Path]:
+    """Return only pages explicitly owned by the current projection schema.
+
+    Older manifests did not record ownership and therefore cannot authorize deletion.
+    This keeps a projection redesign from silently removing legacy or user-owned notes.
+    """
+
+    receipt = vault / ".local/woon-knowledge/novel-wiki-projection/manifest.json"
+    if not receipt.is_file():
+        return set()
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WoonError(f"Novel Wiki projection receipt is unreadable: {error}") from error
+    if payload.get("version") != _PROJECTION_SCHEMA_VERSION:
+        return set()
+    values = payload.get("owned_pages")
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        raise WoonError("Novel Wiki projection receipt has invalid owned_pages")
+    owned: set[Path] = set()
+    for value in values:
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".md":
+            raise WoonError("Novel Wiki projection receipt has an unsafe owned page")
+        resolved = (vault / relative).resolve()
+        if not resolved.is_relative_to(output_root):
+            raise WoonError("Novel Wiki projection receipt owns a page outside its output root")
+        owned.add(resolved)
+    return owned

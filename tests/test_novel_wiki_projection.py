@@ -1,7 +1,9 @@
+import json
 from datetime import date
 from pathlib import Path
 
 from woon_core.knowledge.novel_wiki_projection import (
+    _render_page,
     apply_novel_wiki_projection,
     prepare_novel_wiki_projection,
 )
@@ -42,6 +44,38 @@ def _page(
         + "\n",
         encoding="utf-8",
     )
+
+
+def test_render_preserves_existing_human_reviewed_navigation_groups(tmp_path: Path) -> None:
+    path = tmp_path / "hub.md"
+    _page(
+        path,
+        title="기존 허브",
+        canonical_id="private/novel/existing",
+        node_kind="hub",
+        parent=None,
+        navigation_groups=(
+            "navigation_groups:\n"
+            "- label: 선형 탐색\n"
+            "  children:\n"
+            "  - private/novel/existing/first\n"
+        ),
+    )
+
+    rendered = _render_page(
+        path,
+        {
+            "type": "Wiki",
+            "title": "갱신된 허브",
+            "canonical_id": "private/novel/existing",
+            "node_kind": "hub",
+        },
+        "# 갱신된 허브\n",
+    ).decode("utf-8")
+
+    assert "navigation_groups:" in rendered
+    assert "label: 선형 탐색" in rendered
+    assert "private/novel/existing/first" in rendered
 
 
 def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
@@ -136,6 +170,25 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
     assert not (vault / "wiki/private/novel/집필-계획/judgment-01-다음-집필-순서.md").exists()
     assert not (vault / "wiki/private/novel/인물/lee-minjeong.md").exists()
     assert replay.changed_count == 0
+
+    legacy_page = vault / "wiki/private/novel/인물/legacy-detail.md"
+    _page(
+        legacy_page,
+        title="보존할 기존 상세 기록",
+        canonical_id="private/novel/인물/legacy-detail",
+        node_kind="topic",
+        parent="[[wiki/private/novel/인물/README|소설 · 인물]]",
+    )
+    receipt = vault / ".local/woon-knowledge/novel-wiki-projection/manifest.json"
+    legacy_manifest = json.loads(receipt.read_text(encoding="utf-8"))
+    legacy_manifest["version"] = 2
+    legacy_manifest.pop("owned_pages")
+    receipt.write_text(json.dumps(legacy_manifest), encoding="utf-8")
+
+    migration = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 26))
+    assert legacy_page not in migration.stale_pages
+    apply_novel_wiki_projection(vault, migration)
+    assert legacy_page.is_file()
 
     source.write_text("# 장면 원본\n\n변경됨\n", encoding="utf-8")
     changed = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 26))

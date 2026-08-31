@@ -120,6 +120,7 @@ _PROJECT_LIFECYCLE = {
 _CODEX_RANGE_RE = re.compile(
     r"^codex-kst-(\d{4}-\d{2}-\d{2})-(?:scan-)?through-(\d+)(?:-[a-z0-9-]+)?-v\d+$"
 )
+_SOURCE_RANGE_FUTURE_TOLERANCE_SECONDS = 300
 
 type CodexKnowledgeKind = Literal[
     "활동",
@@ -557,7 +558,12 @@ def _validate_monotonic_source_range(checkpoint_path: Path, source_range: str) -
     """Reject an older completed-turn boundary before any projection is prepared."""
 
     candidate = _codex_range_boundary(source_range)
-    if candidate is None or not checkpoint_path.is_file():
+    if candidate is None:
+        return
+    now_epoch = int(datetime.now(UTC).timestamp())
+    if candidate[1] > now_epoch + _SOURCE_RANGE_FUTURE_TOLERANCE_SECONDS:
+        raise WoonError("Codex knowledge source range must not use a future boundary")
+    if not checkpoint_path.is_file():
         return
     try:
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -568,6 +574,14 @@ def _validate_monotonic_source_range(checkpoint_path: Path, source_range: str) -
         return
     previous = _codex_range_boundary(current)
     if previous is not None and candidate < previous:
+        # A historic buggy automation used a synthetic future epoch in an
+        # otherwise valid same-day receipt.  Waiting years or hand-editing the
+        # checkpoint would both violate the autonomous, receipt-gated model.
+        # Accept exactly one real-time same-day correction; the next successful
+        # run records a new immutable receipt and replaces only the checkpoint.
+        previous_is_future = previous[1] > now_epoch + _SOURCE_RANGE_FUTURE_TOLERANCE_SECONDS
+        if previous[0] == candidate[0] and previous_is_future:
+            return
         raise WoonError("Codex knowledge source range must not move backward")
 
 

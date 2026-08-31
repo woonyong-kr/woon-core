@@ -342,7 +342,9 @@ def render_wiki_tree_view(
     # generated callout repeated title, kind, state, parent, and child count
     # without helping a reader understand the subject, so every Wiki page now
     # keeps only its authored semantic summary and navigation in the body.
-    updated = _normalize_h1_spacing(_strip_marker_block(text, OVERVIEW_START, OVERVIEW_END))
+    updated = _normalize_reader_headings(
+        _normalize_h1_spacing(_strip_marker_block(text, OVERVIEW_START, OVERVIEW_END))
+    )
     # Latest indexes are projections. Remove every stale variant first and
     # rebuild only the heading that still has rows in the current graph.
     updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
@@ -1291,6 +1293,31 @@ def _contains_wikilink_to(text: str, relative_path: str) -> bool:
 
 def _normalize_h1_spacing(text: str) -> str:
     return re.sub(r"(?m)^(# .+?)\n{3,}", r"\1\n\n", text, count=1)
+
+
+def _normalize_reader_headings(text: str) -> str:
+    """Replace conversation-shaped headings with durable reader semantics.
+
+    Wiki tree refresh is the shared Core-owned projection pass for compiled,
+    conversation-grown, and private source-derived pages.  Keeping this narrow
+    migration here means a legacy generated page cannot permanently block the
+    governance preflight before the writer gets a chance to run.
+    """
+
+    replacements = {
+        "현재 이해": "핵심 정리",
+        "남긴 의도": "판단 기준",
+        "다음 질문": "다음 검증",
+        "연결": "관련 문서",
+    }
+    updated = text
+    for old, new in replacements.items():
+        updated = re.sub(
+            rf"(?m)^## {re.escape(old)}[ \t]*$",
+            f"## {new}",
+            updated,
+        )
+    return updated
 
 
 def _visible_navigation_body(text: str) -> str:

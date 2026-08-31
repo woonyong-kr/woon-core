@@ -52,6 +52,46 @@ def test_refresh_removes_stale_empty_latest_heading(tmp_path: Path) -> None:
     assert "## 최신 관련 문서" not in rendered
 
 
+def test_refresh_replaces_conversation_scaffold_headings(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/topic.md",
+        title="주제",
+        canonical_id="topic",
+        node_kind="detail",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("주제",),
+        body=(
+            "## 현재 이해\n\n현재 결론이다.\n\n"
+            "## 남긴 의도\n\n판단 기준이다.\n\n"
+            "## 다음 질문\n\n검증할 내용이다.\n\n"
+            "## 연결\n\n- [[wiki/README|Wiki]]"
+        ),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+    rendered = report.pages[tmp_path / "wiki/topic.md"].decode("utf-8")
+
+    assert report.issues == ()
+    assert "## 핵심 정리" in rendered
+    assert "## 판단 기준" in rendered
+    assert "## 다음 검증" in rendered
+    assert "## 관련 문서" in rendered
+    assert "## 현재 이해" not in rendered
+    assert "## 남긴 의도" not in rendered
+    assert "## 다음 질문" not in rendered
+    assert "## 연결" not in rendered
+
+
 def _write_page(
     vault: Path,
     relative: str,

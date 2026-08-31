@@ -77,8 +77,7 @@ def upsert_learning_checkpoint(body: str, checkpoint: LearningCheckpoint) -> str
     block = render_learning_checkpoint(checkpoint)
     if _LEARNING_CHECKPOINT_PATTERN.search(body):
         return (
-            _LEARNING_CHECKPOINT_PATTERN.sub(block.rstrip() + "\n\n", body, count=1).rstrip()
-            + "\n"
+            _LEARNING_CHECKPOINT_PATTERN.sub(block.rstrip() + "\n\n", body, count=1).rstrip() + "\n"
         )
     return body.rstrip() + "\n\n" + block
 

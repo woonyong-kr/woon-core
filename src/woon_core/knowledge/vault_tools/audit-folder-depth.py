@@ -69,6 +69,32 @@ def configured_protected_prefixes() -> frozenset[tuple[str, ...]]:
     return frozenset(prefixes)
 
 
+@cache
+def configured_prefix_max_parts() -> dict[tuple[str, ...], int]:
+    """Load purpose-owned depth limits without hard-coding individual collections."""
+
+    configuration = ROOT / ".woon/repository.yaml"
+    if not configuration.is_file():
+        return {}
+    payload = yaml.safe_load(configuration.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(".woon/repository.yaml must contain a mapping")
+    values = payload.get("folder_depth_audit_prefix_max_parts", {})
+    if not isinstance(values, dict):
+        raise ValueError("folder_depth_audit_prefix_max_parts must be a mapping")
+    limits: dict[tuple[str, ...], int] = {}
+    for value, maximum in values.items():
+        if not isinstance(value, str) or not isinstance(maximum, int) or maximum < 1:
+            raise ValueError(
+                "folder_depth_audit_prefix_max_parts must map paths to positive integers"
+            )
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts or not path.parts:
+            raise ValueError("folder depth prefixes must be safe repository-relative paths")
+        limits[path.parts] = maximum
+    return limits
+
+
 def is_under(path: Path, root: str) -> bool:
     if root.endswith(".md"):
         return path.as_posix() == root
@@ -87,12 +113,11 @@ def in_scope(path: Path) -> bool:
 def maximum_parts_for(relative: Path) -> int:
     """Return the most specific declared depth contract for one path."""
 
+    limits = {**PREFIX_MAX_PARTS, **configured_prefix_max_parts()}
     return next(
         (
             value
-            for prefix, value in sorted(
-                PREFIX_MAX_PARTS.items(), key=lambda item: len(item[0]), reverse=True
-            )
+            for prefix, value in sorted(limits.items(), key=lambda item: len(item[0]), reverse=True)
             if relative.parts[: len(prefix)] == prefix
         ),
         MAX_PARTS,
