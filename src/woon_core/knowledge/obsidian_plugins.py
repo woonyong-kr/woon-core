@@ -62,15 +62,11 @@ LINKED_GRAPH_ID = "linked-graph"
 LEGACY_CONTEXT_GRAPH_ID = "context-graph"
 LINKED_GRAPH_VERSION = "1.6.0"
 RUNNABLE_CODE_BLOCKS_ID = "runnable-code-blocks"
-RUNNABLE_CODE_BLOCKS_VERSION = "0.2.3"
-LOCAL_DEVELOPMENT_PLUGINS = frozenset(
-    {LINK_CALENDAR_ID, LINKED_GRAPH_ID, RUNNABLE_CODE_BLOCKS_ID}
-)
+RUNNABLE_CODE_BLOCKS_VERSION = "0.2.4"
+LOCAL_DEVELOPMENT_PLUGINS = frozenset({LINK_CALENDAR_ID, LINKED_GRAPH_ID, RUNNABLE_CODE_BLOCKS_ID})
 LINK_CALENDAR_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/link-calendar.git"
 LINKED_GRAPH_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/linked-graph.git"
-RUNNABLE_CODE_BLOCKS_SOURCE_REPOSITORY = (
-    "https://github.com/woonyong-kr/runnable-code-blocks.git"
-)
+RUNNABLE_CODE_BLOCKS_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/runnable-code-blocks.git"
 LOCAL_PLUGIN_SOURCE_REPOSITORIES = {
     LINK_CALENDAR_ID: LINK_CALENDAR_SOURCE_REPOSITORY,
     LINKED_GRAPH_ID: LINKED_GRAPH_SOURCE_REPOSITORY,
@@ -96,6 +92,10 @@ OFFICIAL_PLUGINS = {
     ),
     LINKED_GRAPH_ID: OfficialPlugin(
         plugin_id=LINKED_GRAPH_ID, repository="woonyong-kr/linked-graph"
+    ),
+    RUNNABLE_CODE_BLOCKS_ID: OfficialPlugin(
+        plugin_id=RUNNABLE_CODE_BLOCKS_ID,
+        repository="woonyong-kr/runnable-code-blocks",
     ),
     "light-mindmap": OfficialPlugin(plugin_id="light-mindmap", repository="ninglg/light-mindmap"),
     "markdown-mindmap": OfficialPlugin(
