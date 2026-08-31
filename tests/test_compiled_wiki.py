@@ -1040,6 +1040,91 @@ def test_archive_requires_human_approval_bound_to_exact_body(tmp_path: Path) -> 
         compiler.archive(metadata, approved_body, ())
 
 
+def test_service_archive_restores_compiler_inputs_when_compilation_fails(tmp_path: Path) -> None:
+    write_page(
+        tmp_path,
+        "canonical/backend/ports-and-adapters.md",
+        "포트와 어댑터",
+        "의존성을 분리한다.",
+    )
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    service = KnowledgeService(
+        MarkdownDocumentRepository(tmp_path, tmp_path / "wiki"),
+        SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
+        GitKnowledgeHistory(tmp_path),
+        compiled_wiki=compiler,
+    )
+    service.reindex()
+    body = "## 너무 긴 단일 주장\n\n" + ("분리해야 할 설명이다. " * 160)
+    review_id = approve_archive(tmp_path, "review-compile-failure", body)
+    before = compiler.snapshot_inputs()
+
+    with pytest.raises(WoonError, match="exceeds 1800 characters"):
+        service.archive(
+            DocumentMetadata(
+                canonical_id="backend/oversized-claim",
+                title="너무 긴 단일 주장",
+                domain="backend",
+                summary="긴 본문은 하나의 주장으로 컴파일하지 않는다.",
+                purpose="컴파일 실패가 catalog를 오염시키지 않는지 검증한다.",
+            ),
+            body,
+            approved_review_id=review_id,
+        )
+
+    assert compiler.snapshot_inputs() == before
+    assert not (tmp_path / "wiki/backend/oversized-claim.md").exists()
+
+
+def test_compiler_navigation_issues_validate_the_reader_tree(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir(parents=True)
+    (wiki / "README.md").write_text(
+        """---
+type: Wiki
+title: Wiki
+summary: 최상위 입구다.
+canonical_id: README
+node_kind: root
+view_mode: tree
+knowledge_state: 근거 확인됨
+updated: 2026-08-31
+keywords: [Wiki]
+aliases: []
+---
+
+# Wiki
+""",
+        encoding="utf-8",
+    )
+    (wiki / "orphan.md").write_text(
+        """---
+type: Wiki
+title: 고아 개념
+summary: 잘못된 부모를 가진 문서다.
+canonical_id: concepts/orphan
+node_kind: topic
+view_mode: article
+knowledge_state: 근거 확인됨
+updated: 2026-08-31
+keywords: [고아 개념]
+aliases: []
+parent: '[[wiki/missing|없는 부모]]'
+---
+
+# 고아 개념
+
+설명이다.
+""",
+        encoding="utf-8",
+    )
+
+    issues = CompiledWiki(compiled_settings(tmp_path)).navigation_issues()
+
+    assert any("parent is missing" in issue for issue in issues)
+
+
 def test_audit_rejects_archived_source_without_current_matching_review(tmp_path: Path) -> None:
     write_page(tmp_path, "canonical/backend/review-recheck.md", "승인 재검증", "기존 기록.")
     compiler = CompiledWiki(compiled_settings(tmp_path))

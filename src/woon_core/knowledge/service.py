@@ -98,13 +98,19 @@ class KnowledgeService:
             if self._compiled_wiki is None:
                 result = self._repository.save(validated, normalized_body, expected_revision)
             else:
-                self._compiled_wiki.archive(
-                    validated,
-                    normalized_body,
-                    metadata.source_ids,
-                    archive_origin=archive_origin,
-                    approved_review_id=approved_review_id,
-                )
+                try:
+                    self._compiled_wiki.archive(
+                        validated,
+                        normalized_body,
+                        metadata.source_ids,
+                        archive_origin=archive_origin,
+                        approved_review_id=approved_review_id,
+                    )
+                except Exception:
+                    if compiler_snapshot is not None:
+                        self._compiled_wiki.restore_inputs(compiler_snapshot)
+                    self._repository.restore_snapshot(validated.canonical_id, snapshot)
+                    raise
                 saved = self._repository.get(validated.canonical_id)
                 if saved is None:
                     raise WoonError("compiled archive did not create its canonical output")
@@ -328,6 +334,7 @@ class KnowledgeService:
         errors = self._repository.validate()
         if self._compiled_wiki is not None:
             errors.extend(self._compiled_wiki.audit().errors)
+            errors.extend(self._compiled_wiki.navigation_issues())
         try:
             documents = list(self._repository.list_documents())
         except WoonError as error:

@@ -20,6 +20,7 @@ import yaml
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
 from woon_core.knowledge.domain import DocumentMetadata
+from woon_core.knowledge.wiki_tree import load_wiki_tree
 from woon_core.knowledge.wiki_tree_migration import rewrite_retired_map_links
 from woon_core.knowledge.woon_wiki import (
     compiled_wiki_contract,
@@ -1137,6 +1138,15 @@ class CompiledWiki:
         except WoonError as error:
             errors.append(str(error))
         return CompilationAudit(len(pages), len(receipts), tuple(errors))
+
+    def navigation_issues(self) -> tuple[str, ...]:
+        """Return hierarchy and generated-navigation contract violations."""
+
+        try:
+            _, _, issues = load_wiki_tree(self._settings.vault)
+        except WoonError as error:
+            return (str(error),)
+        return issues
 
     def assert_current(self) -> None:
         """Fail closed if compiler inputs changed without a matching build receipt."""

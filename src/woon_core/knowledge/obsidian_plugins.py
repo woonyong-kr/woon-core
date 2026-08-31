@@ -60,7 +60,7 @@ LEGACY_SIMPLE_CALENDAR_ID = "woon-simple-calendar"
 LEGACY_CONTEXT_CALENDAR_ID = "context-calendar"
 LINKED_GRAPH_ID = "linked-graph"
 LEGACY_CONTEXT_GRAPH_ID = "context-graph"
-LINKED_GRAPH_VERSION = "1.4.0"
+LINKED_GRAPH_VERSION = "1.4.2"
 LOCAL_DEVELOPMENT_PLUGINS = frozenset({LINK_CALENDAR_ID, LINKED_GRAPH_ID})
 LINK_CALENDAR_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/link-calendar.git"
 LINKED_GRAPH_SOURCE_REPOSITORY = "https://github.com/woonyong-kr/linked-graph.git"
@@ -83,6 +83,9 @@ class GitSourceProvenance:
 
 
 OFFICIAL_PLUGINS = {
+    LINK_CALENDAR_ID: OfficialPlugin(
+        plugin_id=LINK_CALENDAR_ID, repository="woonyong-kr/link-calendar"
+    ),
     LINKED_GRAPH_ID: OfficialPlugin(
         plugin_id=LINKED_GRAPH_ID, repository="woonyong-kr/linked-graph"
     ),
