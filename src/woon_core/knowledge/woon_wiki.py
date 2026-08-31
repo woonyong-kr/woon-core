@@ -42,6 +42,10 @@ WIKI_NAVIGATION_START = "<!-- woon-wiki-navigation:start -->"
 WIKI_NAVIGATION_END = "<!-- woon-wiki-navigation:end -->"
 WIKI_OVERVIEW_START = "<!-- woon-wiki-overview:start -->"
 WIKI_OVERVIEW_END = "<!-- woon-wiki-overview:end -->"
+WIKI_CURRENT_HEADING = "핵심 정리"
+WIKI_INTENT_HEADING = "판단 기준"
+WIKI_NEXT_HEADING = "다음 검증"
+WIKI_RELATED_HEADING = "관련 문서"
 INTERVIEW_CURRENT_START = "<!-- woon-interview-current:start -->"
 INTERVIEW_CURRENT_END = "<!-- woon-interview-current:end -->"
 INTERVIEW_HISTORY_START = "<!-- woon-interview-history:start -->"
@@ -81,6 +85,7 @@ ALLOWED_KNOWLEDGE_STATES = {
 ALLOWED_STATE_AUTHORITIES = {"conversation", "evidence-compiler", "curation", "user"}
 
 _FILE_STEM_RE = re.compile(r"[^0-9A-Za-z가-힣_-]+")
+_WIKILINK_TARGET_RE = re.compile(r"\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^]]+)?]]")
 _MIGRATION_TIMELINE_RE = re.compile(
     r"^- \d{4}-\d{2}-\d{2} · 변경 — 기존 문서를 단일 (?:Woon )?Wiki 정본 계약으로 전환$"
 )
@@ -434,7 +439,9 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
     merged = _strip_managed_section(
         rendered, "주제 연결", WIKI_NAVIGATION_START, WIKI_NAVIGATION_END
     )
-    merged = _strip_managed_section(merged, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END)
+    merged = _strip_managed_section(
+        merged, WIKI_CURRENT_HEADING, WIKI_CURRENT_START, WIKI_CURRENT_END
+    )
     merged = _strip_managed_section(merged, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END)
     merged = strip_generated_wiki_views(merged)
     merged = _remove_frontmatter_keys(
@@ -493,16 +500,18 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
         )
     navigation = _optional_marker_block(existing, WIKI_NAVIGATION_START, WIKI_NAVIGATION_END)
     if current is None and timeline is None and navigation is None:
-        return preserve_generated_wiki_views(existing, _normalize_article_view(merged))
+        preserved = preserve_generated_wiki_views(existing, _normalize_article_view(merged))
+        return _normalize_article_view(preserved)
     blocks: list[str] = []
     if navigation is not None:
         blocks.extend(("## 주제 연결", "", navigation, ""))
     if current is not None:
-        blocks.extend(("## 현재 이해", "", current))
+        blocks.extend((f"## {WIKI_CURRENT_HEADING}", "", current))
     if timeline is not None:
         blocks.extend(("", "## 시간 이력", "", timeline))
     merged = merged.rstrip() + "\n\n" + "\n".join(blocks).rstrip() + "\n"
-    return preserve_generated_wiki_views(existing, _normalize_article_view(merged))
+    preserved = preserve_generated_wiki_views(existing, _normalize_article_view(merged))
+    return _normalize_article_view(preserved)
 
 
 def _normalize_existing_wiki(
@@ -839,6 +848,12 @@ def _merge_delta(text: str, delta: WikiDelta) -> str:
         authority=delta.state_authority,
     )
 
+    previous_current = _optional_marker_body(text, WIKI_CURRENT_START, WIKI_CURRENT_END)
+    if previous_current is None:
+        previous_current = _optional_h2_body(text, WIKI_CURRENT_HEADING)
+    if previous_current is None:
+        previous_current = _optional_h2_body(text, "현재 이해")
+    previous_updated = _frontmatter_text(text, "updated") or delta.day.isoformat()
     facets = _frontmatter_list(text, "facets")
     merged_facets = tuple(dict.fromkeys((*facets, *delta.facets)))
     updated = _upsert_frontmatter_value(
@@ -906,15 +921,15 @@ def _merge_delta(text: str, delta: WikiDelta) -> str:
     if delta.node_kind == "entity":
         current = "\n".join((WIKI_CURRENT_START, delta.summary.strip(), WIKI_CURRENT_END))
         updated = _replace_or_append_managed_section(
-            updated, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END, current
+            updated, WIKI_CURRENT_HEADING, WIKI_CURRENT_START, WIKI_CURRENT_END, current
         )
         updated = _strip_managed_section(
             updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END
         )
         if delta.intent:
-            updated = _replace_or_append_h2(updated, "남긴 의도", delta.intent.strip())
+            updated = _replace_or_append_h2(updated, WIKI_INTENT_HEADING, delta.intent.strip())
         if delta.next_question:
-            updated = _replace_or_append_h2(updated, "다음 질문", delta.next_question.strip())
+            updated = _replace_or_append_h2(updated, WIKI_NEXT_HEADING, delta.next_question.strip())
         if delta.related_documents:
             rows = [
                 f"- [[{Path(path).with_suffix('').as_posix()}]]" for path in delta.related_documents
@@ -922,37 +937,66 @@ def _merge_delta(text: str, delta: WikiDelta) -> str:
             updated = _merge_h2_rows(updated, "관련 키워드", rows)
         return _normalize_article_view(updated)
 
-    if delta.entity_section == "history":
-        updated = _strip_managed_section(updated, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END)
+    if delta.interview_answer is not None:
+        # The interview block already owns the current answer and its dated
+        # revisions. A generic current/timeline pair would repeat one answer
+        # three times on the same question page.
+        updated = _strip_managed_section(
+            updated, WIKI_CURRENT_HEADING, WIKI_CURRENT_START, WIKI_CURRENT_END
+        )
+        updated = _strip_managed_section(
+            updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END
+        )
+    elif delta.entity_section == "history":
+        updated = _strip_managed_section(
+            updated, WIKI_CURRENT_HEADING, WIKI_CURRENT_START, WIKI_CURRENT_END
+        )
     else:
         current = "\n".join((WIKI_CURRENT_START, delta.summary.strip(), WIKI_CURRENT_END))
         updated = _replace_or_append_managed_section(
-            updated, "현재 이해", WIKI_CURRENT_START, WIKI_CURRENT_END, current
+            updated, WIKI_CURRENT_HEADING, WIKI_CURRENT_START, WIKI_CURRENT_END, current
         )
 
     row = f"- {delta.day.isoformat()} · {delta.event_kind} — {delta.summary.strip()}"
-    if delta.entity_section == "information":
+    if delta.interview_answer is not None:
+        pass
+    elif delta.entity_section == "information":
         updated = _strip_managed_section(
             updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END
         )
     else:
         previous_timeline = _optional_marker_body(updated, WIKI_TIMELINE_START, WIKI_TIMELINE_END)
         rows = [line for line in (previous_timeline or "").splitlines() if line.strip()]
-        if row not in rows:
-            rows.append(row)
-        timeline = "\n".join((WIKI_TIMELINE_START, *rows, WIKI_TIMELINE_END))
-        updated = _replace_or_append_managed_section(
-            updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END, timeline
+        should_record_previous = delta.entity_section != "history" and (
+            previous_current is not None and previous_current.strip() != delta.summary.strip()
         )
+        previous_row = (
+            f"- {previous_updated} · 이전 이해 — {previous_current.strip()}"
+            if should_record_previous and previous_current is not None
+            else None
+        )
+        if previous_row is not None and previous_row not in rows:
+            rows.append(previous_row)
+        if delta.entity_section == "history" and row not in rows:
+            rows.append(row)
+        if rows:
+            timeline = "\n".join((WIKI_TIMELINE_START, *rows, WIKI_TIMELINE_END))
+            updated = _replace_or_append_managed_section(
+                updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END, timeline
+            )
+        else:
+            updated = _strip_managed_section(
+                updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END
+            )
     if delta.intent and delta.entity_section != "history":
-        updated = _replace_or_append_h2(updated, "남긴 의도", f"추정 의도: {delta.intent.strip()}")
+        updated = _replace_or_append_h2(updated, WIKI_INTENT_HEADING, delta.intent.strip())
     if delta.next_question and delta.entity_section != "history":
-        updated = _replace_or_append_h2(updated, "다음 질문", delta.next_question.strip())
+        updated = _replace_or_append_h2(updated, WIKI_NEXT_HEADING, delta.next_question.strip())
     if delta.related_documents:
         rows = [
             f"- [[{Path(path).with_suffix('').as_posix()}]]" for path in delta.related_documents
         ]
-        updated = _merge_h2_rows(updated, "연결", rows)
+        updated = _merge_h2_rows(updated, WIKI_RELATED_HEADING, rows)
     if delta.interview_answer is not None:
         updated = _merge_interview_answer(updated, delta)
     return _normalize_article_view(updated)
@@ -1018,31 +1062,23 @@ def _render_new(delta: WikiDelta) -> str:
         if delta.entity_kind == "book":
             lines.extend(("", "## 목차"))
         else:
-            lines.extend(("", "## 현재 이해", "", current))
+            lines.extend(("", f"## {WIKI_CURRENT_HEADING}", "", current))
+    elif delta.interview_answer is not None:
+        # ``현재 최선 답변`` below is the sole current-state owner.
+        pass
     elif delta.entity_section == "information":
-        lines.extend(("", "## 현재 이해", "", current))
+        lines.extend(("", f"## {WIKI_CURRENT_HEADING}", "", current))
     elif delta.entity_section == "history":
         lines.extend(("", "## 시간 이력", "", timeline))
     else:
-        lines.extend(
-            (
-                "",
-                "## 현재 이해",
-                "",
-                current,
-                "",
-                "## 시간 이력",
-                "",
-                timeline,
-            )
-        )
+        lines.extend(("", f"## {WIKI_CURRENT_HEADING}", "", current))
     lines = _insert_new_facet_properties(lines, delta)
     if delta.intent and delta.entity_kind != "book" and delta.entity_section != "history":
-        lines.extend(("", "## 남긴 의도", "", f"추정 의도: {delta.intent.strip()}"))
+        lines.extend(("", f"## {WIKI_INTENT_HEADING}", "", delta.intent.strip()))
     if delta.next_question and delta.entity_kind != "book" and delta.entity_section != "history":
-        lines.extend(("", "## 다음 질문", "", delta.next_question.strip()))
+        lines.extend(("", f"## {WIKI_NEXT_HEADING}", "", delta.next_question.strip()))
     if delta.related_documents:
-        lines.extend(("", "## 연결", ""))
+        lines.extend(("", f"## {WIKI_RELATED_HEADING}", ""))
         lines.extend(
             f"- [[{Path(path).with_suffix('').as_posix()}]]" for path in delta.related_documents
         )
@@ -1127,7 +1163,7 @@ def _validate_delta(vault: Path, delta: WikiDelta, *, planned_paths: set[str]) -
     parent = delta.parent
     if parent is None:
         raise WoonError("Wiki delta requires one semantic parent")
-    target = _wikilink_target(parent)
+    target = _required_wikilink_target(parent)
     candidate = Path(f"{target}.md") if not target.endswith(".md") else Path(target)
     if (
         not target.startswith("wiki/")
@@ -1203,7 +1239,8 @@ def _merge_interview_answer(text: str, delta: WikiDelta) -> str:
         archived = _optional_marker_body(updated, INTERVIEW_ARCHIVE_START, INTERVIEW_ARCHIVE_END)
         archived_rows = [archived.strip()] if archived and archived.strip() else []
         prior_label = revision.source_label or "이전 답변"
-        block = f"### {delta.day.isoformat()} · {prior_label}\n\n{previous.strip()}"
+        archived_previous = _compact_archived_interview_body(previous.strip())
+        block = f"### {delta.day.isoformat()} · {prior_label}\n\n{archived_previous}"
         if block not in archived_rows:
             archived_rows.append(block)
         archive = "\n\n".join(
@@ -1280,7 +1317,7 @@ def _render_interview_current(revision: InterviewAnswerRevision) -> str:
     if revision.context:
         lines.extend(("### 질문 맥락", "", revision.context.strip(), ""))
     lines.extend(("### 질문", "", revision.question.strip(), ""))
-    answer = revision.answer.strip() if revision.answer else "아직 답변하지 않았다."
+    answer = revision.answer.strip() if revision.answer else ""
     lines.extend(("### 답변", "", answer, ""))
     if revision.evidence:
         lines.extend(("### 확인된 근거", "", *(f"- {item}" for item in revision.evidence), ""))
@@ -1306,8 +1343,11 @@ def _marker_inner(block: str) -> str:
 
 def _validate_interview_answer(revision: InterviewAnswerRevision) -> None:
     _bounded_multiline(revision.question, "interview question", 280)
-    if revision.answer is not None:
-        _bounded_multiline(revision.answer, "interview answer", 5000)
+    if revision.answer is None or not revision.answer.strip():
+        raise WoonError("interview answer must contain a reusable answer")
+    if revision.answer.strip() == "아직 답변하지 않았다.":
+        raise WoonError("interview answer placeholder must not become a Wiki page")
+    _bounded_multiline(revision.answer, "interview answer", 5000)
     if revision.context is not None:
         _bounded_multiline(revision.context, "interview context", 1200)
     _bounded_line(revision.change_reason, "interview change reason", 240)
@@ -1331,7 +1371,7 @@ def _bounded_multiline(value: str, field: str, limit: int) -> None:
         raise WoonError(f"Wiki {field} must be bounded visible text")
 
 
-def _wikilink_target(value: str) -> str:
+def _required_wikilink_target(value: str) -> str:
     match = re.fullmatch(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]", value.strip())
     if not match:
         raise WoonError("Wiki parent topic must be one wikilink")
@@ -1522,7 +1562,135 @@ def _normalize_article_view(text: str) -> str:
     # renderer canonicalizes the space below H1, so the compiler must emit the
     # same bytes or every compile/refresh cycle invalidates its receipts.
     updated = re.sub(r"(?m)^(# .+?)\n{3,}", r"\1\n\n", updated, count=1)
+    updated = _normalize_managed_prose(updated)
     return _normalize_timeline_heading(updated)
+
+
+def _normalize_managed_prose(text: str) -> str:
+    """Remove legacy archive scaffolding that repeats the current conclusion."""
+
+    frontmatter_match = re.match(r"\A---\n.*?\n---", text, flags=re.DOTALL)
+    prefix_end = frontmatter_match.end() if frontmatter_match is not None else 0
+    prefix = text[:prefix_end]
+    body = text[prefix_end:].replace("추정 의도: ", "")
+    updated = _normalize_semantic_sections(prefix + body)
+    updated = _compact_interview_archive(updated)
+
+    if INTERVIEW_CURRENT_START in updated and WIKI_CURRENT_START in updated:
+        updated = _strip_managed_section(
+            updated, WIKI_CURRENT_HEADING, WIKI_CURRENT_START, WIKI_CURRENT_END
+        )
+        updated = _strip_managed_section(
+            updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END
+        )
+        return updated
+
+    current = _optional_marker_body(updated, WIKI_CURRENT_START, WIKI_CURRENT_END)
+    timeline = _optional_marker_body(updated, WIKI_TIMELINE_START, WIKI_TIMELINE_END)
+    if current is None or timeline is None:
+        return updated
+    normalized_current = re.sub(r"\s+", " ", current).strip()
+    rows = [line for line in timeline.splitlines() if line.strip()]
+    distinct_rows = [
+        line for line in rows if not re.sub(r"\s+", " ", line).strip().endswith(normalized_current)
+    ]
+    if len(distinct_rows) == len(rows):
+        return updated
+    if not distinct_rows:
+        return _strip_managed_section(updated, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END)
+    replacement = "\n".join((WIKI_TIMELINE_START, *distinct_rows, WIKI_TIMELINE_END))
+    return _replace_or_append_managed_section(
+        updated, "한 줄 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END, replacement
+    )
+
+
+def _normalize_semantic_sections(text: str) -> str:
+    """Replace conversation scaffolding with headings that explain reader use."""
+
+    updated = re.sub(r"(?m)^## 현재 이해[ \t]*$", f"## {WIKI_CURRENT_HEADING}", text)
+    updated = re.sub(r"(?m)^## 남긴 의도[ \t]*$", f"## {WIKI_INTENT_HEADING}", updated)
+    updated = re.sub(r"(?m)^## 다음 질문[ \t]*$", f"## {WIKI_NEXT_HEADING}", updated)
+    updated = re.sub(r"(?m)^## 연결[ \t]*$", f"## {WIKI_RELATED_HEADING}", updated)
+    semantic = "|".join(
+        re.escape(value)
+        for value in (
+            WIKI_CURRENT_HEADING,
+            WIKI_INTENT_HEADING,
+            WIKI_NEXT_HEADING,
+            WIKI_RELATED_HEADING,
+        )
+    )
+    updated = re.sub(rf"(?m)^(## (?:{semantic}))[ \t]*\n(?!\n)", r"\1\n\n", updated)
+
+    parent = _frontmatter_value(updated, "parent")
+    parent_target = _optional_wikilink_target(parent) if isinstance(parent, str) else None
+    if parent_target is None:
+        return updated
+    pattern = re.compile(
+        rf"(?ms)^## {re.escape(WIKI_RELATED_HEADING)}\s*\n(?P<body>.*?)(?=^## |\Z)"
+    )
+    match = pattern.search(updated)
+    if match is None:
+        return updated
+    section = match.group("body")
+    targets = tuple(_WIKILINK_TARGET_RE.findall(section))
+    residue = _WIKILINK_TARGET_RE.sub("", section)
+    residue = re.sub(r"[\s*+-]+", "", residue)
+    if targets and set(targets) == {parent_target} and not residue:
+        return pattern.sub("", updated, count=1).rstrip() + "\n"
+    parent_row = re.compile(
+        rf"^\s*[-*+]\s*\[\[{re.escape(parent_target)}(?:#[^\]|]+)?(?:\|[^]]+)?]]\s*$"
+    )
+    remaining = [line for line in section.splitlines() if not parent_row.fullmatch(line)]
+    if len(remaining) != len(section.splitlines()):
+        replacement = f"## {WIKI_RELATED_HEADING}\n\n" + "\n".join(remaining).strip() + "\n"
+        return pattern.sub(replacement, updated, count=1).rstrip() + "\n"
+    return updated
+
+
+def _optional_wikilink_target(value: str) -> str | None:
+    match = _WIKILINK_TARGET_RE.fullmatch(value.strip())
+    return match.group("target") if match is not None else None
+
+
+def _compact_interview_archive(text: str) -> str:
+    archive = _optional_marker_body(text, INTERVIEW_ARCHIVE_START, INTERVIEW_ARCHIVE_END)
+    if archive is None:
+        return text
+    compact = _compact_archived_interview_body(archive)
+    if not compact:
+        return _strip_managed_section(
+            text, "과거 답변", INTERVIEW_ARCHIVE_START, INTERVIEW_ARCHIVE_END
+        )
+    replacement = "\n".join((INTERVIEW_ARCHIVE_START, compact, INTERVIEW_ARCHIVE_END))
+    pattern = re.compile(
+        re.escape(INTERVIEW_ARCHIVE_START) + r".*?" + re.escape(INTERVIEW_ARCHIVE_END),
+        flags=re.DOTALL,
+    )
+    return pattern.sub(replacement, text, count=1)
+
+
+def _compact_archived_interview_body(text: str) -> str:
+    """Keep prior answers and evidence without repeating the stable question."""
+
+    compact = re.sub(
+        r"(?ms)^### 질문 맥락\s*\n.*?(?=^### |\Z)",
+        "",
+        text,
+    )
+    compact = re.sub(
+        r"(?ms)^### 질문\s*\n.*?(?=^### |\Z)",
+        "",
+        compact,
+    )
+    compact = re.sub(
+        r"(?ms)^### \d{4}-\d{2}-\d{2}[^\n]*\n\s*"
+        r"### 답변\s*\n\s*아직 답변하지 않았다\.\s*"
+        r"(?=^### \d{4}-\d{2}-\d{2}|\Z)",
+        "",
+        compact,
+    )
+    return re.sub(r"\n{3,}", "\n\n", compact).strip()
 
 
 def _normalize_timeline_heading(text: str) -> str:
@@ -1591,6 +1759,19 @@ def _optional_marker_block(text: str, start: str, end: str) -> str | None:
     return "\n".join((start, body, end))
 
 
+def _optional_h2_body(text: str, heading: str) -> str | None:
+    """Read one legacy unmarked H2 body before converting it to managed form."""
+
+    pattern = re.compile(rf"(?ms)^## {re.escape(heading)}\s*\n(?P<body>.*?)(?=^## |\Z)")
+    matches = tuple(pattern.finditer(text))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise WoonError(f"Wiki {heading} section is duplicated")
+    body = re.sub(r"<!--.*?-->", "", matches[0].group("body"), flags=re.DOTALL).strip()
+    return body or None
+
+
 def _replace_or_append_managed_section(
     text: str, heading: str, start: str, end: str, replacement: str
 ) -> str:
@@ -1598,6 +1779,10 @@ def _replace_or_append_managed_section(
     if body is not None:
         pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
         return pattern.sub(replacement, text, count=1)
+    legacy_pattern = re.compile(rf"(?ms)^## {re.escape(heading)}\s*\n.*?(?=^## |\Z)")
+    if legacy_pattern.search(text):
+        refreshed = legacy_pattern.sub(f"## {heading}\n\n{replacement}\n\n", text, count=1)
+        return refreshed.rstrip() + "\n"
     return text.rstrip() + f"\n\n## {heading}\n\n{replacement}\n"
 
 
@@ -1616,8 +1801,14 @@ def _strip_managed_section(text: str, heading: str, start: str, end: str) -> str
         return text
     if start_count != end_count:
         raise WoonError("Wiki managed markers are malformed")
+    if start == WIKI_TIMELINE_START:
+        heading_pattern = r"(?:시간 이력|한 줄 이력)"
+    elif start == WIKI_CURRENT_START:
+        heading_pattern = rf"(?:현재 이해|{re.escape(WIKI_CURRENT_HEADING)})"
+    else:
+        heading_pattern = re.escape(heading)
     pattern = re.compile(
-        rf"(?ms)^## {re.escape(heading)}\s*\n\s*"
+        rf"(?ms)^## {heading_pattern}\s*\n\s*"
         + re.escape(start)
         + r".*?"
         + re.escape(end)

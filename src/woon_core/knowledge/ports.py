@@ -34,6 +34,13 @@ class CanonicalDocumentRepository(Protocol):
         expected_revision: str | None,
     ) -> SaveResult: ...
 
+    def save_body(
+        self,
+        canonical_id: str,
+        body: str,
+        expected_revision: str,
+    ) -> SaveResult: ...
+
     def validate(self) -> list[str]: ...
 
     def parse(self, relative_path: str, text: str) -> CanonicalDocument: ...

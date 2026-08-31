@@ -32,7 +32,23 @@ DEFAULT_EXCLUDED_PARTS = frozenset(
     }
 )
 PLACEHOLDERS = frozenset({".DS_Store", ".gitkeep"})
-DOCUMENT_EXTENSIONS = frozenset({".md", ".txt", ".rst", ".adoc", ".html", ".htm", ".ipynb"})
+DOCUMENT_EXTENSIONS = frozenset(
+    {
+        ".adoc",
+        ".asciidoc",
+        ".csv",
+        ".docx",
+        ".htm",
+        ".html",
+        ".ipynb",
+        ".md",
+        ".pdf",
+        ".pptx",
+        ".rst",
+        ".txt",
+        ".xlsx",
+    }
+)
 ASSET_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".svg", ".drawio"})
 SECRET_NAMES = frozenset({".env"})
 

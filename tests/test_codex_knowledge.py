@@ -78,7 +78,7 @@ def test_projects_one_safe_batch_to_single_wiki_and_daily_projection(tmp_path: P
     assert result.entry_count == 2
     assert result.wiki_page_count == 1
     assert wiki.is_file()
-    assert "다음 질문" in wiki.read_text(encoding="utf-8")
+    assert "다음 검증" in wiki.read_text(encoding="utf-8")
     assert (tmp_path / ".local/woon-knowledge/codex-knowledge/2026-08-18").is_dir()
     rendered = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
     assert "대화 지식화는 한 번 분류하고 두 번 사용한다" in rendered
@@ -212,7 +212,8 @@ def test_codex_wiki_grows_tree_once_and_replay_is_byte_identical(tmp_path: Path)
     text = created.read_text(encoding="utf-8")
     assert second.replayed is False
     assert text.count("<!-- woon-wiki-timeline:start -->") == 1
-    assert text.count("- 2026-08-25 · 변경 —") == 2
+    assert text.count("- 2026-08-25 · 이전 이해 —") == 1
+    assert "판단을 바꿀 때 근거와 변경 시점을 같은 정본에 남긴다." in text
     assert len(list((tmp_path / "wiki").rglob(f"{created.stem}.md"))) == 1
 
 
@@ -524,7 +525,8 @@ title: "반복 학습 원칙"
 canonical_id: personal/반복-학습-원칙
 node_kind: topic
 parent: "[[wiki/concepts/README|개념]]"
-keywords: ["반복 학습 원칙"]
+keywords:
+- "반복 학습 원칙"
 aliases: []
 view_mode: tree
 updated: 2026-08-25
@@ -572,7 +574,7 @@ summary: "처음 이해"
     assert result.wiki_page_count == 1
     assert 'summary: "새 질문을 기존 이해에 연결해 현재 설명과 변화 이력을 함께 갱신한다."' in text
     assert "이 문단은 자동화가 바꾸지 않는다." in text
-    assert "2026-08-19 · 실행 — 새 질문을 기존 이해에 연결해" in text
+    assert "2026-08-25 · 이전 이해 — 처음 이해" in text
 
 
 def test_allows_wiki_links_to_project_and_content_facets(tmp_path: Path) -> None:
@@ -1324,7 +1326,7 @@ def test_projects_daily_activity_and_explicit_person_facts_without_identity_link
 
     rendered = (tmp_path / digest.relative_path).read_text(encoding="utf-8")
     candidates = list((tmp_path / "brain/review/codex").glob("*.md"))
-    assert "**남길 항목 없음**" in rendered
+    assert "남길 항목 없음" not in rendered
     assert "`활동`" not in rendered
     assert "**관련 인물** 민정" not in rendered
     person_candidate = next(
@@ -1438,13 +1440,13 @@ def _settings(vault: Path):
   - id: codex-conversation-ingest
     owner: codex-history-task
     cadence: four-hourly
-    inputs: [codex-response-items]
+    inputs: [codex-response-items, local-document-candidates, wiki, catalog]
     output:
-      [wiki-private-conversation-source-archive, wiki-upsert, runtime-history-receipt,
+      [wiki-private-conversation-source-archive, wiki-private-knowledge-source-archive,
+       wiki-upsert, wiki-maintenance, runtime-history-receipt, document-resolution-receipt,
        calendar-document-context,
        schedule-action-review-candidate, person-memory-review-candidate,
-       career-evidence-review-candidate, creative-link-review-candidate,
-       source-intake-review-candidate]
+       career-evidence-review-candidate, creative-link-review-candidate]
     checkpoint_key: codex-conversation-ingest
     required_signals: [message-range, privacy-classification]
     prohibited:
@@ -1460,7 +1462,8 @@ def _settings(vault: Path):
       prompt_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
       owned_paths:
         [wiki, brain/review/codex, .local/woon-knowledge/codex-knowledge,
-         wiki/private/_sources/codex]
+         .local/woon-knowledge/document-intake, wiki/private/_sources/codex,
+         wiki/private/_sources/knowledge]
   - id: daily-record-materialization
     owner: daily-record-task
     cadence: daily

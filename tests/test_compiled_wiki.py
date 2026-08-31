@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from woon_core.knowledge.compiled_wiki import (
     _validate_source,
 )
 from woon_core.knowledge.domain import DocumentMetadata, IndexedDocument
+from woon_core.knowledge.learning_checkpoint import LearningCheckpoint
 from woon_core.knowledge.service import KnowledgeService
 
 
@@ -495,6 +497,135 @@ def test_curated_revision_preserves_legacy_source_and_archives_prior_curated_bod
     assert compiler.audit().complete
 
 
+def test_learning_checkpoint_uses_compiler_curation_and_receipt(tmp_path: Path) -> None:
+    write_page(
+        tmp_path,
+        "ai/retrieval-practice.md",
+        "인출 연습",
+        "## 설명\n\n자료를 닫고 기억에서 답한다.\n",
+    )
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    service = KnowledgeService(
+        MarkdownDocumentRepository(tmp_path, tmp_path / "wiki"),
+        SQLiteFtsSearchIndex(tmp_path / ".local/search.sqlite3"),
+        GitKnowledgeHistory(tmp_path),
+        compiled_wiki=compiler,
+    )
+    current = service.get("ai/retrieval-practice")
+
+    report = service.record_learning_checkpoint(
+        LearningCheckpoint(
+            canonical_id="ai/retrieval-practice",
+            unit="자료 없이 핵심을 재현한다",
+            status="confirmed",
+            evidence=("정의를 보지 않고 설명하고 변형 문제를 풀었다.",),
+            unstable=(),
+            next_question="다른 예제에서도 같은 원리를 설명할 수 있는가?",
+            recorded_on=date(2026, 8, 29),
+        ),
+        current.revision,
+    )
+
+    assert report.changed is True
+    assert report.compiler_owned is True
+    assert "- 상태: 확인됨" in service.get("ai/retrieval-practice").body
+    assert compiler.audit().complete
+
+    replayed = service.record_learning_checkpoint(
+        LearningCheckpoint(
+            canonical_id="ai/retrieval-practice",
+            unit="자료 없이 핵심을 재현한다",
+            status="confirmed",
+            evidence=("정의를 보지 않고 설명하고 변형 문제를 풀었다.",),
+            unstable=(),
+            next_question="다른 예제에서도 같은 원리를 설명할 수 있는가?",
+            recorded_on=date(2026, 8, 29),
+        ),
+        report.revision,
+    )
+    assert replayed.changed is False
+
+
+def test_curated_revision_supersedes_prior_claim_with_external_evidence(
+    tmp_path: Path,
+) -> None:
+    write_page(tmp_path, "personal/career/job-search.md", "채용 탐색", "기존 후보를 검토한다.\n")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    compiler.curate_revisions(
+        (
+            CuratedRevision(
+                page_id="personal/career/job-search",
+                body="## 현재 후보\n\n공식 공고를 확인한다.\n",
+                statement="공식 공고를 현재 이력과 대조한다.",
+                current_use="현재 지원 후보를 고를 때 사용한다.",
+            ),
+        )
+    )
+
+    sources_path = tmp_path / "catalog/llm-wiki/sources.yaml"
+    claims_path = tmp_path / "catalog/llm-wiki/claims.yaml"
+    pages_path = tmp_path / "catalog/llm-wiki/pages.yaml"
+    sources = yaml.safe_load(sources_path.read_text(encoding="utf-8"))
+    claims = yaml.safe_load(claims_path.read_text(encoding="utf-8"))
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    page = pages["pages"][0]
+    prior_source_id = page["render"]["source_id"]
+    prior_claim = next(
+        item
+        for item in claims["claims"]
+        if item["kind"] == "curated-document" and prior_source_id in item["source_ids"]
+    )
+    external_source_id = "source://verified-source/job-snapshot"
+    external_body = "공식 공고 원문이다.\n"
+    external_sha256 = hashlib.sha256(external_body.encode("utf-8")).hexdigest()
+    sources["sources"].append(
+        {
+            "source_id": external_source_id,
+            "kind": "verified-source-snapshot",
+            "locator": "private/job-snapshot.md",
+            "original_sha256": external_sha256,
+            "normalized_sha256": external_sha256,
+            "privacy": "local-only",
+            "lifecycle": "compiled",
+            "title": "공식 공고 snapshot",
+            "purpose": "공고 확인 시점의 근거를 보존한다.",
+            "body": external_body,
+        }
+    )
+    prior_claim["source_ids"].append(external_source_id)
+    page["source_ids"].append(external_source_id)
+    sources_path.write_text(
+        yaml.safe_dump(sources, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    claims_path.write_text(
+        yaml.safe_dump(claims, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    pages_path.write_text(
+        yaml.safe_dump(pages, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    compiler.compile(force=True)
+
+    report = compiler.curate_revisions(
+        (
+            CuratedRevision(
+                page_id="personal/career/job-search",
+                body="## 현재 후보\n\n살아 있는 공식 공고만 유지한다.\n",
+                statement="현재 모집 중인 공식 공고만 유지한다.",
+            ),
+        )
+    )
+
+    assert report.compiled == 1
+    claims = yaml.safe_load(claims_path.read_text(encoding="utf-8"))["claims"]
+    archived = next(item for item in claims if item["claim_id"] == prior_claim["claim_id"])
+    assert archived["status"] == "superseded"
+    page = yaml.safe_load(pages_path.read_text(encoding="utf-8"))["pages"][0]
+    assert external_source_id in page["source_ids"]
+    assert compiler.audit().complete
+
+
 def test_public_curation_keeps_local_history_out_of_current_page_provenance(
     tmp_path: Path,
 ) -> None:
@@ -531,6 +662,57 @@ def test_public_curation_keeps_local_history_out_of_current_page_provenance(
     assert len(public_current) == 1
     page = yaml.safe_load(pages_path.read_text(encoding="utf-8"))["pages"][0]
     assert page["source_ids"] == [public_current[0]["source_id"]]
+    assert compiler.audit().complete
+
+
+def test_retire_pages_redirects_relations_and_preserves_inactive_provenance(
+    tmp_path: Path,
+) -> None:
+    write_page(tmp_path, "ai/old-topic.md", "중복 개념", "같은 개념을 반복한다.\n")
+    write_page(tmp_path, "ai/canonical-topic.md", "정본 개념", "하나의 설명으로 병합한다.\n")
+    write_page(tmp_path, "ai/reader.md", "읽는 문서", "정본 개념을 함께 읽는다.\n")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+
+    pages_path = tmp_path / "catalog/llm-wiki/pages.yaml"
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    reader = next(item for item in pages["pages"] if item["page_id"] == "ai/reader")
+    reader["frontmatter"]["related_to"] = [
+        "old-topic",
+        "[[wiki/ai/old-topic|중복 개념]]",
+    ]
+    pages_path.write_text(
+        yaml.safe_dump(pages, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    compiler.compile(page_ids=("ai/reader",))
+
+    report = compiler.retire_pages({"ai/old-topic": "ai/canonical-topic"})
+
+    assert report.retired == 1
+    assert report.page_ids == ("ai/old-topic",)
+    assert not (tmp_path / "wiki/ai/old-topic.md").exists()
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))["pages"]
+    assert {item["page_id"] for item in pages} == {"ai/canonical-topic", "ai/reader"}
+    reader = next(item for item in pages if item["page_id"] == "ai/reader")
+    assert reader["frontmatter"]["related_to"] == [
+        "canonical-topic",
+        "[[wiki/ai/canonical-topic|중복 개념]]",
+    ]
+    sources = yaml.safe_load(
+        (tmp_path / "catalog/llm-wiki/sources.yaml").read_text(encoding="utf-8")
+    )["sources"]
+    retired_source = next(item for item in sources if item["locator"] == "ai/old-topic.md")
+    assert retired_source["lifecycle"] == "archived"
+    assert retired_source["superseded_by"].endswith("ai/canonical-topic.md")
+    claims = yaml.safe_load(
+        (tmp_path / "catalog/llm-wiki/claims.yaml").read_text(encoding="utf-8")
+    )["claims"]
+    retired_claim = next(
+        item for item in claims if item["claim_id"] == "claim://legacy-wiki/ai/old-topic"
+    )
+    assert retired_claim["status"] == "superseded"
+    assert retired_claim["superseded_by"] == "claim://legacy-wiki/ai/canonical-topic"
+    assert compiler.compile().compiled == 0
     assert compiler.audit().complete
 
 

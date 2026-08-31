@@ -17,6 +17,13 @@
 5. 이미 같은 Woon 정본 skill이 활성화되어 있으면 다시 탐색하지 않는다. Woon에 맞는 skill이 없을 때만 설치된 fallback을 사용하며, 관련 없는 skill을 억지로 호출하지 않는다.
 6. 선택한 skill과 이유를 작업 시작 commentary에 한 줄로 알린다. skill이 행동·중단·승인 경계를 바꾸면 그 사실도 알린다.
 
+### Skill 자동 복구
+
+1. 선택한 Woon 정본 skill이 현재 Codex 설치 목록에 없거나 설치본이 오래되었어도 작업을 막거나 사용자에게 설치를 떠넘기지 않는다. 이번 작업에서는 catalog가 가리키는 정본 `SKILL.md`를 직접 읽어 적용한다.
+2. Woon CLI와 workspace를 사용할 수 있으면 `woon skills plan --profile personal --target codex`로 현재 설치를 확인한다. 결과가 `install`, `update`, `repair`, `unchanged`뿐이면 `woon skills install --profile personal --target codex`를 실행하고 같은 plan이 모두 `unchanged`인지 재확인한다.
+3. plan에 `blocked`, `retire`, `forget`이 있으면 관리하지 않는 설치본을 덮어쓰거나 다른 skill을 자동 퇴역시키지 않는다. 정본을 직접 사용해 현재 작업은 계속하고 충돌 대상만 보고한다.
+4. Git에는 머신 절대경로 대신 `repo://` 참조와 profile만 남긴다. Woon CLI, workspace 또는 registry가 전혀 없는 새 환경에서는 설치를 가장하지 말고 최초 bootstrap이 필요하다고 밝힌다.
+
 ### 모든 작업의 불변조건
 
 - 확인한 사실, 추론, 제안, 실행하지 못한 검증을 구분한다.

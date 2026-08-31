@@ -13,6 +13,7 @@ import yaml
 
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write, encode_json, exclusive_file_lock
+from woon_core.people.dashboard import PersonDashboardProjection
 
 _PERSON_ID = re.compile(r"^[a-z][a-z0-9-]{2,79}$")
 _PERSON_KINDS = frozenset(
@@ -451,6 +452,9 @@ class PersonService:
             purpose,
             creation_basis,
         )
+        # Every generated general card embeds the same Core-owned Base.  Refresh
+        # it before mutating the card so an unknown user-owned Base fails closed.
+        PersonDashboardProjection(self._vault).refresh()
         path = self._wiki_personal_root / f"{person_id}.md"
         with exclusive_file_lock(self._state_path.with_suffix(".lock")):
             current = _read_card(path, self._vault) if path.exists() else None

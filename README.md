@@ -16,6 +16,7 @@
 - 운영 파일의 개인 절대경로와 토큰 예산 검사
 - 한 개념당 Markdown 정본 한 편과 optimistic revision 검사
 - 외부 corpus의 content-addressed catalog, 파일별 병합, resume-safe ledger
+- Docling 기반 local-only 문서 변환, deterministic 정제와 terminal resolution receipt
 - source·claim·page spec에서 receipt가 있는 LLM Wiki를 결정론적으로 컴파일
 - 교체 가능한 document, search, history port와 local stdio MCP
 
@@ -44,8 +45,15 @@ woon knowledge compile-audit --vault /path/to/woon-knowledge
 woon knowledge compile --vault /path/to/woon-knowledge
 woon knowledge index --vault /path/to/woon-knowledge
 woon knowledge search '검색어' --vault /path/to/woon-knowledge
+woon knowledge learning-checkpoint --canonical-id personal/topic --unit '현재 범위' \
+  --status partial --evidence '실제 실행 근거' --unstable '남은 오류' \
+  --next-question '다음에 자료 없이 답할 질문' --recorded-on 2026-08-29 \
+  --expected-revision <현재-revision> --vault /path/to/woon-knowledge
 woon knowledge source-plan --source /path/to/source --source-name source --vault /path/to/woon-knowledge
 woon knowledge source-audit --source /path/to/source --source-name source --vault /path/to/woon-knowledge
+woon knowledge document-intake --source /path/to/document.docx --vault /path/to/woon-knowledge
+woon knowledge document-resolve --decision /path/to/decision.json --vault /path/to/woon-knowledge
+woon knowledge document-audit --vault /path/to/woon-knowledge
 woon career create --id company-role-2026 --company Company --role Role --jd /path/to/jd.pdf --vault /path/to/woon-knowledge
 woon career analyze --id company-role-2026 --vault /path/to/woon-knowledge
 woon career context --id company-role-2026 --vault /path/to/woon-knowledge
@@ -65,6 +73,8 @@ woon career context --id company-role-2026 --vault /path/to/woon-knowledge
 PDF 렌더러는 각 문서 저장소가 소유한다. Career pipeline은 렌더러가 만든 PDF를 읽어 페이지와 hash를 검증한 뒤 지원 기록과 함께 보존하며, 자동 지원·메일 전송·공개 게시를 수행하지 않는다.
 
 `skills eval-routing`은 같은 catalog·prompt·JSON schema로 Codex와 Claude를 각각 격리 실행합니다. 특정 실행기만 검사하려면 `--executor codex` 또는 `--executor claude`를 사용합니다. `installable: false`인 평가 전용 profile은 validate와 routing에는 사용할 수 있지만 target plan·install은 거부됩니다.
+
+문서 변환 설치·model cache·privacy·rollback 운영 계약은 [Docling document intake](docs/docling-document-intake.md)를 따른다. 동일 bytes는 content candidate 하나로 합치고 locator별 observation을 분리한다. 변환 결과는 Wiki가 아니며 기존 정본 검색과 의미 정리를 거쳐 `integrated`, `duplicate`, `discarded`, 예외적인 `user-action-required` 중 하나의 terminal receipt로 끝나야 한다. 현재 권한으로 판단 가능한 중복·저가치·명확한 통합을 Review 적체로 남기지 않는다.
 
 스킬 설치 경로는 Woon 전용 직접 경로가 가장 우선합니다. 설정하지 않으면 각 executor의 표준 home 아래 `skills`를 사용하고, 표준 home도 없으면 사용자 기본 경로를 사용합니다.
 
@@ -104,7 +114,7 @@ codex mcp add woon-knowledge \
 
 등록 뒤 새 Codex 작업에서 `woon_knowledge_search`를 사용할 수 있다. 설정 확인과 제거는 각각 `codex mcp get woon-knowledge`, `codex mcp remove woon-knowledge`다.
 
-제공 도구는 정본 검색·전체 읽기·대화 병합·LLM Wiki compile/receipt audit·index rebuild·audit·Git history·확인된 복구다. v2 vault에서 `wiki/`는 compiler 산출물이므로 source/claim/page spec을 바꾼 뒤 compile한다. 같은 개념의 블로그, 기술문서, AI 전용 변형은 생성하지 않는다.
+제공 도구는 정본 검색·전체 읽기·대화 병합·학습 체크포인트·LLM Wiki compile/receipt audit·index rebuild·audit·Git history·확인된 복구다. 학습 체크포인트는 최신 revision을 요구하며 compiler-owned page는 새 curated source·claim·receipt로, 그 밖의 canonical page는 YAML을 보존하는 body writer로 갱신한다. 같은 개념의 블로그, 기술문서, AI 전용 변형은 생성하지 않는다.
 
 IDE 설정은 같은 바이너리에서 관리한다.
 

@@ -4,6 +4,7 @@ import subprocess
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from woon_core.knowledge.adapters import (
 from woon_core.knowledge.config import KnowledgeSettings
 from woon_core.knowledge.domain import CanonicalDocument, DocumentMetadata, IndexedDocument
 from woon_core.knowledge.factory import build_knowledge_service
+from woon_core.knowledge.learning_checkpoint import LearningCheckpoint
 from woon_core.knowledge.service import KnowledgeService
 
 
@@ -146,6 +148,50 @@ def test_archive_is_optimistic_and_reindexes(tmp_path: Path) -> None:
     )
     assert updated.created is False
     assert updated.document.revision != first.document.revision
+
+
+def test_korean_canonical_identity_is_stable_and_retrievable(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    korean = DocumentMetadata(
+        canonical_id="personal/자격-준비",
+        title="자격 준비",
+        domain="personal",
+        summary="자격 준비의 현재 학습 상태를 관리한다.",
+        purpose="다음 학습 세션이 실제 진도와 근거에서 재개되게 한다.",
+    )
+
+    saved = service.archive(korean, "## 범위\n\n실행 근거를 기준으로 이어서 공부한다.")
+
+    assert service.get("personal/자격-준비").revision == saved.document.revision
+    with pytest.raises(WoonError, match="stable path"):
+        service.get("personal/../자격-준비")
+
+
+def test_learning_checkpoint_is_optimistic_bounded_and_idempotent(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    saved = service.archive(metadata(), "## 설명\n\n의존 방향을 설명한다.")
+    checkpoint = LearningCheckpoint(
+        canonical_id=metadata().canonical_id,
+        unit="포트와 어댑터의 의존 방향",
+        status="partial",
+        evidence=("간단한 adapter 예제를 실행했다.",),
+        unstable=("도메인이 외부 구현을 모르게 만드는 이유를 아직 설명하지 못했다.",),
+        next_question="외부 DB adapter를 바꿔도 도메인 코드가 유지되는 이유는 무엇인가?",
+        recorded_on=date(2026, 8, 29),
+    )
+
+    first = service.record_learning_checkpoint(checkpoint, saved.document.revision)
+    body = service.get(metadata().canonical_id).body
+
+    assert first.changed is True
+    assert first.compiler_owned is False
+    assert body.count("woon-learning-checkpoint:start") == 1
+    assert "- 상태: 부분 이해" in body
+
+    replayed = service.record_learning_checkpoint(checkpoint, first.revision)
+    assert replayed.changed is False
+    with pytest.raises(WoonError, match="changed after it was read"):
+        service.record_learning_checkpoint(checkpoint, saved.document.revision)
 
 
 def test_archive_rejects_duplicate_normalized_title(tmp_path: Path) -> None:

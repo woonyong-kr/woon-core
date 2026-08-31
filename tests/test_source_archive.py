@@ -30,6 +30,7 @@ def test_moves_private_corpus_into_wiki_source_boundary(tmp_path: Path) -> None:
     assert catalog["summary"] == {"canonical": 2}
     assert catalog["wiki_subject"] == "wiki/study.md"
     assert {record["state"] for record in catalog["records"]} == {"canonical"}
+    assert {record["role"] for record in catalog["records"]} == {"document"}
     assert all(
         str(record["target"]).startswith("wiki/private/_sources/") for record in catalog["records"]
     )

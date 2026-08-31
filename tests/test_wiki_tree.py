@@ -3,6 +3,7 @@ from pathlib import Path
 from woon_core.knowledge.wiki_tree import (
     CHILDREN_END,
     CHILDREN_START,
+    apply_wiki_tree_refresh,
     prepare_wiki_tree_refresh,
     preserve_generated_wiki_views,
 )
@@ -97,7 +98,7 @@ def _write_history(vault: Path, parent_path: str, parent_title: str) -> None:
     )
 
 
-def test_entity_without_children_lists_keywords_and_latest_related_documents(
+def test_entity_does_not_repeat_an_authored_link_in_latest_related_documents(
     tmp_path: Path,
 ) -> None:
     _write_page(
@@ -140,17 +141,31 @@ def test_entity_without_children_lists_keywords_and_latest_related_documents(
         parent="[[wiki/README|Wiki]]",
         keywords=("토크나이저",),
     )
+    _write_page(
+        tmp_path,
+        "wiki/navigation-only.md",
+        title="비공개 탐색 입구",
+        canonical_id="navigation-only",
+        node_kind="topic",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("비공개 탐색 입구",),
+        body="[[wiki/projects/llm-course|LLM 강의]]로 이동한다.",
+        extra="include_in_latest: false\n",
+    )
 
     report = prepare_wiki_tree_refresh(tmp_path)
     rendered = report.pages[tmp_path / "wiki/projects/llm-course.md"].decode("utf-8")
 
     assert report.issues == ()
     assert "한눈에 보기" not in rendered
-    assert "## 최신 관련 문서" in rendered
-    assert "[[wiki/tokenizer|토크나이저]]" in rendered
-    latest = rendered.split("<!-- woon-wiki-latest:start -->", maxsplit=1)[1]
-    assert "2026-08-25" not in latest
-    assert " — " not in latest
+    assert "## 최신 관련 문서" not in rendered
+    assert rendered.count("[[tokenizer|토크나이저]]") == 1
+    assert "비공개 탐색 입구" not in rendered
+
+    apply_wiki_tree_refresh(tmp_path, report)
+    rerun = prepare_wiki_tree_refresh(tmp_path)
+    assert rerun.issues == ()
+    assert rerun.changed_count == 0
 
 
 def test_person_entity_uses_incoming_people_links_for_latest_index(tmp_path: Path) -> None:
@@ -205,6 +220,96 @@ def test_person_entity_uses_incoming_people_links_for_latest_index(tmp_path: Pat
     assert "[[wiki/decision|구조 결정]]" in rendered
     latest = rendered.split("<!-- woon-wiki-latest:start -->", maxsplit=1)[1]
     assert "[[wiki/people|인물]]" not in latest
+
+
+def test_entity_latest_index_does_not_repeat_direct_children(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/project.md",
+        title="프로젝트",
+        canonical_id="project",
+        node_kind="entity",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("프로젝트",),
+        body="현재 프로젝트의 문제와 범위를 정리한다.",
+        extra=(
+            "entity_kind: project\nlifecycle_status: active\n"
+            "navigation_groups:\n"
+            "- label: 문서\n"
+            "  children:\n"
+            "  - child\n"
+            "  - project/history\n"
+        ),
+    )
+    _write_history(tmp_path, "wiki/project.md", "프로젝트")
+    _write_page(
+        tmp_path,
+        "wiki/child.md",
+        title="설계",
+        canonical_id="child",
+        node_kind="topic",
+        parent="[[wiki/project|프로젝트]]",
+        keywords=("설계",),
+        extra="related_to:\n- '[[wiki/project|프로젝트]]'\n",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / "wiki/project.md"].decode("utf-8")
+
+    assert rendered.count("[[wiki/child|설계]]") == 1
+    assert "## 최신 관련 문서" not in rendered
+
+
+def test_entity_does_not_repeat_direct_children_already_in_keyword_section(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/person.md",
+        title="인물",
+        canonical_id="person",
+        node_kind="entity",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("인물",),
+        view_mode="topic-timeline",
+        body="## 키워드\n\n- [[wiki/person/project|함께한 프로젝트]]",
+        extra="entity_kind: person\nlifecycle_status: active\n",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/person/project.md",
+        title="함께한 프로젝트",
+        canonical_id="person/project",
+        node_kind="topic",
+        parent="[[wiki/person|인물]]",
+        keywords=("함께한 프로젝트",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+    rendered = report.pages[tmp_path / "wiki/person.md"].decode("utf-8")
+
+    assert report.issues == ()
+    assert rendered.count("[[wiki/person/project|함께한 프로젝트]]") == 1
+    assert "## 하위 키워드" not in rendered
 
 
 def test_root_and_hub_render_only_direct_keyword_links(tmp_path: Path) -> None:
@@ -521,7 +626,21 @@ def test_books_are_separate_genre_catalog_with_link_only_book_contents(tmp_path:
         keywords=("LLM 책",),
         view_mode="linear",
         extra="entity_kind: book\n",
-        body="## 목차\n\n- [[#Ch 1|Ch 1]]\n\n## Ch 1\n\n- [[wiki/ai/attention|Attention]]",
+        body=(
+            "## 목차\n\n- [[#Ch 1|Ch 1]]\n\n"
+            "## Ch 1\n\n- [[wiki/ai/attention|Attention]]\n\n"
+            "## 학습 체크포인트\n"
+            "<!-- woon-learning-checkpoint:start -->\n"
+            "- 범위: Ch 1\n"
+            "- 상태: 확인됨\n"
+            "- 기록일: 2026-08-30\n"
+            "- 실행 증거:\n"
+            "  - 핵심 개념을 설명했다.\n"
+            "- 아직 불안정함:\n"
+            "  - 없음\n"
+            "- 다음 인출 질문: 다음 장의 첫 개념은 무엇인가?\n"
+            "<!-- woon-learning-checkpoint:end -->"
+        ),
     )
     _write_page(
         tmp_path,
@@ -1188,6 +1307,109 @@ def test_book_page_accepts_text_group_with_indented_chapter_links(tmp_path: Path
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert report.issues == ()
+
+
+def test_learning_book_accepts_whole_book_resolution_before_contents(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/programming.md",
+        title="프로그래밍",
+        canonical_id="books/programming",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("프로그래밍",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/programming/kotlin.md",
+        title="Kotlin 책",
+        canonical_id="books/kotlin",
+        node_kind="entity",
+        parent="[[wiki/books/programming|프로그래밍]]",
+        keywords=("Kotlin 책",),
+        view_mode="linear",
+        extra="entity_kind: book\ncontent_kind: book\n",
+        body=(
+            "## 책 전체 학습 해상도\n\n"
+            "같은 전체 목차를 세 깊이로 학습한다.\n\n"
+            "### 2주 · 핵심\n\n- [[wiki/books/ch-1|Ch 1]]\n\n"
+            "### 1달 · 전체\n\n- [[wiki/books/ch-1|Ch 1]]\n\n"
+            "### 5달 · 심화\n\n- [[wiki/books/ch-1|Ch 1]]\n\n"
+            "## 목차\n\n- 1. 기초\n  - [[wiki/books/ch-1|Ch 1]]"
+        ),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+
+
+def test_learning_book_rejects_missing_whole_book_resolution(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/programming.md",
+        title="프로그래밍",
+        canonical_id="books/programming",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("프로그래밍",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/programming/kotlin.md",
+        title="Kotlin 책",
+        canonical_id="books/kotlin",
+        node_kind="entity",
+        parent="[[wiki/books/programming|프로그래밍]]",
+        keywords=("Kotlin 책",),
+        view_mode="linear",
+        extra="entity_kind: book\ncontent_kind: book\n",
+        body="## 목차\n\n- [[wiki/books/ch-1|Ch 1]]",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.pages == {}
+    assert report.issues == (
+        "wiki/books/programming/kotlin.md: learning book requires one whole-book "
+        "2주·1달·5달 learning resolution",
+    )
 
 
 def test_people_hub_rejects_topic_as_direct_person(tmp_path: Path) -> None:

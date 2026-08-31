@@ -24,7 +24,11 @@ def _page(
     parent_row = f"parent: '{parent}'\n" if parent else ""
     entity_row = f"entity_kind: {entity_kind}\n" if entity_kind else ""
     entity_section_row = f"entity_section: {entity_section}\n" if entity_section else ""
-    lifecycle_row = "lifecycle_status: active\n" if entity_kind == "project" else ""
+    lifecycle_row = (
+        "lifecycle_status: active\n"
+        if entity_kind in {"project", "person", "career", "application"}
+        else ""
+    )
     sequence_row = f"sequence: {sequence}\n" if sequence is not None else ""
     path.write_text(
         "---\n"
@@ -58,6 +62,7 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
         canonical_id="projects",
         node_kind="hub",
         parent="[[wiki/README|Wiki]]",
+        sequence=1,
     )
     _page(
         vault / "wiki/personal/projects/(미정)소설-집필.md",
@@ -75,6 +80,16 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
             "  - private/novel/집필-계획\n"
             "  - private/novel/인물\n"
         ),
+    )
+    _page(
+        vault / "wiki/private/이민정.md",
+        title="이민정",
+        canonical_id="private/이민정",
+        node_kind="entity",
+        parent="[[wiki/README|Wiki]]",
+        entity_kind="person",
+        sequence=2,
+        body="소설에 연결된 인물이다.",
     )
     source = novel / "vault-source/scene.md"
     source.parent.mkdir(parents=True)
@@ -105,11 +120,8 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
     replay = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 26))
 
     project = (vault / "wiki/personal/projects/(미정)소설-집필.md").read_text(encoding="utf-8")
-    source_page = (vault / "wiki/private/novel/장면-원고/01-첫-장면.md").read_text(encoding="utf-8")
-    judgment_page = (
-        vault / "wiki/private/novel/집필-계획/judgment-01-다음-집필-순서.md"
-    ).read_text(encoding="utf-8")
-    person_page = (vault / "wiki/private/novel/인물/lee-minjeong.md").read_text(encoding="utf-8")
+    scene_hub = (vault / "wiki/private/novel/장면-원고/README.md").read_text(encoding="utf-8")
+    people_hub = (vault / "wiki/private/novel/인물/README.md").read_text(encoding="utf-8")
     assert first.category_count == 3
     assert first.source_count == 1
     assert first.judgment_count == 1
@@ -118,15 +130,16 @@ def test_projects_every_novel_navigation_source_into_private_wiki_and_replays(
     assert "summary: (미정)소설의 장면·원고 키워드다." in (
         vault / "wiki/private/novel/장면-원고/README.md"
     ).read_text(encoding="utf-8")
-    assert "source_path: wiki/private/_sources/novel/vault-source/scene.md" in source_page
-    assert "../../_sources/novel/vault-source/scene.md" in source_page
-    assert "summary: (미정)소설의 다음 집필 순서 판단이다." in judgment_page
-    assert "summary: (미정)소설과 이민정의 확인된 연결이다." in person_page
+    assert "[첫 장면](../../_sources/novel/vault-source/scene.md)" in scene_hub
+    assert "[[wiki/private/이민정|이민정]]" in people_hub
+    assert not (vault / "wiki/private/novel/장면-원고/01-첫-장면.md").exists()
+    assert not (vault / "wiki/private/novel/집필-계획/judgment-01-다음-집필-순서.md").exists()
+    assert not (vault / "wiki/private/novel/인물/lee-minjeong.md").exists()
     assert replay.changed_count == 0
 
     source.write_text("# 장면 원본\n\n변경됨\n", encoding="utf-8")
     changed = prepare_novel_wiki_projection(vault, novel, projection_day=date(2026, 8, 26))
-    assert changed.changed_count == 6
+    assert changed.changed_count == 3
     assert b'"projection_day": "2026-08-26"' in changed.manifest
 
 
@@ -158,7 +171,12 @@ def test_groups_large_event_timeline_into_linear_stages(tmp_path: Path) -> None:
     )
     navigation = novel / "work/navigation/사건-히스토리.md"
     navigation.parent.mkdir(parents=True)
-    navigation.write_text("# 사건·히스토리\n", encoding="utf-8")
+    navigation.write_text(
+        "# 사건·히스토리\n\n"
+        "## 사건 장부\n\n"
+        "- [사건 근거 장부](../analysis/event-evidence-ledger-2026-08-07.md)\n",
+        encoding="utf-8",
+    )
     ledger = novel / "work/analysis/event-evidence-ledger-2026-08-07.md"
     ledger.parent.mkdir(parents=True)
     ledger.write_text(
@@ -170,6 +188,7 @@ def test_groups_large_event_timeline_into_linear_stages(tmp_path: Path) -> None:
     apply_novel_wiki_projection(vault, report)
 
     hub = (vault / "wiki/private/novel/사건-히스토리/README.md").read_text(encoding="utf-8")
-    assert "label: 사건 01–12" in hub
-    assert "label: 사건 13–24" in hub
-    assert "label: 사건 25–25" in hub
+    assert report.event_count == 25
+    assert "- 사건 장부" in hub
+    assert "[사건 근거 장부]" in hub
+    assert not (vault / "wiki/private/novel/사건-히스토리/event-01.md").exists()

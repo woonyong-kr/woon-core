@@ -20,6 +20,8 @@ import yaml
 
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
+from woon_core.knowledge.identity import validate_canonical_id
+from woon_core.knowledge.learning_checkpoint import strip_learning_checkpoint
 
 OVERVIEW_START = "<!-- woon-wiki-overview:start -->"
 OVERVIEW_END = "<!-- woon-wiki-overview:end -->"
@@ -29,6 +31,8 @@ LATEST_START = "<!-- woon-wiki-latest:start -->"
 LATEST_END = "<!-- woon-wiki-latest:end -->"
 TIMELINE_START = "<!-- woon-wiki-timeline:start -->"
 TIMELINE_END = "<!-- woon-wiki-timeline:end -->"
+SOURCE_INDEX_START = "<!-- woon-wiki-source-index:start -->"
+SOURCE_INDEX_END = "<!-- woon-wiki-source-index:end -->"
 
 NODE_KINDS = {"root", "hub", "topic", "entity", "detail", "decision"}
 VIEW_MODES = {"tree", "linear", "project", "topic-timeline", "article"}
@@ -84,6 +88,7 @@ class WikiTreeNode:
     started_on: date | None
     ended_on: date | None
     occurred_on: date | None
+    include_in_latest: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +258,10 @@ def load_wiki_tree(
         started_on = _optional_date(metadata.get("started_on"), "started_on", relative, issues)
         ended_on = _optional_date(metadata.get("ended_on"), "ended_on", relative, issues)
         occurred_on = _optional_date(metadata.get("occurred_on"), "occurred_on", relative, issues)
+        include_in_latest = metadata.get("include_in_latest", True)
+        if not isinstance(include_in_latest, bool):
+            issues.append(f"{relative}: include_in_latest must be a boolean")
+            include_in_latest = True
         issues.extend(
             _temporal_issues(
                 relative,
@@ -263,6 +272,10 @@ def load_wiki_tree(
             )
         )
         if canonical_id:
+            try:
+                validate_canonical_id(canonical_id)
+            except WoonError as error:
+                issues.append(f"{relative}: {error}")
             key = canonical_id.casefold()
             if key in canonical:
                 issues.append(
@@ -299,6 +312,7 @@ def load_wiki_tree(
                 started_on=started_on,
                 ended_on=ended_on,
                 occurred_on=occurred_on,
+                include_in_latest=include_in_latest,
             )
         )
     by_path = {node.relative_path: node for node in nodes}
@@ -333,6 +347,10 @@ def render_wiki_tree_view(
     # rebuild only the heading that still has rows in the current graph.
     updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
     updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
+    authored = updated
+    authored_without_children = _strip_section(
+        authored, "하위 키워드", CHILDREN_START, CHILDREN_END
+    )
 
     if node.entity_kind == "book":
         updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
@@ -340,7 +358,14 @@ def render_wiki_tree_view(
         updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
         return updated.rstrip() + "\n"
 
-    show_tree = node.node_kind in TREE_VIEW_KINDS and bool(descendants)
+    direct_already_authored = bool(direct) and all(
+        _contains_wikilink_to(authored_without_children, item.relative_path) for item in direct
+    )
+    show_tree = (
+        node.node_kind in TREE_VIEW_KINDS
+        and bool(descendants)
+        and not (node.node_kind == "entity" and direct_already_authored)
+    )
     if show_tree:
         child_rows = [
             CHILDREN_START,
@@ -367,7 +392,13 @@ def render_wiki_tree_view(
             latest_heading = "최신 하위 문서"
             if not latest and node.node_kind == "entity" and related:
                 latest = sorted(
-                    related.get(node.relative_path, ()),
+                    (
+                        item
+                        for item in related.get(node.relative_path, ())
+                        if item.relative_path not in direct_paths
+                        and item.include_in_latest
+                        and not _contains_wikilink_to(authored, item.relative_path)
+                    ),
                     key=lambda item: (-item.updated.toordinal(), item.title.casefold()),
                 )[:10]
                 latest_heading = "최신 관련 문서"
@@ -392,10 +423,22 @@ def render_wiki_tree_view(
                 updated = _normalize_latest_heading(updated, latest_heading)
             else:
                 updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
-    elif node.node_kind == "entity" and related and related.get(node.relative_path):
+    elif (
+        node.node_kind == "entity"
+        and related
+        and any(
+            item.include_in_latest and not _contains_wikilink_to(authored, item.relative_path)
+            for item in related.get(node.relative_path, ())
+        )
+    ):
         updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
         latest = sorted(
-            related[node.relative_path],
+            (
+                item
+                for item in related[node.relative_path]
+                if item.include_in_latest
+                and not _contains_wikilink_to(authored, item.relative_path)
+            ),
             key=lambda item: (-item.updated.toordinal(), item.title.casefold()),
         )[:10]
         latest_rows = [
@@ -421,6 +464,7 @@ def strip_generated_wiki_views(text: str) -> str:
     """Remove derived view blocks before computing a compiler projection."""
 
     updated = _strip_section(text, "하위 키워드", CHILDREN_START, CHILDREN_END)
+    updated = _strip_section(updated, "원자료", SOURCE_INDEX_START, SOURCE_INDEX_END)
     updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
     updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
     return _strip_marker_block(updated, OVERVIEW_START, OVERVIEW_END).rstrip() + "\n"
@@ -440,6 +484,13 @@ def preserve_generated_wiki_views(existing: str, rendered: str) -> str:
         block = _optional_marker_block(existing, start, end)
         if block is not None:
             updated = _replace_or_append_section(updated, heading, start, end, block)
+    source_index = _optional_marker_block(rendered, SOURCE_INDEX_START, SOURCE_INDEX_END)
+    if source_index is None:
+        source_index = _optional_marker_block(existing, SOURCE_INDEX_START, SOURCE_INDEX_END)
+    if source_index is not None:
+        updated = _replace_or_append_section(
+            updated, "원자료", SOURCE_INDEX_START, SOURCE_INDEX_END, source_index
+        )
     latest = _optional_marker_block(existing, LATEST_START, LATEST_END)
     if latest is not None:
         heading = "최신 관련 문서" if "## 최신 관련 문서" in existing else "최신 하위 문서"
@@ -800,11 +851,48 @@ def _has_ancestor(node: WikiTreeNode, ancestor: str, by_path: dict[str, WikiTree
 
 
 def _book_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
-    """Require book landing pages to be a flat or two-level linked contents list."""
+    """Require one whole-book learning map plus a linked contents list."""
 
-    _, body = split_markdown(strip_generated_wiki_views(text))
+    metadata, body = split_markdown(strip_generated_wiki_views(text))
+    body = strip_learning_checkpoint(body)
     body = re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
     body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    resolution_match = re.search(r"(?ms)^## 책 전체 학습 해상도\s*\n(?P<body>.*?)(?=^## |\Z)", body)
+    if resolution_match is None:
+        # Intake may first materialize an empty book shell before a verified
+        # table of contents exists.  Require the curriculum as soon as the
+        # book owns at least one canonical chapter or concept link; inventing
+        # a three-horizon map for an empty shell would create false knowledge.
+        if metadata.get("content_kind") == "book" and "[[" in body:
+            return [
+                f"{node.relative_path}: learning book requires one whole-book "
+                "2주·1달·5달 learning resolution"
+            ]
+    else:
+        resolution = resolution_match.group("body")
+        headings = tuple(
+            line.strip() for line in resolution.splitlines() if line.strip().startswith("### ")
+        )
+        expected = ("### 2주", "### 1달", "### 5달")
+        if len(headings) != 3 or any(
+            not heading.startswith(prefix)
+            for heading, prefix in zip(headings, expected, strict=True)
+        ):
+            return [
+                f"{node.relative_path}: whole-book learning resolution must contain "
+                "2주, 1달, 5달 headings in that order"
+            ]
+        positions = tuple(resolution.index(heading) for heading in headings)
+        sections = tuple(
+            resolution[start:end]
+            for start, end in zip(positions, (*positions[1:], len(resolution)), strict=True)
+        )
+        if any("[[" not in section for section in sections):
+            return [
+                f"{node.relative_path}: every whole-book learning resolution must link "
+                "at least one canonical chapter or concept"
+            ]
+        body = body[: resolution_match.start()] + body[resolution_match.end() :]
     group_open = False
     group_has_link = False
     for line in body.splitlines():
@@ -1191,6 +1279,14 @@ def _compact_keyword_label(value: str) -> str:
     if label.endswith(" 탐색"):
         label = label.removesuffix(" 탐색").rstrip()
     return label
+
+
+def _contains_wikilink_to(text: str, relative_path: str) -> bool:
+    target = Path(relative_path).with_suffix("").as_posix()
+    aliases = (target, Path(target).name)
+    return any(
+        re.search(rf"!?\[\[{re.escape(alias)}(?:[|#\]])", text) is not None for alias in aliases
+    )
 
 
 def _normalize_h1_spacing(text: str) -> str:

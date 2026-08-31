@@ -59,7 +59,7 @@ _INPUT_STATES = {
     "unavailable",
     "source-only",
 }
-_DIGEST_RENDER_REVISION = "26"
+_DIGEST_RENDER_REVISION = "29"
 _DAILY_ENTRY_LIMIT = 256
 _VISIBLE_LIMIT = 900
 _TITLE_LIMIT = 80
@@ -224,14 +224,32 @@ def record_codex_daily_digest(
         cursor_after=token,
     )
     destination = settings.vault / "inbox" / "daily" / f"{day.isoformat()}.md"
-    content = _render_daily_block(
-        settings.vault,
-        canonical_entries,
-        input_state=rendered_input_state,
-        source_bundles=source_bundles,
+    suppress_empty_record = not canonical_entries and rendered_input_state in {
+        "processed",
+        "no-meaningful",
+    }
+    content = (
+        ""
+        if suppress_empty_record
+        else _render_daily_block(
+            settings.vault,
+            canonical_entries,
+            input_state=rendered_input_state,
+            source_bundles=source_bundles,
+        )
     )
 
     def produce() -> RunOutcome:
+        if suppress_empty_record:
+            if destination.is_file() and not destination.is_symlink():
+                existing = destination.read_text(encoding="utf-8")
+                updated = _normalize_daily_shell(existing)
+                if updated != existing:
+                    atomic_write(destination, updated.encode("utf-8"), mode=0o600)
+            return RunOutcome(
+                candidate_ids=(),
+                output_sha256=hashlib.sha256(b"").hexdigest(),
+            )
         _ensure_daily_note(settings.vault, day)
         existing = destination.read_text(encoding="utf-8")
         updated = _replace_daily_block(
@@ -242,6 +260,7 @@ def record_codex_daily_digest(
         )
         updated = _normalize_daily_shell(updated)
         updated = _update_daily_metadata(
+            settings.vault,
             updated,
             canonical_entries,
             input_state=rendered_input_state,
@@ -651,6 +670,7 @@ def _normalize_daily_shell(note: str) -> str:
 
 
 def _update_daily_metadata(
+    vault: Path,
     note: str,
     entries: tuple[CodexDailyDigestEntry, ...],
     *,
@@ -683,7 +703,10 @@ def _update_daily_metadata(
     )
     metadata = [
         "summary: "
-        + json.dumps(_daily_metadata_summary(entries, input_state=input_state), ensure_ascii=False),
+        + json.dumps(
+            _daily_metadata_summary(vault, entries, input_state=input_state),
+            ensure_ascii=False,
+        ),
         "digest_status: "
         + json.dumps(_daily_status_label(entries, input_state=input_state), ensure_ascii=False),
         "keywords:",
@@ -994,14 +1017,28 @@ def _entry_document_links(
     supporting_documents = tuple(
         path
         for path in entry.related_documents
-        if path != primary_document and path not in primary_documents and path not in already_linked
+        if path != primary_document
+        and path not in primary_documents
+        and path not in already_linked
+        and (primary_document is None or _daily_anchor_document(vault, path) != primary_document)
     )
     return primary_document, supporting_documents
 
 
-def _daily_metadata_summary(entries: tuple[CodexDailyDigestEntry, ...], *, input_state: str) -> str:
+def _daily_metadata_summary(
+    vault: Path,
+    entries: tuple[CodexDailyDigestEntry, ...],
+    *,
+    input_state: str,
+) -> str:
     if entries:
-        titles = list(dict.fromkeys(entry.summary.rstrip(". ") for entry in entries))
+        subjects = tuple(
+            _combine_subject_entries(vault, same_subject)
+            for same_subject in _group_section_entries(vault, list(entries))
+        )
+        titles = list(
+            dict.fromkeys(_daily_display_title(entry.title).rstrip(". ") for entry in subjects)
+        )
         selected: list[str] = []
         for title in titles:
             candidate = " · ".join((*selected, title))
@@ -1017,6 +1054,12 @@ def _daily_metadata_summary(entries: tuple[CodexDailyDigestEntry, ...], *, input
         "unavailable": "이 날짜의 Codex 세션 원본을 찾지 못했다.",
         "source-only": "원문은 보존했지만 Wiki 정본 반영은 아직 완료되지 않았다.",
     }[input_state]
+
+
+def _daily_display_title(value: str) -> str:
+    """Keep historical meaning while using the current human-facing Wiki name."""
+
+    return re.sub(r"(?i)\b(?:Woon\s+Wiki|WIKI)\b", "Wiki", value).strip()
 
 
 def _daily_status_label(entries: tuple[CodexDailyDigestEntry, ...], *, input_state: str) -> str:

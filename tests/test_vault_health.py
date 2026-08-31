@@ -21,6 +21,34 @@ AUDIT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIT)
 
 
+class CanonicalWikiLinkTests(unittest.TestCase):
+    def test_checks_local_only_wiki_pages_but_not_raw_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = root / "wiki/personal/person.md"
+            source = root / "wiki/private/_sources/knowledge/raw.md"
+            asset = root / "wiki/private/_sources/knowledge/evidence.pdf"
+            page.parent.mkdir(parents=True)
+            source.parent.mkdir(parents=True)
+            page.write_text(
+                "# Person\n\n[[wiki/missing|Missing]]\n"
+                "[[wiki/private/_sources/knowledge/evidence.pdf|Evidence]]\n",
+                encoding="utf-8",
+            )
+            source.write_text("# Raw\n\n[[wiki/also-missing]]\n", encoding="utf-8")
+            asset.write_bytes(b"pdf")
+            texts = {
+                page: page.read_text(encoding="utf-8"),
+                source: source.read_text(encoding="utf-8"),
+            }
+            with mock.patch.object(AUDIT, "VAULT", root):
+                index = AUDIT.target_index_any([page, source, asset])
+                broken, ambiguous = AUDIT.canonical_wiki_link_issues(root, texts, index)
+
+            self.assertEqual(broken, ["wiki/personal/person.md -> wiki/missing"])
+            self.assertEqual(ambiguous, [])
+
+
 class SourceCatalogBoundaryTests(unittest.TestCase):
     def test_rejects_external_private_and_verifies_canonical_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -269,9 +297,131 @@ title: 예제
 """,
         )
 
-        self.assertTrue(any("duplicated consecutive paragraph" in issue for issue in issues))
+        self.assertTrue(any("duplicated prose paragraph" in issue for issue in issues))
         self.assertTrue(any("contains no hyperlink" in issue for issue in issues))
         self.assertTrue(any("empty H2" in issue for issue in issues))
+
+    def test_rejects_duplicate_blockquote_paragraph(self) -> None:
+        issues = AUDIT.canonical_body_quality_issues(
+            "wiki/example.md",
+            """# 예제
+
+> 확인 범위: 이 설명은 검증된 범위 안에서만 사용한다.
+
+> 확인 범위: 이 설명은 검증된 범위 안에서만 사용한다.
+""",
+        )
+
+        self.assertTrue(any("duplicated blockquote paragraph" in issue for issue in issues))
+        self.assertTrue(any("duplicated blockquote label" in issue for issue in issues))
+
+    def test_rejects_near_duplicate_labeled_blockquotes(self) -> None:
+        issues = AUDIT.canonical_body_quality_issues(
+            "wiki/example.md",
+            """# 예제
+
+> 확인 범위: 일반 원리를 설명한다.
+
+> 확인 범위: 일반 원리만 설명한다.
+""",
+        )
+
+        self.assertTrue(any("duplicated blockquote label" in issue for issue in issues))
+
+    def test_rejects_scaffold_narration_and_current_history_repetition(self) -> None:
+        issues = AUDIT.canonical_body_quality_issues(
+            "wiki/example.md",
+            """---
+title: 예제
+summary: 현재 결론은 대화 로그보다 다시 사용할 판단을 남기는 것이다.
+state_reason: legacy-normalization
+---
+
+# 예제
+
+## 현재 이해
+
+<!-- woon-wiki-current:start -->
+현재 결론은 대화 로그보다 다시 사용할 판단을 남기는 것이다.
+<!-- woon-wiki-current:end -->
+
+## 한 줄 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-28 · 실행 — 현재 결론은 대화 로그보다 다시 사용할 판단을 남기는 것이다.
+<!-- woon-wiki-timeline:end -->
+
+## 남긴 의도
+
+추정 의도: 나중에 다시 읽는다.
+
+아직 답변하지 않았다.
+
+## 현재 최선 답변
+
+<!-- woon-interview-current:start -->
+답변이다.
+<!-- woon-interview-current:end -->
+""",
+        )
+
+        self.assertTrue(any("summary is repeated" in issue for issue in issues))
+        self.assertTrue(any("추정 의도" in issue for issue in issues))
+        self.assertTrue(any("empty interview answer placeholder" in issue for issue in issues))
+        self.assertTrue(any("replace legacy state reason" in issue for issue in issues))
+        self.assertTrue(any("duplicates generic current" in issue for issue in issues))
+        self.assertTrue(any("duplicated in timeline" in issue for issue in issues))
+
+    def test_rejects_retired_map_migration_as_current_evidence_basis(self) -> None:
+        issues = AUDIT.canonical_body_quality_issues(
+            "wiki/example.md",
+            """---
+title: 예제
+state_reason: map-to-wiki-tree-migration
+---
+
+# 예제
+
+현재 기준으로 다시 읽을 수 있는 설명이다.
+""",
+        )
+
+        self.assertTrue(any("replace legacy state reason" in issue for issue in issues))
+
+    def test_rejects_conversation_scaffold_headings(self) -> None:
+        issues = AUDIT.canonical_body_quality_issues(
+            "wiki/example.md",
+            """# 예제
+
+## 현재 이해
+
+현재 결론이다.
+
+## 다음 질문
+
+실행 결과를 검증한다.
+""",
+        )
+
+        self.assertTrue(
+            any("conversation scaffold heading '현재 이해'" in issue for issue in issues)
+        )
+        self.assertTrue(
+            any("conversation scaffold heading '다음 질문'" in issue for issue in issues)
+        )
+
+    def test_rejects_embedded_base_as_wiki_navigation(self) -> None:
+        issues = AUDIT.canonical_body_quality_issues(
+            "wiki/example.md",
+            """# 예제
+
+## 관련 질문
+
+![[inbox/wiki/wiki.base#예제]]
+""",
+        )
+
+        self.assertTrue(any("direct Wiki hyperlinks" in issue for issue in issues))
 
     def test_accepts_linked_and_code_backed_sections(self) -> None:
         issues = AUDIT.canonical_body_quality_issues(
@@ -292,6 +442,41 @@ flowchart LR
         )
 
         self.assertEqual(issues, [])
+
+    def test_planned_book_chapter_is_not_mistaken_for_completed_learning(self) -> None:
+        planned = AUDIT.canonical_body_quality_issues(
+            "wiki/personal/book/chapter-01.md",
+            """---
+title: Chapter 1
+state_reason: planned-reading
+learning_status: Planned
+---
+
+# Chapter 1
+
+## 학습 자료
+
+[공식 장 열기](https://example.com/chapter-1)
+""",
+        )
+        started = AUDIT.canonical_body_quality_issues(
+            "wiki/personal/book/chapter-01.md",
+            """---
+title: Chapter 1
+state_reason: reading-started
+learning_status: Reading
+---
+
+# Chapter 1
+
+## 학습 자료
+
+[공식 장 열기](https://example.com/chapter-1)
+""",
+        )
+
+        self.assertEqual(planned, [])
+        self.assertTrue(any("requires retained learning notes" in issue for issue in started))
 
 
 class VaultRootDirectoryTests(unittest.TestCase):
@@ -636,6 +821,18 @@ class ObsidianWorkspaceTests(unittest.TestCase):
             obsidian.mkdir()
             (obsidian / "workspace.json").write_text(
                 '{"lastOpenFiles":["maps/legacy/삭제된.canvas"]}\n',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(AUDIT.obsidian_workspace_issues(root), [])
+
+    def test_ignores_missing_file_properties_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            obsidian = root / ".obsidian"
+            obsidian.mkdir()
+            (obsidian / "workspace.json").write_text(
+                '{"main":{"type":"file-properties","state":{"file":"inbox/daily/removed.md"}}}\n',
                 encoding="utf-8",
             )
 

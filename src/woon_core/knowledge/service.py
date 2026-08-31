@@ -15,6 +15,7 @@ from woon_core.knowledge.compiled_wiki import (
     CuratedRevision,
     CuratedRevisionReport,
     MigrationReport,
+    RetiredPageReport,
     RevisionReconciliationReport,
 )
 from woon_core.knowledge.domain import (
@@ -28,6 +29,13 @@ from woon_core.knowledge.domain import (
     SearchResult,
 )
 from woon_core.knowledge.generation import knowledge_generation
+from woon_core.knowledge.identity import validate_canonical_id
+from woon_core.knowledge.learning_checkpoint import (
+    LearningCheckpoint,
+    LearningCheckpointReport,
+    upsert_learning_checkpoint,
+    validate_learning_checkpoint,
+)
 from woon_core.knowledge.ports import (
     CanonicalDocumentRepository,
     KnowledgeHistory,
@@ -35,7 +43,6 @@ from woon_core.knowledge.ports import (
     ReadOnlyKnowledgeCorpus,
 )
 
-CANONICAL_ID = re.compile(r"^[a-z0-9][a-z0-9-]*(?:/[a-z0-9][a-z0-9-]*)+$")
 DIFFICULTIES = {"foundation", "intermediate", "advanced"}
 
 
@@ -187,6 +194,106 @@ class KnowledgeService:
                         f"be fully restored: revision={revision_error}; recovery={recovery_error}"
                     ) from recovery_error
                 raise
+            return report
+
+    def revise_uncompiled_body(
+        self,
+        canonical_id: str,
+        body: str,
+        expected_revision: str,
+    ) -> SaveResult:
+        """Optimistically revise a canonical page not owned by the compiler."""
+
+        normalized_id = self._validate_id(canonical_id)
+        normalized_body = self._validate_body(body)
+        with self._repository.exclusive():
+            current = self._repository.get(normalized_id)
+            if current is None:
+                raise WoonError(f"canonical document not found: {normalized_id}")
+            if current.revision != expected_revision:
+                raise WoonError(
+                    "canonical document changed after it was read; reload and merge before writing"
+                )
+            if self._compiled_wiki is not None and self._compiled_wiki.owns_page(normalized_id):
+                raise WoonError("compiler-owned Wiki page requires a curated revision")
+            snapshot = self._repository.snapshot(normalized_id)
+            result = self._repository.save_body(normalized_id, normalized_body, expected_revision)
+            if result.changed:
+                self._reindex_or_restore(normalized_id, snapshot)
+            return result
+
+    def record_learning_checkpoint(
+        self,
+        checkpoint: LearningCheckpoint,
+        expected_revision: str,
+    ) -> LearningCheckpointReport:
+        """Persist one structured resume point through the page's actual owner."""
+
+        normalized_id = self._validate_id(checkpoint.canonical_id)
+        validated = validate_learning_checkpoint(replace(checkpoint, canonical_id=normalized_id))
+        with self._repository.exclusive():
+            current = self._repository.get(normalized_id)
+            if current is None:
+                raise WoonError(f"canonical document not found: {normalized_id}")
+            if current.revision != expected_revision:
+                raise WoonError(
+                    "canonical document changed after it was read; reload and merge before writing"
+                )
+            body = upsert_learning_checkpoint(current.body, validated)
+            compiler_owned = bool(
+                self._compiled_wiki is not None and self._compiled_wiki.owns_page(normalized_id)
+            )
+            if body == current.body:
+                return LearningCheckpointReport(
+                    canonical_id=normalized_id,
+                    relative_path=current.relative_path,
+                    revision=current.revision,
+                    changed=False,
+                    compiler_owned=compiler_owned,
+                )
+            snapshot = self._repository.snapshot(normalized_id)
+            compiler_snapshot = None
+            if compiler_owned:
+                assert self._compiled_wiki is not None
+                compiler_snapshot = self._compiled_wiki.snapshot_inputs()
+                self._compiled_wiki.curate_revisions(
+                    (
+                        CuratedRevision(
+                            page_id=normalized_id,
+                            body=body,
+                            statement=(
+                                f"{validated.unit} 학습 체크포인트를 "
+                                f"{validated.status} 상태로 갱신했다."
+                            ),
+                        ),
+                    )
+                )
+                saved = self._repository.get(normalized_id)
+                if saved is None:
+                    raise WoonError("compiled learning checkpoint lost its canonical output")
+                result = SaveResult(document=saved, created=False, changed=True)
+            else:
+                result = self._repository.save_body(normalized_id, body, expected_revision)
+            if result.changed:
+                self._reindex_or_restore(normalized_id, snapshot, compiler_snapshot)
+            return LearningCheckpointReport(
+                canonical_id=normalized_id,
+                relative_path=result.document.relative_path,
+                revision=result.document.revision,
+                changed=result.changed,
+                compiler_owned=compiler_owned,
+            )
+
+    def retire_compiled_wiki_pages(self, replacements: dict[str, str]) -> RetiredPageReport:
+        """Merge obsolete compiled page identities and refresh the search index."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        if not replacements:
+            raise WoonError("compiled page retirement requires at least one replacement")
+        with self._repository.exclusive():
+            report = self._compiled_wiki.retire_pages(replacements)
+            self._reindex_unlocked()
             return report
 
     def compilation_audit(self) -> CompilationAudit:
@@ -398,18 +505,12 @@ class KnowledgeService:
 
     @staticmethod
     def _validate_id(canonical_id: str) -> str:
-        value = canonical_id.strip().lower()
-        if not CANONICAL_ID.fullmatch(value):
-            raise WoonError(
-                "canonical_id must be a slash-separated lowercase path such as "
-                "backend/ports-adapters"
-            )
-        return value
+        return validate_canonical_id(canonical_id)
 
     def _validate_metadata(self, metadata: DocumentMetadata) -> DocumentMetadata:
         canonical_id = self._validate_id(metadata.canonical_id)
-        domain = metadata.domain.strip().lower()
-        if canonical_id.split("/", 1)[0] != domain:
+        domain = metadata.domain.strip()
+        if canonical_id.split("/", 1)[0].casefold() != domain.casefold():
             raise WoonError("metadata domain must match the first canonical_id segment")
         title = " ".join(metadata.title.split())
         summary = " ".join(metadata.summary.split())

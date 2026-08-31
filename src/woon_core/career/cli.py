@@ -91,14 +91,40 @@ def run_career(arguments: list[str], output: TextIO) -> None:
         _one_id(
             positionals,
             values,
-            allowed={"--id", "--outcome", "--confirmed"},
-            required={"--outcome", "--confirmed"},
+            allowed={
+                "--id",
+                "--outcome",
+                "--confirmed",
+                "--occurred-on",
+                "--evidence-kind",
+                "--evidence-summary",
+                "--evidence-subject",
+                "--evidence-sender",
+                "--evidence-locator",
+                "--received-at",
+            },
+            required={
+                "--outcome",
+                "--confirmed",
+                "--occurred-on",
+                "--evidence-kind",
+                "--evidence-summary",
+            },
         )
+        evidence = {
+            key.removeprefix("--evidence-").replace("-", "_"): value
+            for key, value in values.items()
+            if key.startswith("--evidence-")
+        }
+        if "--received-at" in values:
+            evidence["received_at"] = values["--received-at"]
         _result(
             service.outcome(
                 values["--id"],
                 values["--outcome"],
                 confirmed=_confirmed(values["--confirmed"]),
+                occurred_on=values["--occurred-on"],
+                evidence=evidence,
             ),
             output,
         )

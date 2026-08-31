@@ -552,20 +552,24 @@ def _validate_codex_conversation_contract(contracts: tuple[AutomationContract, .
         "wiki",
         "brain/review/codex",
         ".local/woon-knowledge/codex-knowledge",
+        ".local/woon-knowledge/document-intake",
         "wiki/private/_sources/codex",
+        "wiki/private/_sources/knowledge",
     }
     if lane.mode != "materialize" or set(lane.owned_paths) != expected_paths:
         raise WoonError("codex conversation ingest must own the Wiki and local receipt boundary")
     expected_outputs = {
         "wiki-private-conversation-source-archive",
+        "wiki-private-knowledge-source-archive",
         "wiki-upsert",
+        "wiki-maintenance",
         "runtime-history-receipt",
+        "document-resolution-receipt",
         "calendar-document-context",
         "schedule-action-review-candidate",
         "person-memory-review-candidate",
         "career-evidence-review-candidate",
         "creative-link-review-candidate",
-        "source-intake-review-candidate",
     }
     if set(lane.outputs) != expected_outputs:
         raise WoonError("codex conversation ingest outputs must use the single Wiki transaction")

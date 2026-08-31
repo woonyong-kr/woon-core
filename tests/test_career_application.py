@@ -31,6 +31,17 @@ def _pdf(path: Path) -> Path:
     return path
 
 
+def _outcome_evidence() -> dict[str, str]:
+    return {
+        "kind": "email",
+        "summary": "직무면접 결과 메일에서 불합격을 확인했다.",
+        "subject": "[KRAFTON] 직무면접 결과 안내드립니다.",
+        "sender": "career@krafton.com",
+        "locator": "https://mail.google.com/mail/#all/example",
+        "received_at": "2026-08-27T19:00:04+09:00",
+    }
+
+
 def test_application_uses_one_wiki_record_and_private_sources(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     jd = tmp_path / "jd.md"
@@ -138,8 +149,90 @@ def test_pdf_and_submission_record_advance_atomically(tmp_path: Path) -> None:
     )
 
     with pytest.raises(WoonError, match="explicit confirmation"):
-        service.outcome(identifier, "interview", confirmed=False)
-    assert service.outcome(identifier, "interview", confirmed=True).state == "interview"
+        service.outcome(
+            identifier,
+            "interview",
+            confirmed=False,
+            occurred_on="2026-08-21",
+            evidence=_outcome_evidence(),
+        )
+    assert (
+        service.outcome(
+            identifier,
+            "interview",
+            confirmed=True,
+            occurred_on="2026-08-21",
+            evidence=_outcome_evidence(),
+        ).state
+        == "interview"
+    )
+
+
+def test_terminal_outcome_records_date_evidence_and_related_documents(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    jd = tmp_path / "jd.md"
+    jd.write_text("- Python 개발 경험\n", encoding="utf-8")
+    pdf = _pdf(tmp_path / "resume.pdf")
+    service = CareerApplicationService(vault)
+    identifier = "krafton-ai-engineer-2026"
+    service.create(application_id=identifier, company="KRAFTON", role="AI Engineer", jd_path=jd)
+    service.evaluate(
+        identifier,
+        [
+            {
+                "requirement": "Python 개발 경험",
+                "classification": "gap",
+                "ownership": "unknown",
+                "rationale": "근거 확인 전",
+                "evidence_paths": [],
+            }
+        ],
+    )
+    service.approve_draft(identifier, confirmed=True)
+    service.attach_pdf(identifier, pdf, kind="draft")
+    service.mark_reviewed(identifier, confirmed=True)
+    service.mark_ready(identifier, confirmed=True)
+    service.attach_pdf(identifier, pdf, kind="submitted", confirmed=True)
+    service.outcome(
+        identifier,
+        "interview",
+        confirmed=True,
+        occurred_on="2026-08-21",
+        evidence=_outcome_evidence(),
+    )
+    page = vault / "wiki/personal/career/applications" / f"{identifier}.md"
+    text = page.read_text(encoding="utf-8")
+    text = text.replace(
+        "related_paths: []",
+        "related_paths:\n- wiki/projects/kubernetes-recovery.md",
+    )
+    page.write_text(text, encoding="utf-8")
+
+    result = service.outcome(
+        identifier,
+        "rejected",
+        confirmed=True,
+        occurred_on="2026-08-27",
+        evidence=_outcome_evidence(),
+    )
+    rendered = page.read_text(encoding="utf-8")
+
+    assert result.state == "rejected"
+    assert "lifecycle_status: completed" in rendered
+    assert "ended_on: '2026-08-27'" in rendered
+    assert "- KRAFTON AI Engineer 지원" in rendered
+    assert "기간: 2026-" in rendered and "→ 2026-08-27" in rendered
+    assert "[KRAFTON] 직무면접 결과 안내드립니다." in rendered
+    assert "[[wiki/projects/kubernetes-recovery|Kubernetes 장애 복구 서비스]]" in rendered
+    replayed = service.outcome(
+        identifier,
+        "rejected",
+        confirmed=True,
+        occurred_on="2026-08-27",
+        evidence=_outcome_evidence(),
+    )
+    assert replayed.changed is False
+    assert "2026년 08월 27일 19:00 · 면접 단계 → 불합격" in page.read_text(encoding="utf-8")
 
 
 def test_revised_drafts_remain_linked_to_the_same_application(tmp_path: Path) -> None:

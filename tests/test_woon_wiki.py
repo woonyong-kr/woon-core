@@ -283,7 +283,7 @@ knowledge_state: "근거 확인됨"
     text = pages[path].decode("utf-8")
     assert "이 문단은 compiler 또는 사람이 소유한다." in text
     assert 'knowledge_state: "확인 필요"' in text
-    assert "2026-08-24 · 실행" in text
+    assert WIKI_TIMELINE_START not in text
 
 
 def test_resolver_rejects_duplicate_subject_titles(tmp_path: Path) -> None:
@@ -373,6 +373,244 @@ parent_topics:
     assert refreshed.count("parent_topics:") == 1
     assert "보존할 본문이다." in refreshed
     assert "> [!info] 한눈에 보기" not in refreshed
+
+
+def test_new_topic_keeps_one_current_section_without_duplicate_first_history(
+    tmp_path: Path,
+) -> None:
+    parent = _write_parent(tmp_path)
+    delta = WikiDelta(
+        title="대화 지식화",
+        summary="대화의 재사용 가능한 결론만 Wiki에 승격한다.",
+        facets=("개념",),
+        knowledge_state="확인 필요",
+        day=date(2026, 8, 28),
+        parent=parent,
+        keywords=("대화 지식화",),
+        intent="채팅 로그가 아니라 현재 결론을 다시 찾기 위해 남긴다.",
+    )
+
+    text = next(iter(prepare_wiki_pages(tmp_path, (delta,)).values())).decode("utf-8")
+
+    assert text.count("대화의 재사용 가능한 결론만 Wiki에 승격한다.") == 2
+    assert "## 핵심 정리" in text
+    assert WIKI_TIMELINE_START not in text
+    assert "추정 의도:" not in text
+    assert "채팅 로그가 아니라 현재 결론을 다시 찾기 위해 남긴다." in text
+
+
+def test_interview_question_uses_current_answer_as_sole_current_state(tmp_path: Path) -> None:
+    parent = _write_parent(tmp_path)
+    delta = WikiDelta(
+        title="문제 선택 기준은 무엇입니까?",
+        summary="영향과 검증 가능성을 함께 본다.",
+        facets=("커리어",),
+        knowledge_state="확인 필요",
+        day=date(2026, 8, 28),
+        parent=parent,
+        keywords=("문제 선택 기준",),
+        interview_tracks=("AI Engineer",),
+        question_topic="문제 선택과 검증",
+        interview_answer=InterviewAnswerRevision(
+            question="문제 선택 기준은 무엇입니까?",
+            answer="사용자 영향이 크고 결과를 검증할 수 있는 문제를 먼저 고른다.",
+        ),
+    )
+
+    text = next(iter(prepare_wiki_pages(tmp_path, (delta,)).values())).decode("utf-8")
+
+    assert "## 현재 이해" not in text
+    assert WIKI_TIMELINE_START not in text
+    assert text.count("## 현재 최선 답변") == 1
+    assert "사용자 영향이 크고 결과를 검증할 수 있는 문제를 먼저 고른다." in text
+
+
+def test_article_refresh_removes_legacy_repeated_scaffolding(tmp_path: Path) -> None:
+    page = tmp_path / "wiki/question.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        """---
+type: Wiki
+title: 질문
+summary: 같은 결론
+---
+
+# 질문
+
+## 현재 이해
+
+<!-- woon-wiki-current:start -->
+같은 결론
+<!-- woon-wiki-current:end -->
+
+## 한 줄 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-28 · 질문 — 같은 결론
+<!-- woon-wiki-timeline:end -->
+
+## 남긴 의도
+
+추정 의도: 다시 읽는다.
+
+## 현재 최선 답변
+
+<!-- woon-interview-current:start -->
+### 질문
+
+무엇입니까?
+
+### 답변
+
+같은 결론
+<!-- woon-interview-current:end -->
+""",
+        encoding="utf-8",
+    )
+
+    refreshed = prepare_wiki_article_view_refresh(tmp_path).pages[page].decode("utf-8")
+
+    assert WIKI_CURRENT_START not in refreshed
+    assert WIKI_TIMELINE_START not in refreshed
+    assert "추정 의도:" not in refreshed
+    assert "## 남긴 의도" not in refreshed
+    assert "## 판단 기준" in refreshed
+    assert "다시 읽는다." in refreshed
+    assert INTERVIEW_CURRENT_START in refreshed
+
+
+def test_article_refresh_removes_parent_only_related_section(tmp_path: Path) -> None:
+    parent = tmp_path / "wiki/project.md"
+    parent.parent.mkdir(parents=True)
+    parent.write_text("# 프로젝트\n", encoding="utf-8")
+    page = tmp_path / "wiki/decision.md"
+    page.write_text(
+        """---
+type: Wiki
+title: 결정
+parent: '[[wiki/project|프로젝트]]'
+---
+
+# 결정
+
+## 연결
+
+- [[wiki/project]]
+""",
+        encoding="utf-8",
+    )
+
+    refreshed = prepare_wiki_article_view_refresh(tmp_path).pages[page].decode("utf-8")
+
+    assert "## 연결" not in refreshed
+    assert "## 관련 문서" not in refreshed
+
+
+def test_article_refresh_keeps_related_document_without_repeating_parent(tmp_path: Path) -> None:
+    page = tmp_path / "wiki/decision.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        """---
+type: Wiki
+title: 결정
+parent: '[[wiki/project|프로젝트]]'
+---
+
+# 결정
+
+## 관련 문서
+
+- [[wiki/project]]
+- [[wiki/evidence|근거]]
+""",
+        encoding="utf-8",
+    )
+
+    refreshed = prepare_wiki_article_view_refresh(tmp_path).pages[page].decode("utf-8")
+
+    assert "[[wiki/project]]" not in refreshed
+    assert "[[wiki/evidence|근거]]" in refreshed
+
+
+def test_article_refresh_keeps_archived_answer_without_repeating_stable_question(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "wiki/question.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        """---
+type: Wiki
+title: 왜 Draft PR을 사용했습니까?
+---
+
+# 왜 Draft PR을 사용했습니까?
+
+## 과거 답변
+
+<!-- woon-interview-archive:start -->
+### 2026-08-24 · 이전 답변
+
+### 질문 맥락
+
+이전 면접 그래프에서 연습한 질문이다.
+
+### 질문
+
+왜 Draft PR을 사용했습니까?
+
+### 답변
+
+사람이 승인하기 전에는 제안 상태임을 드러내기 위해 사용했다.
+<!-- woon-interview-archive:end -->
+""",
+        encoding="utf-8",
+    )
+
+    refreshed = prepare_wiki_article_view_refresh(tmp_path).pages[page].decode("utf-8")
+
+    assert refreshed.count("왜 Draft PR을 사용했습니까?") == 2
+    assert "이전 면접 그래프에서 연습한 질문이다." not in refreshed
+    assert "사람이 승인하기 전에는 제안 상태임을 드러내기 위해 사용했다." in refreshed
+
+
+def test_article_refresh_removes_only_empty_archived_interview_attempts(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "wiki/question.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        """---
+type: Wiki
+title: 질문
+---
+
+# 질문
+
+## 과거 답변
+
+<!-- woon-interview-archive:start -->
+### 2026-08-23 · 빈 시도
+
+### 답변
+
+아직 답변하지 않았다.
+
+### 2026-08-24 · 확인된 답변
+
+### 답변
+
+승인 전에 제안 상태로 남겼다.
+<!-- woon-interview-archive:end -->
+""",
+        encoding="utf-8",
+    )
+
+    refreshed = prepare_wiki_article_view_refresh(tmp_path).pages[page].decode("utf-8")
+
+    assert "아직 답변하지 않았다." not in refreshed
+    assert "빈 시도" not in refreshed
+    assert "확인된 답변" in refreshed
+    assert "승인 전에 제안 상태로 남겼다." in refreshed
 
 
 def test_corpus_migration_replaces_yaml_block_lists_without_duplicate_keys(tmp_path: Path) -> None:
@@ -824,6 +1062,30 @@ def test_interview_parent_must_resolve_to_an_existing_wiki(tmp_path: Path) -> No
     )
 
     with pytest.raises(WoonError, match="parent must point"):
+        prepare_wiki_pages(tmp_path, (delta,))
+
+
+def test_interview_answer_must_not_create_an_empty_question_page(tmp_path: Path) -> None:
+    parent_path = tmp_path / "wiki/personal/interview/topics/example.md"
+    parent_path.parent.mkdir(parents=True)
+    parent_path.write_text("---\ntype: Wiki\ntitle: 예시 주제\n---\n", encoding="utf-8")
+    delta = WikiDelta(
+        title="무엇을 했습니까?",
+        summary="답변이 생긴 뒤에만 정본 문서를 만든다.",
+        facets=("커리어", "학습"),
+        knowledge_state="확인 필요",
+        day=date(2026, 8, 28),
+        parent="[[wiki/personal/interview/topics/example|예시 주제]]",
+        keywords=("예시 질문",),
+        interview_tracks=("공통 면접",),
+        question_topic="예시 주제",
+        interview_answer=InterviewAnswerRevision(
+            question="무엇을 했습니까?",
+            answer=None,
+        ),
+    )
+
+    with pytest.raises(WoonError, match="must contain a reusable answer"):
         prepare_wiki_pages(tmp_path, (delta,))
 
 

@@ -24,6 +24,7 @@ from woon_core.knowledge.codex_knowledge import record_codex_knowledge_entries
 from woon_core.knowledge.context_bundle import build_wiki_context_bundle
 from woon_core.knowledge.domain import DocumentMetadata
 from woon_core.knowledge.factory import build_knowledge_service
+from woon_core.knowledge.learning_checkpoint import LearningCheckpoint
 from woon_core.knowledge.mail_schedule_automation import (
     record_mail_schedule_candidates,
     submissions_from_records,
@@ -159,8 +160,9 @@ def archive_conversation(
 ) -> dict[str, object]:
     """Create or optimistically replace one deduplicated canonical document.
 
-    canonical_id must be a lowercase ``domain/slug`` path and domain must match
-    its first segment. purpose records why this knowledge is being retained and
+    canonical_id must be a stable ``domain/slug`` path and domain must match its
+    first segment. Korean slugs and established ``README`` hub segments are
+    supported. purpose records why this knowledge is being retained and
     which future question, decision, or output it should support. prerequisites,
     next_concepts, and related accept only existing canonical IDs in the same
     form; use empty lists when no verified canonical relationship exists. They
@@ -193,6 +195,48 @@ def archive_conversation(
         "relative_path": result.document.relative_path,
         "revision": result.document.revision,
     }
+
+
+@mcp.tool(
+    name="woon_knowledge_learning_checkpoint",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def record_learning_checkpoint(
+    canonical_id: str,
+    unit: str,
+    status: str,
+    evidence: list[str],
+    unstable: list[str],
+    next_question: str,
+    recorded_on: str,
+    expected_revision: str,
+) -> dict[str, object]:
+    """Optimistically retain only the evidence needed to resume guided learning."""
+
+    if status not in {"confirmed", "partial", "retry"}:
+        raise ValueError("status must be confirmed, partial, or retry")
+    try:
+        checkpoint_day = date.fromisoformat(recorded_on)
+    except ValueError as error:
+        raise ValueError("recorded_on must use YYYY-MM-DD") from error
+    report = _service().record_learning_checkpoint(
+        LearningCheckpoint(
+            canonical_id=canonical_id,
+            unit=unit,
+            status=status,  # type: ignore[arg-type]
+            evidence=tuple(evidence),
+            unstable=tuple(unstable),
+            next_question=next_question,
+            recorded_on=checkpoint_day,
+        ),
+        expected_revision,
+    )
+    return asdict(report)
 
 
 @mcp.tool(

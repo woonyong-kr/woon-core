@@ -130,6 +130,40 @@ class MarkdownDocumentRepository:
         document = self.parse(path.relative_to(self._vault).as_posix(), rendered)
         return SaveResult(document=document, created=current is None, changed=True)
 
+    def save_body(
+        self,
+        canonical_id: str,
+        body: str,
+        expected_revision: str,
+    ) -> SaveResult:
+        """Replace only the body while preserving the current YAML envelope."""
+
+        path = self._find_path(canonical_id)
+        if path is None:
+            raise WoonError(f"canonical document not found: {canonical_id}")
+        text = path.read_text(encoding="utf-8")
+        current = self.parse(path.relative_to(self._vault).as_posix(), text)
+        if current.revision != expected_revision:
+            raise WoonError(
+                "canonical document changed after it was read; reload and merge before writing"
+            )
+        rendered = _replace_document_body(text, current.metadata.title, body)
+        revision = _revision(rendered)
+        if revision == current.revision:
+            return SaveResult(document=current, created=False, changed=False)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(rendered)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        document = self.parse(path.relative_to(self._vault).as_posix(), rendered)
+        return SaveResult(document=document, created=False, changed=True)
+
     def validate(self) -> list[str]:
         errors: list[str] = []
         identifiers: dict[str, str] = {}
@@ -280,6 +314,22 @@ def _navigation(metadata: DocumentMetadata) -> str:
     if len(lines) == 3:
         lines.append("- 연결할 개념 없음")
     return "\n".join(lines) + "\n"
+
+
+def _replace_document_body(text: str, title: str, body: str) -> str:
+    heading = f"# {title}\n"
+    heading_index = text.find(heading)
+    if heading_index < 0:
+        raise WoonError("canonical document H1 must match frontmatter title")
+    body_start = heading_index + len(heading)
+    existing_after_heading = text[body_start:].lstrip("\n")
+    navigation = "\n## 이어서 읽기\n"
+    navigation_index = existing_after_heading.find(navigation)
+    tail = existing_after_heading[navigation_index:] if navigation_index >= 0 else ""
+    rendered = text[:body_start].rstrip() + "\n\n" + body.rstrip() + "\n"
+    if tail:
+        rendered = rendered.rstrip() + "\n" + tail.lstrip("\n")
+    return rendered
 
 
 def _file_state(path: Path, vault: Path) -> tuple[str, int, int, int, int]:

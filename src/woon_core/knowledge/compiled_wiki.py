@@ -119,6 +119,17 @@ class CuratedRevisionReport:
     page_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RetiredPageReport:
+    """Result of merging obsolete compiled pages into surviving canonical pages."""
+
+    retired: int
+    compiled: int
+    unchanged: int
+    page_ids: tuple[str, ...]
+    replacement_ids: tuple[str, ...]
+
+
 class CompiledWiki:
     """Compile and audit one private source-schema Wiki without model calls."""
 
@@ -344,6 +355,12 @@ class CompiledWiki:
             raise
         self._last_input_state = None
         return CompileReport(compiled, unchanged, tuple(changed_ids))
+
+    def owns_page(self, page_id: str) -> bool:
+        """Return whether this compiler owns the reader-facing page identity."""
+
+        _, _, pages, _, _ = self._load_inputs()
+        return page_id in pages
 
     def archive(
         self,
@@ -656,6 +673,114 @@ class CompiledWiki:
             page_ids=tuple(changed),
         )
 
+    def retire_pages(self, replacements: dict[str, str]) -> RetiredPageReport:
+        """Merge obsolete page identities into existing canonical pages.
+
+        The retired page's source and claim records remain as inactive provenance.
+        Frontmatter relations are redirected to the survivor, the obsolete output is
+        removed, and receipts/relations are rebuilt in one rollback-safe operation.
+        """
+
+        if not replacements:
+            raise WoonError("compiled page retirement requires at least one replacement")
+        sources, claims, pages, curations, _ = self._load_inputs()
+        normalized = {
+            _required_string({"page_id": page_id}, "page_id"): _required_string(
+                {"replacement_id": replacement_id}, "replacement_id"
+            )
+            for page_id, replacement_id in replacements.items()
+        }
+        if any(page_id == replacement_id for page_id, replacement_id in normalized.items()):
+            raise WoonError("compiled page cannot replace itself")
+        unknown = set(normalized).difference(pages)
+        if unknown:
+            raise WoonError(f"compiled Wiki page spec not found: {sorted(unknown)[0]}")
+        unknown_replacements = set(normalized.values()).difference(pages)
+        if unknown_replacements:
+            raise WoonError(
+                f"compiled Wiki replacement page spec not found: {sorted(unknown_replacements)[0]}"
+            )
+        retiring = set(normalized)
+        if retiring.intersection(normalized.values()):
+            raise WoonError("compiled page replacement must survive this retirement")
+
+        snapshot = self.snapshot_inputs()
+        output_snapshots: dict[Path, bytes] = {}
+        affected: set[str] = set()
+        try:
+            for page_id, page in pages.items():
+                if page_id in retiring:
+                    continue
+                frontmatter = page.get("frontmatter")
+                if not isinstance(frontmatter, dict):
+                    raise WoonError("page frontmatter must be a mapping")
+                if _redirect_frontmatter_relations(frontmatter, normalized):
+                    affected.add(page_id)
+
+            for page_id, replacement_id in sorted(normalized.items()):
+                retired_page = pages[page_id]
+                replacement_page = pages[replacement_id]
+                replacement_sources = self._page_sources(replacement_page, sources)
+                replacement_claims = self._page_claims(replacement_page, claims)
+                successor_source_id = _current_source_id(replacement_page, replacement_sources)
+                successor_claim_id = _current_claim_id(replacement_page, replacement_claims)
+
+                remaining_pages = {
+                    other_id: other_page
+                    for other_id, other_page in pages.items()
+                    if other_id not in retiring
+                }
+                for source_id in _string_list(retired_page.get("source_ids"), "page source_ids"):
+                    used_elsewhere = any(
+                        source_id in _string_list(other_page.get("source_ids"), "page source_ids")
+                        for other_page in remaining_pages.values()
+                    )
+                    if not used_elsewhere and sources[source_id].get("lifecycle") == "compiled":
+                        sources[source_id].update(
+                            {"lifecycle": "archived", "superseded_by": successor_source_id}
+                        )
+                for claim_id in _string_list(retired_page.get("claim_ids"), "page claim_ids"):
+                    used_elsewhere = any(
+                        claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
+                        for other_page in remaining_pages.values()
+                    )
+                    if not used_elsewhere and claims[claim_id].get("status") == "accepted":
+                        claims[claim_id].update(
+                            {"status": "superseded", "superseded_by": successor_claim_id}
+                        )
+
+                output_path = _inside(
+                    self._settings.output_root,
+                    retired_page["output_path"],
+                    "page output_path",
+                )
+                if output_path.is_file():
+                    output_snapshots[output_path] = output_path.read_bytes()
+                del pages[page_id]
+                del curations[page_id]
+                affected.add(replacement_id)
+
+            self._write_inputs(sources, claims, pages, curations)
+            compile_report = self.compile(page_ids=tuple(sorted(affected)))
+            for output_path in output_snapshots:
+                output_path.unlink(missing_ok=True)
+            audit = self.audit()
+            if not audit.complete:
+                raise WoonError(f"compiled page retirement left a stale catalog: {audit.errors[0]}")
+        except Exception:
+            self.restore_inputs(snapshot)
+            for output_path, content in output_snapshots.items():
+                atomic_write(output_path, content)
+            self.compile(force=True)
+            raise
+        return RetiredPageReport(
+            retired=len(normalized),
+            compiled=compile_report.compiled,
+            unchanged=compile_report.unchanged,
+            page_ids=tuple(sorted(normalized)),
+            replacement_ids=tuple(sorted(set(normalized.values()))),
+        )
+
     @staticmethod
     def _supersede_unshared_curated_source(
         prior_source_id: str,
@@ -686,9 +811,10 @@ class CompiledWiki:
         retained: list[str] = []
         for prior_claim_id in claim_ids:
             claim = claims[prior_claim_id]
-            is_prior_curated_claim = claim.get("kind") == "curated-document" and claim.get(
-                "source_ids"
-            ) == [prior_source_id]
+            claim_source_ids = _string_list(claim.get("source_ids"), "claim source_ids")
+            is_prior_curated_claim = (
+                claim.get("kind") == "curated-document" and prior_source_id in claim_source_ids
+            )
             used_elsewhere = any(
                 other_page_id != page_id
                 and prior_claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
@@ -1624,6 +1750,90 @@ def _relations_for(page_id: str, frontmatter: dict[str, Any]) -> list[dict[str, 
                     {"from_page_id": page_id, "type": relation_type, "to_id": target_id}
                 )
     return relations
+
+
+def _current_source_id(page: dict[str, Any], source_records: list[dict[str, Any]]) -> str:
+    render = page.get("render")
+    if isinstance(render, dict) and render.get("kind") == "source-body":
+        return _required_string(render, "source_id")
+    if not source_records:
+        raise WoonError("replacement page has no current source")
+    return _required_string(source_records[-1], "source_id")
+
+
+def _current_claim_id(page: dict[str, Any], claim_records: list[dict[str, Any]]) -> str:
+    if not claim_records:
+        raise WoonError("replacement page has no current claim")
+    render = page.get("render")
+    source_id = (
+        _required_string(render, "source_id")
+        if isinstance(render, dict) and render.get("kind") == "source-body"
+        else None
+    )
+    if source_id is not None:
+        for claim in reversed(claim_records):
+            if source_id in _string_list(claim.get("source_ids"), "claim source_ids"):
+                return _required_string(claim, "claim_id")
+    return _required_string(claim_records[-1], "claim_id")
+
+
+def _redirect_frontmatter_relations(
+    frontmatter: dict[str, Any], replacements: dict[str, str]
+) -> bool:
+    """Redirect relation fields while preserving their existing link syntax."""
+
+    changed = False
+    for field in ("prerequisites", "next_concepts", "related", "related_to"):
+        values = frontmatter.get(field)
+        if not isinstance(values, list):
+            continue
+        redirected = [_redirect_relation_value(value, replacements) for value in values]
+        deduplicated = list(dict.fromkeys(redirected))
+        if deduplicated != values:
+            frontmatter[field] = deduplicated
+            changed = True
+    parent = frontmatter.get("parent")
+    if isinstance(parent, str):
+        redirected_parent = _redirect_relation_value(parent, replacements)
+        if redirected_parent != parent:
+            frontmatter["parent"] = redirected_parent
+            changed = True
+    return changed
+
+
+def _redirect_relation_value(value: Any, replacements: dict[str, str]) -> Any:
+    if not isinstance(value, str):
+        return value
+    target = _relation_target(value)
+    if target is None:
+        return value
+    replacement = replacements.get(target)
+    if replacement is None and "/" not in target:
+        matches = [new for old, new in replacements.items() if old.rsplit("/", 1)[-1] == target]
+        if len(matches) == 1:
+            replacement = matches[0]
+    if replacement is None:
+        return value
+
+    if value.startswith("[[") and value.endswith("]]"):
+        inner = value[2:-2]
+        link, separator, label = inner.partition("|")
+        anchor_separator = "#" if "#" in link else ""
+        anchor = link.partition("#")[2] if anchor_separator else ""
+        path = link.partition("#")[0]
+        if path.startswith("wiki/"):
+            new_path = f"wiki/{replacement}"
+        elif "/" in path:
+            new_path = replacement
+        else:
+            new_path = replacement.rsplit("/", 1)[-1]
+        new_link = new_path + (f"#{anchor}" if anchor_separator else "")
+        return f"[[{new_link}{separator}{label}]]"
+    if value.startswith("wiki/"):
+        return f"wiki/{replacement}"
+    if "/" in value:
+        return replacement
+    return replacement.rsplit("/", 1)[-1]
 
 
 def _relation_target(value: str) -> str | None:

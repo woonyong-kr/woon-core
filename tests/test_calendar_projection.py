@@ -14,6 +14,10 @@ from woon_core.calendar.projection import (
     CalendarProjectionService,
 )
 from woon_core.errors import WoonError
+from woon_core.people.dashboard import (
+    PERSON_DASHBOARD_BASE_RELATIVE_PATH,
+    is_core_person_dashboard_base,
+)
 
 
 class FakeCalendarReader:
@@ -104,6 +108,7 @@ def test_refresh_writes_only_approved_event_summary_fields(tmp_path: Path) -> No
     assert "status: Generated" in markdown
     assert 'Start Date: "2026-08-17T10:00:00+09:00"' in markdown
     assert 'End Date: "2026-08-17T11:00:00+09:00"' in markdown
+    assert 'Time: "오전 10:00 - 오전 11:00"' in markdown
     assert "All Day: false" in markdown
     assert "woon_projection: apple-calendar" in markdown
     assert 'Date: "2026-08-17"' in markdown
@@ -128,6 +133,7 @@ def test_refresh_writes_only_approved_event_summary_fields(tmp_path: Path) -> No
     assert "```link-calendar" in dashboard
     assert "profile: woon-apple-calendar" in dashboard
     assert (tmp_path / APPLE_CALENDAR_DASHBOARD_RELATIVE_PATH).stat().st_mode & 0o777 == 0o400
+    assert is_core_person_dashboard_base(tmp_path / PERSON_DASHBOARD_BASE_RELATIVE_PATH)
 
 
 def test_refresh_does_not_rewrite_an_unchanged_projection_when_time_moves(tmp_path: Path) -> None:
@@ -202,6 +208,7 @@ def test_refresh_renders_all_day_events_for_markdown_and_ics(tmp_path: Path) -> 
     ).read_text(encoding="utf-8")
 
     assert 'Date: "2026-08-17"' in markdown
+    assert 'Time: "하루 종일"' in markdown
     assert "All Day: true" in markdown
     assert "Start Date:" not in markdown
     assert "End Date:" not in markdown

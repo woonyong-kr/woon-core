@@ -361,7 +361,21 @@ def _safe_name(value: str) -> str:
 
 
 def _role(path: Path) -> str:
-    if path.suffix.lower() in {".md", ".txt", ".rst", ".html", ".htm", ".ipynb", ".pdf"}:
+    if path.suffix.lower() in {
+        ".adoc",
+        ".asciidoc",
+        ".csv",
+        ".docx",
+        ".htm",
+        ".html",
+        ".ipynb",
+        ".md",
+        ".pdf",
+        ".pptx",
+        ".rst",
+        ".txt",
+        ".xlsx",
+    }:
         return "document"
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}:
         return "asset"

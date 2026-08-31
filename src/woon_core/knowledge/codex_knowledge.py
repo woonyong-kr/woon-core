@@ -82,7 +82,9 @@ _CODEX_OWNED_PATHS = {
     "wiki",
     "brain/review/codex",
     ".local/woon-knowledge/codex-knowledge",
+    ".local/woon-knowledge/document-intake",
     "wiki/private/_sources/codex",
+    "wiki/private/_sources/knowledge",
 }
 _CALENDAR_LINK_REASONS = {"준비", "작업", "결정", "결과", "참고"}
 _PERSON_NAME_RE = re.compile(r"[A-Za-z가-힣][A-Za-z가-힣 .'-]{0,47}")
@@ -1151,7 +1153,7 @@ def _frontmatter_list(text: str, key: str) -> tuple[str, ...]:
             raise WoonError(f"Codex knowledge Wiki {key} must be a string list")
         return tuple(value)
     block = re.search(
-        rf"(?ms)^\s*{re.escape(key)}:\s*\n(?P<body>(?:\s{{2,}}-\s*[^\n]+\n?)+)",
+        rf"(?ms)^\s*{re.escape(key)}:\s*\n(?P<body>(?:[ \t]*-\s*[^\n]+\n?)+)",
         text,
     )
     if block is None:

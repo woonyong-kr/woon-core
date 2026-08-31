@@ -111,7 +111,7 @@ def test_rejects_sensitive_or_unrelated_digest_input_without_writing(tmp_path: P
     assert not (tmp_path / "inbox/daily-digests").exists()
 
 
-def test_creates_a_missing_daily_note_from_the_canonical_template(tmp_path: Path) -> None:
+def test_clean_run_does_not_create_a_missing_daily_note(tmp_path: Path) -> None:
     _digest_settings(tmp_path)
     template = tmp_path / "templates" / "daily-note.md"
     template.parent.mkdir(parents=True)
@@ -122,11 +122,7 @@ def test_creates_a_missing_daily_note_from_the_canonical_template(tmp_path: Path
 
     record_codex_daily_digest(tmp_path, day=date(2026, 8, 17), entries=())
 
-    assert (
-        (tmp_path / "inbox/daily/2026-08-17.md")
-        .read_text(encoding="utf-8")
-        .startswith("# 2026-08-17")
-    )
+    assert not (tmp_path / "inbox/daily/2026-08-17.md").exists()
 
 
 @pytest.mark.parametrize(
@@ -135,7 +131,6 @@ def test_creates_a_missing_daily_note_from_the_canonical_template(tmp_path: Path
         ("partial", "현재까지 정리됨"),
         ("pending", "다음 실행 대기"),
         ("unavailable", "세션 원본을 찾지 못해 대기"),
-        ("no-meaningful", "남길 항목 없음"),
         ("source-only", "정본 반영 필요"),
     ],
 )
@@ -462,7 +457,7 @@ def test_processed_one_off_entries_stay_in_evidence_without_becoming_a_promotion
     )
 
     rendered = daily.read_text(encoding="utf-8")
-    assert "**남길 항목 없음** —" in rendered
+    assert "남길 항목 없음" not in rendered
     assert "정본 반영 필요" not in rendered
     assert "커밋을 푸시했다" not in rendered
     assert "일회성 실행 기록이다" not in rendered
@@ -552,8 +547,9 @@ def test_daily_digest_groups_project_children_under_one_canonical_root(tmp_path:
     rendered = daily.read_text(encoding="utf-8")
     assert rendered.count("### [[../../wiki/personal/project|프로젝트]]") == 1
     assert "프로젝트의 현재 목표다." in rendered
-    assert "[[../../wiki/personal/architecture|아키텍처]]" in rendered
-    assert "[[../../wiki/personal/verification|검증]]" in rendered
+    assert "[[../../wiki/personal/architecture|아키텍처]]" not in rendered
+    assert "[[../../wiki/personal/verification|검증]]" not in rendered
+    assert "**변경 문서**" not in rendered
     assert "구성 요소의 경계를 정했다." not in rendered
 
 
@@ -589,7 +585,7 @@ def test_daily_digest_populates_native_base_metadata(tmp_path: Path) -> None:
     )
 
     rendered = daily.read_text(encoding="utf-8")
-    assert 'summary: "샘플 문항과 실습 코드를 한 흐름으로 정리했다"' in rendered
+    assert 'summary: "AICE 학습 환경을 준비했다"' in rendered
     assert 'digest_status: "정본 반영 완료"' in rendered
     assert '  - "학습"' in rendered
     assert '  - "AICE"' in rendered

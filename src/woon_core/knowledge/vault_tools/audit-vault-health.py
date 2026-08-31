@@ -17,6 +17,7 @@ from woon_core.calendar.constants import (
     LINK_CALENDAR_PROFILE_ID,
 )
 from woon_core.errors import WoonError
+from woon_core.knowledge.identity import validate_canonical_id
 from woon_core.knowledge.source_boundary import audit_source_boundary
 from woon_core.knowledge.wiki_tree import (
     LEGACY_TREE_FIELDS,
@@ -212,6 +213,9 @@ ALLOWED_VISIBLE_ROOT_DIRECTORIES = {
 }
 DAILY_DIGEST_EMBED_RE = re.compile(r"!\[\[\.\./daily-digests/(\d{4}-\d{2}-\d{2})\]\]")
 H2_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
+WIKI_CURRENT_START = "<!-- woon-wiki-current:start -->"
+WIKI_CURRENT_END = "<!-- woon-wiki-current:end -->"
+INTERVIEW_CURRENT_START = "<!-- woon-interview-current:start -->"
 TIMELINE_BLOCK_RE = re.compile(
     r"<!-- woon-wiki-timeline:start -->(.*?)<!-- woon-wiki-timeline:end -->",
     re.DOTALL,
@@ -260,14 +264,11 @@ def wiki_and_entity_policy_issues(
     if frontmatter.get("type") != "Wiki":
         wiki.append(f"{relative}: Wiki document type must be Wiki")
     canonical_id = frontmatter.get("canonical_id")
-    if (
-        not isinstance(canonical_id, str)
-        or not canonical_id.strip()
-        or len(canonical_id) > 160
-        or canonical_id.startswith("/")
-        or ".." in Path(canonical_id).parts
-        or any(char.isspace() for char in canonical_id)
-    ):
+    try:
+        if not isinstance(canonical_id, str):
+            raise WoonError("canonical_id must be text")
+        validate_canonical_id(canonical_id)
+    except WoonError:
         wiki.append(f"{relative}: canonical_id must be a stable path-independent identity")
     facets = frontmatter.get("facets", [])
     if not isinstance(facets, list):
@@ -352,9 +353,7 @@ def wiki_and_entity_policy_issues(
         or not isinstance(frontmatter.get("objective"), str)
     ):
         entities.append(f"{relative}: project facet requires project_id and objective")
-    if frontmatter.get("entity_kind") == "content" and frontmatter.get(
-        "content_kind"
-    ) not in {
+    if frontmatter.get("entity_kind") == "content" and frontmatter.get("content_kind") not in {
         "book",
         "film",
         "series",
@@ -424,16 +423,22 @@ def obsidian_workspace_issues(vault: Path) -> list[str]:
         if target.is_symlink() or (not exists and not allow_missing):
             issues.append(f"{source}: saved file is missing: {referenced}")
 
-    def visit(value: object, *, source: str) -> None:
+    def visit(value: object, *, source: str, allow_missing_file: bool = False) -> None:
         if isinstance(value, dict):
             referenced = value.get("file")
             if isinstance(referenced, str):
-                check_reference(referenced, source=source, allow_directory=False)
+                check_reference(
+                    referenced,
+                    source=source,
+                    allow_directory=False,
+                    allow_missing=allow_missing_file,
+                )
+            child_allows_missing = allow_missing_file or value.get("type") == "file-properties"
             for child in value.values():
-                visit(child, source=source)
+                visit(child, source=source, allow_missing_file=child_allows_missing)
         elif isinstance(value, list):
             for child in value:
-                visit(child, source=source)
+                visit(child, source=source, allow_missing_file=allow_missing_file)
 
     for name in ("workspace.json", "workspaces.json"):
         path = obsidian / name
@@ -611,10 +616,9 @@ def is_allowed_non_markdown_file(path: Path) -> bool:
         return is_noncanonical_map_archive(path) or is_valid_markdown_canvas(path)
     if r == "catalog/source-audits/inflearn-java-course-materials.json":
         return True
-    if (
-        r.startswith("wiki/private/_sources/knowledge/private/career/applications/")
-        and path.suffix.casefold() in {".json", ".pdf", ".yaml", ".yml"}
-    ):
+    if r.startswith(
+        "wiki/private/_sources/knowledge/private/career/applications/"
+    ) and path.suffix.casefold() in {".json", ".pdf", ".yaml", ".yml"}:
         return True
     if path.suffix != ".drawio":
         return False
@@ -699,9 +703,10 @@ def calendar_projection_issues(vault: Path) -> list[str]:
                     or not str(metadata["calendar"]).strip()
                 ):
                     issues.append(f"{relative}: calendar projection calendar is required")
-                if not isinstance(metadata.get("Date"), (str, date, datetime)) or not str(
-                    metadata["Date"]
-                ).strip():
+                if (
+                    not isinstance(metadata.get("Date"), (str, date, datetime))
+                    or not str(metadata["Date"]).strip()
+                ):
                     issues.append(f"{relative}: calendar projection requires Date")
                 if (
                     not isinstance(metadata.get("Category"), str)
@@ -1126,12 +1131,15 @@ def canonical_section_quality_issues(relative: str, text: str) -> tuple[list[str
 
 
 def canonical_body_quality_issues(relative: str, text: str) -> list[str]:
-    """Reject empty or misleading sections and consecutive prose duplication."""
+    """Reject empty, repeated, or mechanically scaffolded canonical prose."""
 
     body = re.sub(r"\A---\s*\n.*?\n---\s*\n?", "", text, count=1, flags=re.DOTALL)
     issues: list[str] = []
     paragraphs: list[str] = []
-    for block in re.split(r"\n\s*\n", strip_fenced_blocks(body)):
+    raw_blocks = re.split(r"\n\s*\n", re.sub(r"```.*?```", "<CODE>", body, flags=re.DOTALL))
+    for block_index, block in enumerate(raw_blocks):
+        if "<CODE>" in block:
+            continue
         lines = [line.rstrip() for line in block.splitlines() if line.strip()]
         if not lines:
             continue
@@ -1141,19 +1149,123 @@ def canonical_body_quality_issues(relative: str, text: str) -> list[str]:
             for line in lines
         ):
             continue
-        paragraphs.append(re.sub(r"\s+", " ", " ".join(lines)).strip())
-    for previous, current in zip(paragraphs, paragraphs[1:], strict=False):
-        if current == previous and len(current) >= 20:
-            issues.append(f"{relative}: duplicated consecutive paragraph {current[:120]!r}")
+        paragraph = re.sub(r"\s+", " ", " ".join(lines)).strip()
+        next_block = (
+            raw_blocks[block_index + 1].lstrip() if block_index + 1 < len(raw_blocks) else ""
+        )
+        if next_block.startswith("<CODE>"):
+            continue
+        if re.fullmatch(r"[^`]{1,40}: `[^`]+(?:/[^`]+)+`", paragraph):
+            continue
+        paragraphs.append(paragraph)
+    paragraph_counts: dict[str, int] = {}
+    for paragraph in paragraphs:
+        paragraph_counts[paragraph] = paragraph_counts.get(paragraph, 0) + 1
+    issues.extend(
+        f"{relative}: duplicated prose paragraph {paragraph[:120]!r} x{count}"
+        for paragraph, count in sorted(paragraph_counts.items())
+        if count > 1 and len(paragraph) >= 20
+    )
 
-    headings = [(match.start(), match.end(), match.group(1).strip()) for match in H2_RE.finditer(body)]
+    quote_paragraphs: list[str] = []
+    quote_labels: list[str] = []
+    for block in raw_blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines or not all(line.startswith(">") for line in lines):
+            continue
+        paragraph = re.sub(
+            r"\s+",
+            " ",
+            " ".join(re.sub(r"^>\s?", "", line) for line in lines),
+        ).strip()
+        label_match = re.match(r"([^:：]{1,30})[:：]", paragraph)
+        if label_match is not None:
+            quote_labels.append(re.sub(r"\s+", " ", label_match.group(1)).strip().casefold())
+        if len(paragraph) >= 20:
+            quote_paragraphs.append(paragraph)
+    quote_counts: dict[str, int] = {}
+    quote_label_counts: dict[str, int] = {}
+    for paragraph in quote_paragraphs:
+        quote_counts[paragraph] = quote_counts.get(paragraph, 0) + 1
+    for label in quote_labels:
+        quote_label_counts[label] = quote_label_counts.get(label, 0) + 1
+    issues.extend(
+        f"{relative}: duplicated blockquote paragraph {paragraph[:120]!r} x{count}"
+        for paragraph, count in sorted(quote_counts.items())
+        if count > 1
+    )
+    issues.extend(
+        f"{relative}: duplicated blockquote label {label!r} x{count}"
+        for label, count in sorted(quote_label_counts.items())
+        if count > 1
+    )
+
+    metadata = parse_frontmatter(text)
+    for retired_heading in ("현재 이해", "남긴 의도", "다음 질문", "연결"):
+        if re.search(rf"(?m)^## {re.escape(retired_heading)}\s*$", body):
+            issues.append(f"{relative}: replace conversation scaffold heading {retired_heading!r}")
+    if "![[inbox/wiki/wiki.base" in body:
+        issues.append(f"{relative}: use direct Wiki hyperlinks instead of an embedded Base view")
+    if metadata.get("state_reason") in {
+        "legacy-normalization",
+        "map-to-wiki-tree-migration",
+    }:
+        issues.append(f"{relative}: replace legacy state reason with the current evidence basis")
+    if metadata.get("state_reason") == "planned-reading":
+        if metadata.get("learning_status") != "Planned":
+            issues.append(f"{relative}: planned reading must declare learning_status Planned")
+    elif metadata.get("learning_status") in {"Reading", "Completed"}:
+        semantic_body = re.sub(r"(?m)^# .+?$|^## .+?$", "", body)
+        semantic_body = MARKDOWN_LINK_RE.sub("", semantic_body)
+        semantic_body = re.sub(r"\s+", " ", semantic_body).strip()
+        if len(semantic_body) < 40:
+            issues.append(f"{relative}: started book chapter requires retained learning notes")
+    summary = metadata.get("summary")
+    if isinstance(summary, str) and len(summary.strip()) >= 20:
+        normalized_summary = re.sub(r"\s+", " ", summary).strip()
+        normalized_body = re.sub(r"\s+", " ", strip_fenced_blocks(body))
+        occurrence_count = normalized_body.count(normalized_summary)
+        if occurrence_count > 1:
+            issues.append(
+                f"{relative}: frontmatter summary is repeated in body x{occurrence_count}"
+            )
+
+    if "추정 의도:" in body:
+        issues.append(f"{relative}: remove mechanical '추정 의도:' narration")
+    if "아직 답변하지 않았다." in body:
+        issues.append(f"{relative}: remove empty interview answer placeholder")
+    if INTERVIEW_CURRENT_START in body and WIKI_CURRENT_START in body:
+        issues.append(f"{relative}: interview answer duplicates generic current understanding")
+
+    current_match = re.search(
+        re.escape(WIKI_CURRENT_START) + r"(?P<body>.*?)" + re.escape(WIKI_CURRENT_END),
+        body,
+        flags=re.DOTALL,
+    )
+    if current_match is not None:
+        current = re.sub(r"\s+", " ", current_match.group("body")).strip()
+        if current:
+            for timeline in TIMELINE_BLOCK_RE.findall(body):
+                if any(
+                    re.sub(r"\s+", " ", line).strip().endswith(current)
+                    for line in timeline.splitlines()
+                    if line.strip().startswith("- ")
+                ):
+                    issues.append(f"{relative}: current understanding is duplicated in timeline")
+                    break
+
+    headings = [
+        (match.start(), match.end(), match.group(1).strip()) for match in H2_RE.finditer(body)
+    ]
     for index, (_, end, heading) in enumerate(headings):
         section_end = headings[index + 1][0] if index + 1 < len(headings) else len(body)
         section = re.sub(r"<!--.*?-->", "", body[end:section_end], flags=re.DOTALL).strip()
         if not section:
             issues.append(f"{relative}: empty H2 {heading!r}")
-        if heading == "핵심 링크" and section and not (
-            "[[" in section or MARKDOWN_LINK_RE.search(section)
+        if (
+            heading == "핵심 링크"
+            and section
+            and not ("[[" in section or MARKDOWN_LINK_RE.search(section))
         ):
             issues.append(f"{relative}: '핵심 링크' contains no hyperlink")
     return issues
@@ -1192,6 +1304,7 @@ def target_index(files: list[Path]) -> dict[str, list[Path]]:
         no_ext = r[:-3]
         keys = {
             no_ext,
+            path.name,
             path.stem,
             r,
         }
@@ -1213,6 +1326,7 @@ def target_index_any(files: list[Path]) -> dict[str, list[Path]]:
         no_ext = str(Path(r).with_suffix(""))
         keys = {
             no_ext,
+            path.name,
             path.stem,
             r,
         }
@@ -1235,6 +1349,45 @@ def resolve_link(target: str, index: dict[str, list[Path]]) -> list[Path]:
         return []
     target = target.removesuffix(".md")
     return index.get(target, [])
+
+
+def canonical_wiki_link_issues(
+    vault: Path,
+    texts: dict[Path, str],
+    index: dict[str, list[Path]],
+) -> tuple[list[str], list[str]]:
+    """Validate links in every human Wiki page, including local-only pages.
+
+    The public graph audit below intentionally follows only published pages.
+    Navigation correctness has a wider boundary: a private person, project, or
+    daily-linked Wiki page must not keep pointing at a retired canonical page.
+    Raw evidence archives remain immutable and are excluded from this check.
+    """
+
+    broken: list[str] = []
+    ambiguous: list[str] = []
+    for path, text in texts.items():
+        relative = path.relative_to(vault).as_posix()
+        if not relative.startswith("wiki/") or relative.startswith("wiki/private/_sources/"):
+            continue
+        link_text = strip_inline_code(strip_fenced_blocks(text)).replace("\\|", "|")
+        for target in WIKILINK_RE.findall(link_text):
+            matches = resolve_link(target, index)
+            if not matches and "/" in target:
+                explicit = vault / target
+                candidates = (
+                    (explicit,)
+                    if explicit.suffix
+                    else (explicit.with_suffix(".md"), explicit / "README.md")
+                )
+                matches = [candidate for candidate in candidates if candidate.exists()]
+            if not matches:
+                broken.append(f"{relative} -> {target}")
+                continue
+            unique_matches = sorted({match.relative_to(vault).as_posix() for match in matches})
+            if len(unique_matches) > 1:
+                ambiguous.append(f"{relative} -> {target}: {unique_matches}")
+    return broken, ambiguous
 
 
 def global_graph_root_issues(
@@ -1455,13 +1608,9 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
         wiki_subject = payload.get("wiki_subject") if isinstance(payload, dict) else None
         subject_text = ""
         if not isinstance(wiki_subject, str) or not wiki_subject.startswith("wiki/"):
-            issues.append(
-                f"{path.relative_to(vault)}: source catalog requires a Wiki subject"
-            )
+            issues.append(f"{path.relative_to(vault)}: source catalog requires a Wiki subject")
         elif not (vault / wiki_subject).is_file():
-            issues.append(
-                f"{path.relative_to(vault)}: source catalog Wiki subject is missing"
-            )
+            issues.append(f"{path.relative_to(vault)}: source catalog Wiki subject is missing")
         else:
             subject_text = (vault / wiki_subject).read_text(encoding="utf-8")
         source_name = payload.get("source") if isinstance(payload, dict) else None
@@ -1472,8 +1621,7 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
         )
         subject_links = set(WIKILINK_RE.findall(subject_text)) if subject_text else set()
         links_archive_index = bool(
-            archive_prefix
-            and any(link.startswith(archive_prefix) for link in subject_links)
+            archive_prefix and any(link.startswith(archive_prefix) for link in subject_links)
         )
         if not isinstance(records, list):
             issues.append(f"{path.relative_to(vault)}: source catalog records must be a list")
@@ -1493,9 +1641,7 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
                 continue
             target = record.get("target")
             expected = record.get("target_sha256")
-            if not isinstance(target, str) or not target.startswith(
-                "wiki/private/_sources/"
-            ):
+            if not isinstance(target, str) or not target.startswith("wiki/private/_sources/"):
                 issues.append(
                     f"{path.relative_to(vault)}: canonical source target escapes the Wiki boundary"
                 )
@@ -1936,7 +2082,11 @@ def main() -> int:
                 )
 
     operational_target_files = sorted(
-        set(files) | set(iter_content_files()) | set(operating_files) | set(template_files)
+        set(files)
+        | set(iter_content_files())
+        | set(iter_managed_non_markdown_files())
+        | set(operating_files)
+        | set(template_files)
     )
     operational_index = target_index_any(operational_target_files)
     for path in operating_files:
@@ -2047,9 +2197,13 @@ def main() -> int:
         wiki_issues, entity_issues = wiki_and_entity_policy_issues(r, text, fm)
         issues["wiki_pipeline_policy_violations"].extend(wiki_issues)
         issues["entity_policy_violations"].extend(entity_issues)
-        if r.startswith("wiki/") and fm.get("type") == "Wiki" and (
-            "<!-- woon-wiki-overview:start -->" in text
-            or "<!-- woon-wiki-overview:end -->" in text
+        if (
+            r.startswith("wiki/")
+            and fm.get("type") == "Wiki"
+            and (
+                "<!-- woon-wiki-overview:start -->" in text
+                or "<!-- woon-wiki-overview:end -->" in text
+            )
         ):
             issues["wiki_display_contract_violations"].append(
                 f"{r}: generated metadata overview is retired"
@@ -2099,8 +2253,7 @@ def main() -> int:
             issues["published_outside_quartz_scope"].append(r)
 
         if (
-            r.startswith(("inbox/", "wiki/private/_sources/knowledge/"))
-            or r == "head-quarter.md"
+            r.startswith(("inbox/", "wiki/private/_sources/knowledge/")) or r == "head-quarter.md"
         ) and (published or fm.get("access") != "local-only"):
             issues["local_operational_published"].append(r)
 
@@ -2116,6 +2269,10 @@ def main() -> int:
                     )
             elif r.startswith("inbox/daily/") and fm.get("type") != "Daily":
                 issues["inbox_policy_violations"].append(f"{r}: inbox/daily notes must be Daily")
+            elif r.startswith("inbox/daily/") and fm.get("digest_status") == "남길 항목 없음":
+                issues["inbox_policy_violations"].append(
+                    f"{r}: empty Codex runs must not materialize a Daily digest"
+                )
 
         if r.startswith("brain/"):
             if fm.get("publish") is not False or fm.get("access") != "local-only":
@@ -2191,9 +2348,11 @@ def main() -> int:
             heading_issues, timeline_issues = canonical_section_quality_issues(r, texts[path])
             issues["duplicate_section_headings"].extend(heading_issues)
             issues["duplicate_timeline_entries"].extend(timeline_issues)
-            issues["body_quality_violations"].extend(
-                canonical_body_quality_issues(r, texts[path])
-            )
+            issues["body_quality_violations"].extend(canonical_body_quality_issues(r, texts[path]))
+
+    wiki_broken, wiki_ambiguous = canonical_wiki_link_issues(VAULT, texts, operational_index)
+    issues["broken_wikilinks"].extend(wiki_broken)
+    issues["ambiguous_wikilinks"].extend(wiki_ambiguous)
 
     for book_map, _ in book_sources:
         book_targets = {
@@ -2285,9 +2444,10 @@ def main() -> int:
         for target in WIKILINK_RE.findall(link_text):
             matches = resolve_link(target, index)
             if not matches:
-                issues["broken_wikilinks"].append(f"{r} -> {target}")
+                if not r.startswith("wiki/"):
+                    issues["broken_wikilinks"].append(f"{r} -> {target}")
                 continue
-            if len(matches) > 1:
+            if len(matches) > 1 and not r.startswith("wiki/"):
                 issues["ambiguous_wikilinks"].append(
                     f"{r} -> {target}: {[rel(p) for p in matches]}"
                 )

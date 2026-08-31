@@ -28,6 +28,7 @@ from woon_core.knowledge.codex_knowledge import (
     CalendarDocumentLink,
     calendar_document_links_for_event,
 )
+from woon_core.people.dashboard import PersonDashboardProjection
 from woon_core.people.service import (
     CalendarIdentityAmbiguity,
     CalendarIdentityResolution,
@@ -111,6 +112,7 @@ class CalendarProjectionService:
             self._vault / CALENDAR_PERSON_IDENTITY_REVIEW_RELATIVE_PATH
         )
         self._people = PersonService(self._vault)
+        self._person_dashboard = PersonDashboardProjection(self._vault)
 
     def refresh(
         self,
@@ -138,10 +140,17 @@ class CalendarProjectionService:
         _validate_events(events, start_at, end_at)
         markdown_changed, identity_reviews = self._refresh_markdown(events)
         dashboard_changed = self._refresh_dashboard()
+        person_dashboard_changed = self._person_dashboard.refresh().changed
         ics_changed = self._refresh_ics(events)
         review_changed = self._refresh_person_identity_review(identity_reviews)
         return CalendarProjectionResult(
-            changed=markdown_changed or dashboard_changed or ics_changed or review_changed,
+            changed=(
+                markdown_changed
+                or dashboard_changed
+                or person_dashboard_changed
+                or ics_changed
+                or review_changed
+            ),
             event_count=len(events),
             relative_path=self._markdown_directory.relative_to(self._vault).as_posix(),
             ics_relative_path=APPLE_CALENDAR_ICS_RELATIVE_PATH,
@@ -438,6 +447,7 @@ def _render_markdown(
         f"calendar: {_yaml_string(event.calendar_name)}",
         "record_owner: choi-woonyoung",
         f"Date: {_yaml_string(event.start_at.astimezone(_KST).date().isoformat())}",
+        f"Time: {_yaml_string(_event_time_label(event))}",
         f"Category: {_yaml_string(calendar_category_title(event.category_id))}",
         f"Category ID: {_yaml_string(event.category_id or UNCATEGORIZED_CALENDAR_CATEGORY_ID)}",
     ]
@@ -621,9 +631,17 @@ def _format_korean_date(value: datetime) -> str:
 def _event_time_summary(event: CalendarProjectionEvent) -> str:
     if event.all_day:
         return "- 시간: 하루 종일"
+    return f"- 시간: {_event_time_label(event)}"
+
+
+def _event_time_label(event: CalendarProjectionEvent) -> str:
+    """Return one compact human-facing time value for Obsidian projections."""
+
+    if event.all_day:
+        return "하루 종일"
     start = event.start_at.astimezone(_KST)
     end = event.end_at.astimezone(_KST)
-    return f"- 시간: {_format_korean_time(start)} - {_format_korean_time(end)}"
+    return f"{_format_korean_time(start)} - {_format_korean_time(end)}"
 
 
 def _format_korean_time(value: datetime) -> str:

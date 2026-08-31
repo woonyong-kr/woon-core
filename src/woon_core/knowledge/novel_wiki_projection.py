@@ -21,6 +21,8 @@ import yaml
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
 from woon_core.knowledge.wiki_tree import (
+    SOURCE_INDEX_END,
+    SOURCE_INDEX_START,
     parent_link,
     prepare_wiki_tree_refresh,
     preserve_generated_wiki_views,
@@ -84,7 +86,7 @@ def prepare_novel_wiki_projection(
     source_receipts: dict[str, dict[str, str]] = {}
     category_paths: dict[str, str] = {}
     category_metadata: dict[str, dict[str, object]] = {}
-    category_source_groups: dict[str, list[dict[str, object]]] = {}
+    category_source_groups: dict[str, list[tuple[str, list[tuple[str, Path]]]]] = {}
     source_count = 0
     for sequence, category_file in enumerate(category_files, start=1):
         category = _h1(category_file)
@@ -104,109 +106,50 @@ def prepare_novel_wiki_projection(
         )
         category_metadata[category_file.stem] = metadata
         category_source_groups[category_file.stem] = []
-        source_group_children: dict[str, list[str]] = {}
+        source_group_children: dict[str, list[tuple[str, Path]]] = {}
         category_path = root / category_relative
         pages[category_path] = _render_page(category_path, metadata, f"# 소설 · {category}\n")
         entries = _navigation_entries(category_file)
-        for item_sequence, (group_label, label, target) in enumerate(entries, start=1):
+        for group_label, label, target in entries:
             source = (category_file.parent / target).resolve()
             if not source.is_relative_to(novel_root) or not source.is_file():
                 raise WoonError(f"Novel navigation target is missing or escapes root: {source}")
             source_relative = source.relative_to(novel_root).as_posix()
-            page_relative = (
-                f"wiki/private/novel/{category_slug}/{item_sequence:02d}-{_slug(label)}.md"
-            )
-            title = label
-            canonical_id = (
-                f"private/novel/{category_slug}/source-{item_sequence:02d}-{_slug(label)}"
-            )
-            metadata = _metadata(
-                title=title,
-                canonical_id=canonical_id,
-                parent=parent_link(category_relative, f"소설 · {category}"),
-                keyword=title,
-                summary=f"{label}의 local-only 원본 연결이다.",
-                day=effective_day,
-                node_kind="detail",
-                view_mode="article",
-                sequence=item_sequence,
-            )
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
-            metadata.update(
-                {
-                    "source_workspace": "Wiki",
-                    "source_path": source.relative_to(root).as_posix(),
-                    "source_sha256": digest,
-                    "source_authority": "local-only-original",
-                }
-            )
-            page_path = root / page_relative
-            link = _file_link(source, page_path, root)
-            body = f"# {title}\n\n## 원본\n\n- [{label}]({link})\n"
-            pages[page_path] = _render_page(page_path, metadata, body)
             if group_label not in source_group_children:
                 source_group_children[group_label] = []
                 category_source_groups[category_file.stem].append(
-                    {"label": group_label, "children": source_group_children[group_label]}
+                    (group_label, source_group_children[group_label])
                 )
-            source_group_children[group_label].append(canonical_id)
+            source_group_children[group_label].append((label, source))
             source_receipts[source_relative] = {
-                "wiki_path": page_relative,
+                "source_path": source_relative,
                 "sha256": digest,
             }
             source_count += 1
 
-    event_ids = _add_event_pages(
-        root, novel_root, pages, category_paths, projection_day=effective_day
-    )
-    judgment_ids = _add_judgment_pages(
-        root,
+    event_count = _count_event_sections(novel_root)
+    judgment_count = _count_judgment_sections(novel_root)
+    related_people = _relation_people(
         novel_root,
-        pages,
-        category_paths,
-        project_subject=project_subject,
-        projection_day=effective_day,
-    )
-    relation_ids = _add_relation_pages(
-        root,
-        novel_root,
-        pages,
-        category_paths,
         source_receipts,
-        project_subject=project_subject,
-        projection_day=effective_day,
     )
-
-    generated_groups: dict[str, list[dict[str, object]]] = {
-        "사건-히스토리": _chunk_groups("사건", event_ids, size=12),
-        "집필-계획": (
-            [{"label": "판단·집필 순서", "children": list(judgment_ids)}] if judgment_ids else []
-        ),
-        "인물": (
-            [{"label": "작품에 연결된 인물", "children": list(relation_ids)}]
-            if relation_ids
-            else []
-        ),
-    }
     for category_name, metadata in category_metadata.items():
-        groups = [*category_source_groups[category_name], *generated_groups.get(category_name, [])]
-        child_count = 0
-        for group in groups:
-            children = group.get("children")
-            if isinstance(children, list):
-                child_count += len(children)
-        if child_count > 1:
-            metadata["navigation_groups"] = groups
         category_path = root / category_paths[category_name]
+        source_index = _source_index_body(
+            category_path,
+            str(metadata["title"]),
+            category_source_groups[category_name],
+            root,
+            related_people=related_people if category_name == "인물" else (),
+        )
         pages[category_path] = _render_page(
             category_path,
             metadata,
-            f"# {metadata['title']}\n",
+            source_index,
         )
 
-    event_count = len(event_ids)
-    judgment_count = len(judgment_ids)
-    relation_count = len(relation_ids)
+    relation_count = len(related_people)
 
     expected = set(pages)
     stale = (
@@ -278,159 +221,51 @@ def apply_novel_wiki_projection(vault: Path, report: NovelWikiProjectionReport) 
         raise
 
 
-def _add_event_pages(
-    root: Path,
-    novel: Path,
-    pages: dict[Path, bytes],
-    categories: dict[str, str],
-    *,
-    projection_day: date,
-) -> tuple[str, ...]:
+def _count_event_sections(novel: Path) -> int:
     ledger = novel / "work/analysis/event-evidence-ledger-2026-08-07.md"
-    parent = categories.get("사건-히스토리")
-    if parent is None or not ledger.is_file():
-        return ()
-    text = ledger.read_text(encoding="utf-8")
-    matches = list(_NUMBERED_H2.finditer(text))
-    identifiers: list[str] = []
-    for index, match in enumerate(matches):
-        number = int(match.group("number"))
-        title = match.group("title").strip()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        section = text[match.end() : end].strip().removesuffix("---").strip()
-        page_title = f"소설 사건 {number:02d} · {title}"
-        relative = f"wiki/private/novel/사건-히스토리/event-{number:02d}.md"
-        metadata = _metadata(
-            title=page_title,
-            canonical_id=f"private/novel/events/{number:02d}",
-            parent=parent_link(parent, "소설 · 사건·히스토리"),
-            keyword=page_title,
-            summary=f"사건 {number:02d}의 사실·해석·허구 경계를 관리한다.",
-            day=projection_day,
-            node_kind="detail",
-            view_mode="topic-timeline",
-            sequence=100 + number,
-        )
-        metadata["source_path"] = ledger.relative_to(root).as_posix()
-        page_path = root / relative
-        body = (
-            f"# {page_title}\n\n{section}\n\n## 원본\n\n"
-            f"- [사건 장부]({_file_link(ledger, page_path, root)})\n"
-        )
-        pages[page_path] = _render_page(page_path, metadata, body)
-        identifiers.append(str(metadata["canonical_id"]))
-    return tuple(identifiers)
+    if not ledger.is_file():
+        return 0
+    return len(_NUMBERED_H2.findall(ledger.read_text(encoding="utf-8")))
 
 
-def _add_judgment_pages(
-    root: Path,
-    novel: Path,
-    pages: dict[Path, bytes],
-    categories: dict[str, str],
-    *,
-    project_subject: str,
-    projection_day: date,
-) -> tuple[str, ...]:
+def _count_judgment_sections(novel: Path) -> int:
     source = novel / "work/planning/corpus-reading-2026-08-07.md"
-    parent = categories.get("집필-계획")
-    if parent is None or not source.is_file():
-        return ()
-    text = source.read_text(encoding="utf-8")
-    matches = list(_H2.finditer(text))
-    identifiers: list[str] = []
-    for index, match in enumerate(matches):
-        heading = match.group("title").strip()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        section = text[match.end() : end].strip()
-        title = f"소설 판단 · {heading}"
-        relative = f"wiki/private/novel/집필-계획/judgment-{index + 1:02d}-{_slug(heading)}.md"
-        metadata = _metadata(
-            title=title,
-            canonical_id=f"private/novel/judgments/{index + 1:02d}-{_slug(heading)}",
-            parent=parent_link(parent, "소설 · 집필 계획"),
-            keyword=title,
-            summary=f"{project_subject}의 {heading} 판단이다.",
-            day=projection_day,
-            node_kind="decision",
-            view_mode="article",
-            sequence=100 + index,
-        )
-        metadata["source_path"] = source.relative_to(root).as_posix()
-        page_path = root / relative
-        body = (
-            f"# {title}\n\n{section}\n\n## 원본\n\n"
-            f"- [전체 독해와 집필 판단]({_file_link(source, page_path, root)})\n"
-        )
-        pages[page_path] = _render_page(page_path, metadata, body)
-        identifiers.append(str(metadata["canonical_id"]))
-    return tuple(identifiers)
+    if not source.is_file():
+        return 0
+    return len(_H2.findall(source.read_text(encoding="utf-8")))
 
 
-def _add_relation_pages(
-    root: Path,
+def _relation_people(
     novel: Path,
-    pages: dict[Path, bytes],
-    categories: dict[str, str],
     source_receipts: dict[str, dict[str, str]],
-    *,
-    project_subject: str,
-    projection_day: date,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, str], ...]:
     source = novel / "work/people/person-link-ledger.yaml"
-    parent = categories.get("인물")
-    if parent is None or not source.is_file():
+    if not source.is_file():
         return ()
     payload = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
     people = payload.get("people", [])
     if not isinstance(people, list):
         raise WoonError("Novel person ledger people must be a list")
-    labels = {
+    people_targets = {
         "choi-woonyoung": ("최우녕", "wiki/personal/최우녕"),
         "kim-heejun": ("김희준", "wiki/personal/김희준"),
         "lee-minjeong": ("이민정", "wiki/private/이민정"),
     }
-    identifiers: list[str] = []
-    for sequence, item in enumerate(people, start=1):
+    resolved: list[tuple[str, str]] = []
+    for item in people:
         if not isinstance(item, dict):
             raise WoonError("Novel person ledger entry must be a mapping")
         person_id = str(item.get("person_id", "")).strip()
-        if person_id not in labels:
+        if person_id not in people_targets:
             raise WoonError(f"Novel person ledger has an unresolved person: {person_id}")
-        label, person_path = labels[person_id]
-        title = f"소설 인물 · {label}"
-        relative = f"wiki/private/novel/인물/{person_id}.md"
-        metadata = _metadata(
-            title=title,
-            canonical_id=f"private/novel/people/{person_id}",
-            parent=parent_link(parent, "소설 · 인물"),
-            keyword=title,
-            summary=f"{project_subject}과 {label}의 확인된 연결이다.",
-            day=projection_day,
-            node_kind="detail",
-            view_mode="article",
-            sequence=100 + sequence,
-        )
-        metadata.update(
-            {
-                "source_path": source.relative_to(root).as_posix(),
-                "person_id": person_id,
-            }
-        )
-        rows = [f"- [[{person_path}|{label}]]"]
         for link in item.get("links", []):
             if not isinstance(link, dict):
                 continue
             path = str(link.get("path", "")).strip()
-            receipt = source_receipts.get(path)
-            if receipt is None:
+            if path not in source_receipts:
                 raise WoonError(f"Novel person link has no projected keyword page: {path}")
-            target = Path(receipt["wiki_path"]).with_suffix("").as_posix()
-            rows.append(f"- [[{target}|{Path(path).stem}]]")
-        body = f"# {title}\n\n## 연결\n\n" + "\n".join(rows) + "\n"
-        page_path = root / relative
-        pages[page_path] = _render_page(page_path, metadata, body)
-        identifiers.append(str(metadata["canonical_id"]))
-    return tuple(identifiers)
+        resolved.append(people_targets[person_id])
+    return tuple(resolved)
 
 
 def _navigation_entries(path: Path) -> tuple[tuple[str, str, str], ...]:
@@ -451,17 +286,31 @@ def _navigation_entries(path: Path) -> tuple[tuple[str, str, str], ...]:
     return tuple((group or "원자료", label, target) for group, label, target in entries)
 
 
-def _chunk_groups(label: str, child_ids: tuple[str, ...], *, size: int) -> list[dict[str, object]]:
-    groups: list[dict[str, object]] = []
-    for offset in range(0, len(child_ids), size):
-        chunk = child_ids[offset : offset + size]
-        groups.append(
-            {
-                "label": f"{label} {offset + 1:02d}–{offset + len(chunk):02d}",
-                "children": list(chunk),
-            }
-        )
-    return groups
+def _source_index_body(
+    page_path: Path,
+    title: str,
+    groups: list[tuple[str, list[tuple[str, Path]]]],
+    vault: Path,
+    *,
+    related_people: tuple[tuple[str, str], ...] = (),
+) -> str:
+    rows = [
+        f"# {title}",
+        "",
+        "## 원자료",
+        "",
+        SOURCE_INDEX_START,
+    ]
+    for group_label, links in groups:
+        rows.append(f"- {group_label}")
+        for label, source in links:
+            rows.append(f"  - [{label}]({_file_link(source, page_path, vault)})")
+    if related_people:
+        rows.append("- 작품에 연결된 인물")
+        for label, target in related_people:
+            rows.append(f"  - [[{target}|{label}]]")
+    rows.append(SOURCE_INDEX_END)
+    return "\n".join(rows).rstrip() + "\n"
 
 
 def _metadata(

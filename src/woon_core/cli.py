@@ -58,8 +58,14 @@ from woon_core.knowledge.content_quality_review_plan import (
     create_content_quality_review_plan,
     rebase_content_quality_review_plan,
 )
+from woon_core.knowledge.document_intake import ingest_document_candidate
+from woon_core.knowledge.document_resolution import (
+    audit_document_resolutions,
+    resolve_document_candidate,
+)
 from woon_core.knowledge.evaluation import evaluate as evaluate_knowledge
 from woon_core.knowledge.factory import build_knowledge_service, resolve_knowledge_vault
+from woon_core.knowledge.learning_checkpoint import LearningCheckpoint
 from woon_core.knowledge.mail_schedule_automation import (
     record_mail_schedule_candidates,
     submissions_from_records,
@@ -168,6 +174,10 @@ Usage:
   woon knowledge reconcile-superseded-revisions [--vault <path>]
   woon knowledge compile [--force] [--vault <path>]
   woon knowledge compile-audit [--vault <path>]
+  woon knowledge learning-checkpoint --canonical-id <id> --unit <text>
+    --status <confirmed|partial|retry> [--evidence <text>...] [--unstable <text>...]
+    --next-question <text> --recorded-on <YYYY-MM-DD> --expected-revision <sha256>
+    [--vault <path>]
   woon knowledge refresh-wiki-tree [--vault <path>]
   woon knowledge project-novel [--day <YYYY-MM-DD>] [--vault <path>]
   woon knowledge evaluate --cases <path> [--output <path>] [--vault <path>]
@@ -216,6 +226,10 @@ Usage:
   woon knowledge source-audit --source <path> --source-name <name> [--vault <path>]
   woon knowledge source-archive --source <path> --source-name <name>
     --wiki-subject <wiki/path.md> [--vault <path>]
+  woon knowledge document-intake --source <file> [--source-locator <relative-path>]
+    [--ocr <off|rapidocr|ocrmac>] [--model-cache <path>] [--vault <path>]
+  woon knowledge document-resolve --decision <local-JSON> [--vault <path>]
+  woon knowledge document-audit [--vault <path>]
   woon knowledge validate-orchestrator [--vault <path>]
     [--automation-root <path>]
   woon knowledge governance-preflight [--vault <path>]
@@ -553,6 +567,18 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if command == "source-archive":
         _run_knowledge_source_archive(raw_options, output)
         return
+    if command == "document-intake":
+        _run_knowledge_document_intake(raw_options, output)
+        return
+    if command == "document-resolve":
+        _run_knowledge_document_resolution(raw_options, output)
+        return
+    if command == "document-audit":
+        _run_knowledge_document_audit(raw_options, output)
+        return
+    if command == "learning-checkpoint":
+        _run_learning_checkpoint(raw_options, output)
+        return
     if command == "project-novel":
         _run_novel_wiki_projection(raw_options, output)
         return
@@ -693,6 +719,60 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
             json.dumps([asdict(item) for item in entries], ensure_ascii=False, indent=2),
             file=output,
         )
+
+
+def _run_learning_checkpoint(arguments: list[str], output: TextIO) -> None:
+    vault, options = _parse_knowledge_options(arguments)
+    values: dict[str, str] = {}
+    repeated: dict[str, list[str]] = {"evidence": [], "unstable": []}
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if not option.startswith("--") or index + 1 >= len(options):
+            raise WoonError("learning-checkpoint options require a value")
+        key = option.removeprefix("--").replace("-", "_")
+        value = options[index + 1]
+        if key in repeated:
+            repeated[key].append(value)
+        elif key in values:
+            raise WoonError(f"learning-checkpoint option is duplicated: {option}")
+        else:
+            values[key] = value
+        index += 2
+    required = {
+        "canonical_id",
+        "unit",
+        "status",
+        "next_question",
+        "recorded_on",
+        "expected_revision",
+    }
+    missing = sorted(required.difference(values))
+    unknown = sorted(set(values).difference(required))
+    if missing:
+        raise WoonError(f"learning-checkpoint requires --{missing[0].replace('_', '-')}")
+    if unknown:
+        raise WoonError(f"unexpected learning-checkpoint option: --{unknown[0].replace('_', '-')}")
+    try:
+        recorded_on = date.fromisoformat(values["recorded_on"])
+    except ValueError as error:
+        raise WoonError("learning-checkpoint recorded-on must use YYYY-MM-DD") from error
+    if values["status"] not in {"confirmed", "partial", "retry"}:
+        raise WoonError("learning-checkpoint status must be confirmed, partial, or retry")
+    _, service = build_knowledge_service(vault)
+    report = service.record_learning_checkpoint(
+        LearningCheckpoint(
+            canonical_id=values["canonical_id"],
+            unit=values["unit"],
+            status=values["status"],  # type: ignore[arg-type]
+            evidence=tuple(repeated["evidence"]),
+            unstable=tuple(repeated["unstable"]),
+            next_question=values["next_question"],
+            recorded_on=recorded_on,
+        ),
+        values["expected_revision"],
+    )
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
 
 
 def _default_codex_automation_root() -> Path:
@@ -2154,6 +2234,75 @@ def _run_knowledge_source_archive(arguments: list[str], output: TextIO) -> None:
         values["--wiki-subject"],
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_knowledge_document_intake(arguments: list[str], output: TextIO) -> None:
+    """Convert one local file into a non-canonical curation candidate."""
+
+    values: dict[str, str] = {}
+    index = 0
+    allowed = {"--source", "--source-locator", "--ocr", "--model-cache", "--vault"}
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in allowed:
+            raise WoonError(f"unexpected document-intake argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--source" not in values:
+        raise WoonError("document-intake requires --source")
+    vault = Path(values.get("--vault", ".")).expanduser().resolve()
+    result = ingest_document_candidate(
+        Path(values["--source"]),
+        vault,
+        source_locator=values.get("--source-locator"),
+        ocr=values.get("--ocr", "off"),
+        model_cache=Path(values["--model-cache"]) if "--model-cache" in values else None,
+    )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_knowledge_document_resolution(arguments: list[str], output: TextIO) -> None:
+    """Record one verified terminal decision for a local document candidate."""
+
+    values: dict[str, str] = {}
+    raw_options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option != "--decision":
+            raw_options.append(option)
+            index += 1
+            continue
+        if option in values or index + 1 >= len(arguments):
+            raise WoonError("--decision requires exactly one path")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault, options = _parse_knowledge_options(raw_options)
+    if options or set(values) != {"--decision"}:
+        raise WoonError("knowledge document-resolve requires --decision")
+    result = resolve_document_candidate(
+        vault or resolve_knowledge_vault(),
+        Path(values["--decision"]),
+    )
+    print(json.dumps(asdict(result), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_knowledge_document_audit(arguments: list[str], output: TextIO) -> None:
+    """Fail when hidden document candidates remain unresolved or invalid."""
+
+    vault, options = _parse_knowledge_options(arguments)
+    if options:
+        raise WoonError("knowledge document-audit takes no positional arguments")
+    audit = audit_document_resolutions(vault or resolve_knowledge_vault())
+    print(json.dumps(asdict(audit), ensure_ascii=False, indent=2), file=output)
+    if not audit.complete:
+        raise WoonError(
+            "document intake audit found unresolved or invalid candidates: "
+            f"pending={len(audit.pending)}, user_action={len(audit.user_action_required)}, "
+            f"errors={len(audit.errors)}"
+        )
 
 
 def _reject_self_source_catalog(source: Path, target: Path) -> None:

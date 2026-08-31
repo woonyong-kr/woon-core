@@ -87,6 +87,7 @@ def test_mcp_server_stdio_archives_searches_and_reads_a_section(tmp_path: Path) 
             tools = await session.list_tools()
             assert {
                 "woon_knowledge_archive_conversation",
+                "woon_knowledge_learning_checkpoint",
                 "woon_knowledge_read_excerpt",
                 "woon_knowledge_search",
                 "woon_automation_record_mail_schedule_candidates",
@@ -109,6 +110,27 @@ def test_mcp_server_stdio_archives_searches_and_reads_a_section(tmp_path: Path) 
                 "canonical_id": "testing/mcp-smoke",
                 "relative_path": "wiki/canonical/testing/mcp-smoke.md",
                 "revision": created.structuredContent["revision"],
+            }
+
+            checkpoint = await session.call_tool(
+                "woon_knowledge_learning_checkpoint",
+                {
+                    "canonical_id": "testing/mcp-smoke",
+                    "unit": "MCP 검색 검증",
+                    "status": "partial",
+                    "evidence": ["stdio 경로로 문서를 저장하고 검색했다."],
+                    "unstable": ["발췌 결과를 다른 질문으로 전이하지 않았다."],
+                    "next_question": "다른 검색어로도 같은 문서를 찾을 수 있는가?",
+                    "recorded_on": "2026-08-29",
+                    "expected_revision": created.structuredContent["revision"],
+                },
+            )
+            assert checkpoint.structuredContent == {
+                "canonical_id": "testing/mcp-smoke",
+                "relative_path": "wiki/canonical/testing/mcp-smoke.md",
+                "revision": checkpoint.structuredContent["revision"],
+                "changed": True,
+                "compiler_owned": False,
             }
 
             result = await session.call_tool(
