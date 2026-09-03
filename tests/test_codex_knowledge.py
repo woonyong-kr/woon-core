@@ -756,7 +756,7 @@ def test_closed_project_requires_and_writes_a_verified_end_date(tmp_path: Path) 
     assert "occurred_on: 2026-08-25" in project
 
 
-def test_materializes_new_book_below_one_existing_genre_without_prose(tmp_path: Path) -> None:
+def test_rejects_new_book_shell_without_verified_contents(tmp_path: Path) -> None:
     _settings(tmp_path)
     entries = entries_from_records(
         [
@@ -777,18 +777,18 @@ def test_materializes_new_book_below_one_existing_genre_without_prose(tmp_path: 
         ]
     )
 
-    record_codex_knowledge_entries(
-        tmp_path,
-        source_range="codex-scope-20260825-book-genre",
-        entries=entries,
-    )
+    with pytest.raises(
+        WoonError,
+        match="second-brain candidate producer failed for codex-conversation-ingest",
+    ):
+        record_codex_knowledge_entries(
+            tmp_path,
+            source_range="codex-scope-20260825-book-genre",
+            entries=entries,
+        )
 
     book = tmp_path / "wiki/books/새-llm-책.md"
-    text = book.read_text(encoding="utf-8")
-    assert 'parent: "[[wiki/books/ai-machine-learning|AI·머신러닝]]"' in text
-    assert "## 목차" in text
-    assert "## 현재 이해" not in text
-    assert "한눈에 보기" not in text
+    assert not book.exists()
 
 
 def test_rejects_new_book_without_genre_keyword(tmp_path: Path) -> None:

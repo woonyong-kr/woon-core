@@ -20,7 +20,7 @@ import yaml
 
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
-from woon_core.knowledge.identity import validate_canonical_id
+from woon_core.knowledge.identity import is_book_scoped_canonical_id, validate_canonical_id
 from woon_core.knowledge.learning_checkpoint import strip_learning_checkpoint
 
 OVERVIEW_START = "<!-- woon-wiki-overview:start -->"
@@ -108,7 +108,13 @@ def is_wiki_source_archive(path: Path, wiki_root: Path) -> bool:
     """
 
     try:
-        relative = path.resolve().relative_to(wiki_root.resolve())
+        # ``iter_wiki_pages`` passes paths produced directly below the already
+        # resolved vault root. Resolving both operands for every Markdown file
+        # turns a full audit into thousands of redundant filesystem walks.
+        # Keep the common case lexical and resolve only an actual symlink.
+        relative = path.relative_to(wiki_root)
+        if path.is_symlink():
+            relative = path.resolve().relative_to(wiki_root.resolve())
     except ValueError:
         return False
     return relative.parts[:2] == WIKI_SOURCE_ARCHIVE_PARTS
@@ -140,19 +146,39 @@ def is_compact_link_page(node: WikiTreeNode) -> bool:
     return is_compact_link_canonical_id(node.canonical_id)
 
 
-def prepare_wiki_tree_refresh(vault: Path) -> WikiTreeReport:
+def prepare_wiki_tree_refresh(
+    vault: Path, *, canonical_prefix: str | None = None
+) -> WikiTreeReport:
     """Regenerate compact navigation and latest blocks from canonical metadata."""
 
     root = vault.expanduser().resolve()
     nodes, texts, issues = load_wiki_tree(root)
-    if issues:
-        return WikiTreeReport(len(nodes), 0, {}, issues)
+    scope = canonical_prefix.strip().strip("/") if canonical_prefix is not None else ""
+    if canonical_prefix is not None and not scope:
+        raise WoonError("Wiki tree refresh canonical prefix must not be empty")
+    relevant_issues = issues
+    if scope:
+        path_marker = f"wiki/{scope}"
+        relevant_issues = tuple(
+            issue for issue in issues if scope in issue or path_marker in issue
+        )
+    if relevant_issues:
+        return WikiTreeReport(len(nodes), 0, {}, relevant_issues)
     children = _children_by_parent(nodes)
     related = _related_neighbors(nodes, texts)
     pages: dict[Path, bytes] = {}
     changed = 0
     by_path = {node.relative_path: node for node in nodes}
-    for node in nodes:
+    selected_nodes = tuple(
+        node
+        for node in nodes
+        if not scope
+        or node.canonical_id == scope
+        or node.canonical_id.startswith(f"{scope}/")
+    )
+    if scope and not selected_nodes:
+        raise WoonError(f"Wiki tree refresh canonical prefix was not found: {scope}")
+    for node in selected_nodes:
         refreshed = render_wiki_tree_view(
             texts[node.relative_path],
             node=node,
@@ -188,7 +214,7 @@ def apply_wiki_tree_refresh(vault: Path, report: WikiTreeReport) -> None:
     try:
         for path, content, mode in changed:
             atomic_write(path, content, mode=mode)
-    except Exception:
+    except BaseException:
         for path, previous, mode in reversed(snapshots):
             atomic_write(path, previous, mode=mode)
         raise
@@ -208,6 +234,7 @@ def load_wiki_tree(
     issues: list[str] = []
     canonical: dict[str, str] = {}
     identities: dict[str, str] = {}
+    book_roots = _book_root_ids(wiki_root)
     for path in iter_wiki_pages(wiki_root):
         relative = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8")
@@ -282,7 +309,13 @@ def load_wiki_tree(
                     f"{relative}: duplicate canonical_id with {canonical[key]}: {canonical_id}"
                 )
             canonical[key] = relative
-        for identity in (title, *aliases, *keywords):
+        # Chapter and section names such as "신경망 학습" legitimately repeat a
+        # general concept title.  Their canonical identity is the full path below one
+        # verified book edition, so they must not compete with the global concept tree.
+        book_scoped_identity = any(
+            canonical_id.startswith(f"{book_root}/") for book_root in book_roots
+        )
+        for identity in () if book_scoped_identity else (title, *aliases, *keywords):
             normalized = normalize_identity(identity)
             if not normalized:
                 continue
@@ -325,6 +358,26 @@ def load_wiki_tree(
     return tuple(nodes), texts, tuple(dict.fromkeys(issues))
 
 
+def _book_root_ids(wiki_root: Path) -> frozenset[str]:
+    """Discover book entities before validating descendant display identities."""
+
+    roots: set[str] = set()
+    for path in iter_wiki_pages(wiki_root):
+        try:
+            metadata, _ = split_markdown(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, WoonError):
+            continue
+        canonical_id = metadata.get("canonical_id")
+        if (
+            metadata.get("node_kind") == "entity"
+            and metadata.get("entity_kind") == "book"
+            and isinstance(canonical_id, str)
+            and canonical_id.strip()
+        ):
+            roots.add(canonical_id.strip())
+    return frozenset(roots)
+
+
 def render_wiki_tree_view(
     text: str,
     *,
@@ -353,8 +406,9 @@ def render_wiki_tree_view(
     authored_without_children = _strip_section(
         authored, "하위 키워드", CHILDREN_START, CHILDREN_END
     )
+    book_map_kind = _book_navigation_kind(node, tuple(nodes.values()))
 
-    if node.entity_kind == "book":
+    if node.entity_kind == "book" and not node.navigation_groups:
         updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
         updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
         updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
@@ -364,9 +418,9 @@ def render_wiki_tree_view(
         _contains_wikilink_to(authored_without_children, item.relative_path) for item in direct
     )
     show_tree = (
-        node.node_kind in TREE_VIEW_KINDS
+        (book_map_kind is not None or node.node_kind in TREE_VIEW_KINDS)
         and bool(descendants)
-        and not (node.node_kind == "entity" and direct_already_authored)
+        and not (book_map_kind is None and node.node_kind == "entity" and direct_already_authored)
     )
     if show_tree:
         child_rows = [
@@ -376,14 +430,29 @@ def render_wiki_tree_view(
                 direct,
                 children,
                 texts,
-                include_sequence=node.view_mode == "linear",
+                include_sequence=node.view_mode == "linear" and book_map_kind is None,
+                book_map_kind=book_map_kind,
             ),
             CHILDREN_END,
         ]
-        updated = _replace_or_append_section(
-            updated, "하위 키워드", CHILDREN_START, CHILDREN_END, "\n".join(child_rows)
-        )
-        if node.node_kind in {"root", "hub"}:
+        if book_map_kind is not None:
+            updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
+            updated = _replace_or_insert_after_h1(
+                updated, CHILDREN_START, CHILDREN_END, "\n".join(child_rows)
+            )
+        else:
+            updated = _replace_or_append_section(
+                updated,
+                "하위 키워드",
+                CHILDREN_START,
+                CHILDREN_END,
+                "\n".join(child_rows),
+            )
+        if (
+            node.node_kind in {"root", "hub"}
+            or book_map_kind is not None
+            or is_book_scoped_canonical_id(node.canonical_id)
+        ):
             updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
         else:
             direct_paths = {item.relative_path for item in direct}
@@ -459,7 +528,7 @@ def render_wiki_tree_view(
         updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
         updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
         updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
-    return updated.rstrip() + "\n"
+    return _normalize_h1_spacing(updated).rstrip() + "\n"
 
 
 def strip_generated_wiki_views(text: str) -> str:
@@ -485,7 +554,11 @@ def preserve_generated_wiki_views(existing: str, rendered: str) -> str:
     for heading, start, end in (("하위 키워드", CHILDREN_START, CHILDREN_END),):
         block = _optional_marker_block(existing, start, end)
         if block is not None:
-            updated = _replace_or_append_section(updated, heading, start, end, block)
+            if _managed_navigation_uses_h2(block):
+                updated = _strip_section(updated, heading, start, end)
+                updated = _replace_or_insert_after_h1(updated, start, end, block)
+            else:
+                updated = _replace_or_append_section(updated, heading, start, end, block)
     source_index = _optional_marker_block(rendered, SOURCE_INDEX_START, SOURCE_INDEX_END)
     if source_index is None:
         source_index = _optional_marker_block(existing, SOURCE_INDEX_START, SOURCE_INDEX_END)
@@ -674,6 +747,7 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
     """Validate the user-facing book, resource, and people navigation boundaries."""
 
     by_path = {node.relative_path: node for node in nodes}
+    by_id = {node.canonical_id: node for node in nodes}
     children = _children_by_parent(tuple(nodes))
     issues: list[str] = []
     root = "wiki/README.md"
@@ -717,6 +791,43 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
             issues.extend(_resource_link_index_issues(keyword, texts[keyword.relative_path]))
 
     for node in nodes:
+        book_map_kind = _book_navigation_kind(node, nodes)
+        if book_map_kind is not None and node.navigation_groups:
+            authored_map_body = _book_map_authored_body(texts[node.relative_path])
+            if authored_map_body:
+                issues.append(
+                    f"{node.relative_path}: book map authored body must be empty; "
+                    "keep source explanation and runnable examples on leaf pages"
+                )
+        chapter_match = re.fullmatch(r"(.+/chapter-\d{2})/.+", node.canonical_id)
+        if chapter_match is not None:
+            owner = by_id.get(chapter_match.group(1))
+            if owner is None:
+                issues.append(
+                    f"{node.relative_path}: numbered lesson is missing its owning chapter "
+                    f"{chapter_match.group(1)}"
+                )
+            elif not _has_ancestor(node, owner.relative_path, by_path):
+                issues.append(
+                    f"{node.relative_path}: numbered lesson must stay below {owner.relative_path}"
+                )
+
+        if re.fullmatch(r".+/chapter-\d{2}", node.canonical_id):
+            direct = children.get(node.relative_path, ())
+            authored = _strip_section(
+                texts[node.relative_path], "하위 키워드", CHILDREN_START, CHILDREN_END
+            )
+            duplicated = tuple(
+                child.canonical_id
+                for child in direct
+                if _contains_wikilink_to(authored, child.relative_path)
+            )
+            if duplicated:
+                issues.append(
+                    f"{node.relative_path}: chapter body must not duplicate managed lesson links: "
+                    + ", ".join(duplicated)
+                )
+
         if node.node_kind == "entity" and node.entity_kind not in {"book", "resource"}:
             if node.entity_kind in TEMPORAL_ENTITY_KINDS and not node.lifecycle_status:
                 issues.append(f"{node.relative_path}: temporal entity requires lifecycle_status")
@@ -731,6 +842,20 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
         if node.entity_kind == "book":
             if not _has_ancestor(node, books_path, by_path):
                 issues.append(f"{node.relative_path}: book entity must stay below the books root")
+            if node.navigation_groups:
+                authored = _strip_section(
+                    texts[node.relative_path], "하위 키워드", CHILDREN_START, CHILDREN_END
+                )
+                duplicated = tuple(
+                    child.canonical_id
+                    for child in children.get(node.relative_path, ())
+                    if _contains_wikilink_to(authored, child.relative_path)
+                )
+                if duplicated:
+                    issues.append(
+                        f"{node.relative_path}: book body must not duplicate managed "
+                        "chapter links: " + ", ".join(duplicated)
+                    )
             issues.extend(_book_link_index_issues(node, texts[node.relative_path]))
         if node.entity_kind == "resource":
             issues.append(
@@ -757,9 +882,11 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
     """
 
     children = _children_by_parent(tuple(nodes))
+    all_nodes = tuple(nodes)
     issues: list[str] = []
     for parent in nodes:
         direct = children.get(parent.relative_path, ())
+        book_map_kind = _book_navigation_kind(parent, all_nodes)
         supports_groups = parent.node_kind in TREE_VIEW_KINDS
         if len(direct) > 1 and not parent.navigation_groups:
             missing_sequence = tuple(child for child in direct if child.sequence is None)
@@ -781,12 +908,18 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
             supports_groups
             and len(direct) > 1
             and parent.relative_path not in UNGROUPED_NAVIGATION_EXCEPTIONS
-        )
+        ) or (book_map_kind is not None and bool(direct))
         if requires_groups and not parent.navigation_groups:
-            issues.append(
-                f"{parent.relative_path}: {len(direct)} direct children require explicit "
-                "navigation groups instead of one flat list"
-            )
+            if book_map_kind is not None:
+                issues.append(
+                    f"{parent.relative_path}: book map requires navigation_groups for every "
+                    "source part, appendix, or section topic"
+                )
+            else:
+                issues.append(
+                    f"{parent.relative_path}: {len(direct)} direct children require explicit "
+                    "navigation groups instead of one flat list"
+                )
         if not parent.navigation_groups:
             continue
         if not supports_groups:
@@ -818,6 +951,30 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
                 + ", ".join(missing)
             )
         for group in parent.navigation_groups:
+            chapter_topic_map = (
+                book_map_kind == "chapter-root"
+                or re.fullmatch(r".+/chapter-\d+", parent.canonical_id) is not None
+            )
+            if chapter_topic_map and len(group.child_ids) > 1:
+                repeated_topic = tuple(
+                    child_id
+                    for child_id in group.child_ids
+                    if (child := direct_by_id.get(child_id)) is not None
+                    and child.title.strip().casefold() == group.label.strip().casefold()
+                    and not _has_direct_reader_content(texts[child.relative_path])
+                )
+                if repeated_topic:
+                    issues.append(
+                        f"{parent.relative_path}: chapter H2 topic must not be repeated as "
+                        "a wrapper child: " + ", ".join(repeated_topic)
+                    )
+            if chapter_topic_map and re.fullmatch(
+                r"(?:\d+장|부록\s+[A-Za-z0-9]+)", group.label.strip()
+            ):
+                issues.append(
+                    f"{parent.relative_path}: book map H2 must be a meaningful topic keyword, "
+                    f"not the repeated container label {group.label!r}"
+                )
             link_count = 0
             for child_id in group.child_ids:
                 child = direct_by_id.get(child_id)
@@ -834,6 +991,50 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
                     f"{link_count} links; maximum is {FLATTEN_GROUP_MAX_CHILDREN}"
                 )
     return issues
+
+
+def _has_direct_reader_content(text: str) -> bool:
+    """Distinguish a source-owning section page from one navigation shell.
+
+    A section heading can own introductory source prose or code before its
+    numbered subsections.  Such a page is not a wrapper merely because its
+    title repeats the H2 topic on the chapter map.  Managed projections,
+    previous/next links, headings, and link-only lists do not establish source
+    ownership by themselves.
+    """
+
+    _, body = split_markdown(text)
+    authored = strip_generated_wiki_views(body)
+    authored = re.sub(r"(?m)^#\s+.+$", "", authored, count=1)
+    authored = re.sub(
+        r"(?ms)^##\s+(?:이전과 다음|이전·다음)\s*$.*?(?=^##\s|\Z)",
+        "",
+        authored,
+    )
+    if re.search(r"(?ms)```[^\n]*\n.+?\n```", authored):
+        return True
+    if re.search(r"(?m)^\|.+\|\s*$", authored):
+        return True
+    authored = re.sub(r"!?\[\[[^\]]+\]\]", "", authored)
+    authored = re.sub(r"(?m)^\s{0,3}#{1,6}\s+.*$", "", authored)
+    authored = re.sub(r"(?m)^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", authored)
+    semantic = re.sub(r"[^0-9A-Za-z가-힣]+", "", authored)
+    return len(semantic) >= 20
+
+
+def _book_map_authored_body(text: str) -> str:
+    """Return reader prose left on a generated book map after owned views are removed."""
+
+    _, body = split_markdown(text)
+    authored = strip_generated_wiki_views(body)
+    authored = re.sub(r"(?m)^#\s+.+$", "", authored, count=1)
+    authored = re.sub(
+        r"(?ms)^##\s+(?:이전과 다음|이전·다음)\s*$.*?(?=^##\s|\Z)",
+        "",
+        authored,
+    )
+    authored = re.sub(r"<!--.*?-->", "", authored, flags=re.DOTALL)
+    return authored.strip()
 
 
 def _format_sequence(value: float) -> str:
@@ -853,68 +1054,59 @@ def _has_ancestor(node: WikiTreeNode, ancestor: str, by_path: dict[str, WikiTree
 
 
 def _book_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
-    """Require one whole-book learning map plus a linked contents list."""
+    """Require a book-shaped contents list without synthetic study horizons."""
 
-    metadata, body = split_markdown(strip_generated_wiki_views(text))
+    _, body = split_markdown(strip_generated_wiki_views(text))
     body = strip_learning_checkpoint(body)
     body = re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
     body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
-    resolution_match = re.search(r"(?ms)^## 책 전체 학습 해상도\s*\n(?P<body>.*?)(?=^## |\Z)", body)
-    if resolution_match is None:
-        # Intake may first materialize an empty book shell before a verified
-        # table of contents exists.  Require the curriculum as soon as the
-        # book owns at least one canonical chapter or concept link; inventing
-        # a three-horizon map for an empty shell would create false knowledge.
-        if metadata.get("content_kind") == "book" and "[[" in body:
-            return [
-                f"{node.relative_path}: learning book requires one whole-book "
-                "2주·1달·5달 learning resolution"
-            ]
-    else:
-        resolution = resolution_match.group("body")
-        headings = tuple(
-            line.strip() for line in resolution.splitlines() if line.strip().startswith("### ")
-        )
-        expected = ("### 2주", "### 1달", "### 5달")
-        if len(headings) != 3 or any(
-            not heading.startswith(prefix)
-            for heading, prefix in zip(headings, expected, strict=True)
-        ):
-            return [
-                f"{node.relative_path}: whole-book learning resolution must contain "
-                "2주, 1달, 5달 headings in that order"
-            ]
-        positions = tuple(resolution.index(heading) for heading in headings)
-        sections = tuple(
-            resolution[start:end]
-            for start, end in zip(positions, (*positions[1:], len(resolution)), strict=True)
-        )
-        if any("[[" not in section for section in sections):
-            return [
-                f"{node.relative_path}: every whole-book learning resolution must link "
-                "at least one canonical chapter or concept"
-            ]
-        body = body[: resolution_match.start()] + body[resolution_match.end() :]
+    if re.search(r"(?m)^#{2,3}\s+(?:책 전체 학습 해상도|2주|1달|5달)(?:\s|·|$)", body):
+        return [
+            f"{node.relative_path}: book page must follow the verified table of contents "
+            "without 2주·1달·5달 study horizons"
+        ]
+    # Once source-owned groups exist, Core owns the visible map. The authored
+    # body may contain an introduction, but direct chapter links are rejected
+    # separately as duplicate projection input.
+    if node.navigation_groups:
+        return []
+    rights_safe_toc = node.knowledge_state == "목차 확인됨"
     group_open = False
     group_has_link = False
     for line in body.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("##"):
+        if not stripped:
             continue
         indent = len(line) - len(line.lstrip())
-        if indent == 0 and re.fullmatch(r"-\s+[^\[\n][^\n]*", stripped):
+        if indent == 0 and re.fullmatch(r"##\s+.+", stripped):
             if group_open and not group_has_link:
                 return [
                     f"{node.relative_path}: every book contents group must contain at least "
-                    "one indented hyperlink row"
+                    "one direct hyperlink row"
                 ]
             group_open = True
             group_has_link = False
             continue
         if re.fullmatch(r"-\s+\[\[[^\]]+\]\]", stripped):
-            if group_open and indent == 0:
+            target = stripped.split("[[", 1)[1].split("]]", 1)[0].split("|", 1)[0]
+            if target.startswith("#") or "#" in target:
                 return [
-                    f"{node.relative_path}: grouped book links must be indented below their label"
+                    f"{node.relative_path}: book contents must link to chapter pages, not anchors"
+                ]
+            if not group_open:
+                return [f"{node.relative_path}: book contents links require an H2 topic heading"]
+            if indent != 0:
+                return [f"{node.relative_path}: book contents links must be flat bullets below H2"]
+            group_has_link = True
+            continue
+        if rights_safe_toc and re.fullmatch(r"-\s+[^\[].*", stripped):
+            if not group_open:
+                return [
+                    f"{node.relative_path}: book contents rows require an H2 topic heading"
+                ]
+            if indent != 0:
+                return [
+                    f"{node.relative_path}: book contents rows must be flat bullets below H2"
                 ]
             group_has_link = True
             continue
@@ -924,7 +1116,7 @@ def _book_link_index_issues(node: WikiTreeNode, text: str) -> list[str]:
     if group_open and not group_has_link:
         return [
             f"{node.relative_path}: every book contents group must contain at least one "
-            "indented hyperlink row"
+            "direct hyperlink row"
         ]
     return []
 
@@ -1186,12 +1378,18 @@ def _render_navigation_children(
     texts: dict[str, str],
     *,
     include_sequence: bool,
+    book_map_kind: str | None = None,
 ) -> tuple[str, ...]:
-    """Flatten small, link-only grouping hubs into one scannable index."""
+    """Render one direct-child map without exposing grandchildren."""
 
     if parent.navigation_groups:
         return _render_explicit_navigation_groups(
-            parent, direct, children, texts, include_sequence=include_sequence
+            parent,
+            direct,
+            children,
+            texts,
+            include_sequence=include_sequence,
+            topic_headings=book_map_kind is not None,
         )
 
     rows: list[str] = []
@@ -1234,8 +1432,13 @@ def _render_explicit_navigation_groups(
     texts: dict[str, str],
     *,
     include_sequence: bool,
+    topic_headings: bool = False,
 ) -> tuple[str, ...]:
-    """Render hub-owned text labels without changing canonical parent relations."""
+    """Render group labels without changing canonical parent relations.
+
+    Book roots and chapter roots use source-owned H2 labels. Other Wiki maps
+    retain the established two-level bullet projection.
+    """
 
     direct_by_id = {child.canonical_id: child for child in direct}
     direct_labels = dict(
@@ -1247,32 +1450,64 @@ def _render_explicit_navigation_groups(
     )
     rows: list[str] = []
     for group in parent.navigation_groups:
-        rows.append(f"- {group.label}")
+        rows.append(f"## {group.label}" if topic_headings else f"- {group.label}")
         for child_id in group.child_ids:
             child = direct_by_id[child_id]
+            if (
+                topic_headings
+                and len(group.child_ids) > 1
+                and child.title.strip() == group.label.strip()
+            ):
+                # A source section introduction is still a canonical page, but
+                # its title is already represented by the H2 topic keyword.
+                # Repeating the same title as a link makes a book map look like
+                # an accidental extra depth level.
+                continue
             if parent.canonical_id == "resources/README" and child.node_kind == "topic":
                 resource_rows = _resource_link_rows(texts[child.relative_path])
                 if len(resource_rows) <= FLATTEN_GROUP_MAX_CHILDREN:
-                    rows.extend("  " + row for row in resource_rows)
+                    rows.extend(row if topic_headings else f"  {row}" for row in resource_rows)
                 else:
-                    rows.append(
-                        "  "
-                        + _render_keyword_link(
-                            child,
-                            include_sequence=include_sequence,
-                            label=direct_labels[child_id],
-                        )
-                    )
-            else:
-                rows.append(
-                    "  "
-                    + _render_keyword_link(
+                    link = _render_keyword_link(
                         child,
                         include_sequence=include_sequence,
-                        label=direct_labels[child_id],
+                        label=child.title if topic_headings else direct_labels[child_id],
                     )
+                    rows.append(link if topic_headings else f"  {link}")
+            else:
+                link = _render_keyword_link(
+                    child,
+                    include_sequence=include_sequence,
+                    label=child.title if topic_headings else direct_labels[child_id],
                 )
+                rows.append(link if topic_headings else f"  {link}")
     return tuple(rows)
+
+
+def _book_navigation_kind(node: WikiTreeNode, nodes: Sequence[WikiTreeNode]) -> str | None:
+    """Classify every book-scoped map that owns a source TOC projection."""
+
+    if node.entity_kind == "book":
+        return "book-root"
+    book_roots = tuple(
+        candidate.canonical_id for candidate in nodes if candidate.entity_kind == "book"
+    )
+    for book_root in book_roots:
+        prefix = f"{book_root}/"
+        if not node.canonical_id.startswith(prefix):
+            continue
+        relative = node.canonical_id.removeprefix(prefix)
+        if re.fullmatch(r"(?:chapter-\d+|appendix-[a-z0-9-]+)", relative):
+            return "chapter-root"
+        if node.navigation_groups:
+            return "nested-book-map"
+    return None
+
+
+def _managed_navigation_uses_h2(block: str) -> bool:
+    """Return whether a managed map owns source topic headings itself."""
+
+    return re.search(r"(?m)^##\s+\S", block) is not None
 
 
 def _compact_keyword_label(value: str) -> str:

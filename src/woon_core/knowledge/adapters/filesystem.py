@@ -41,6 +41,7 @@ class MarkdownDocumentRepository:
             self._lock_path.relative_to(self._vault)
         except ValueError as error:
             raise WoonError("knowledge mutation lock escapes the configured vault") from error
+        self._exclusive_path_index: dict[str, Path] | None = None
 
     def get(self, canonical_id: str) -> CanonicalDocument | None:
         path = self._find_path(canonical_id)
@@ -75,7 +76,11 @@ class MarkdownDocumentRepository:
         """Serialize all canonical validation, writes, and index rebuilds."""
 
         with exclusive_file_lock(self._lock_path):
-            yield
+            self._exclusive_path_index = self._build_path_index()
+            try:
+                yield
+            finally:
+                self._exclusive_path_index = None
 
     def snapshot(self, canonical_id: str) -> bytes | None:
         path = self._find_path(canonical_id)
@@ -85,6 +90,8 @@ class MarkdownDocumentRepository:
         path = self._find_path(canonical_id) or self._path(canonical_id)
         if snapshot is None:
             path.unlink(missing_ok=True)
+            if self._exclusive_path_index is not None:
+                self._exclusive_path_index.pop(canonical_id, None)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -97,6 +104,8 @@ class MarkdownDocumentRepository:
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
+        if self._exclusive_path_index is not None:
+            self._exclusive_path_index[canonical_id] = path
 
     def save(
         self,
@@ -127,6 +136,8 @@ class MarkdownDocumentRepository:
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
+        if self._exclusive_path_index is not None:
+            self._exclusive_path_index[metadata.canonical_id] = path
         document = self.parse(path.relative_to(self._vault).as_posix(), rendered)
         return SaveResult(document=document, created=current is None, changed=True)
 
@@ -168,6 +179,8 @@ class MarkdownDocumentRepository:
         errors: list[str] = []
         identifiers: dict[str, str] = {}
         titles: dict[str, str] = {}
+        book_titles: dict[tuple[str, str], str] = {}
+        book_roots = self._book_root_ids()
         if not self._root.is_dir():
             return []
         for path in self._canonical_markdown_paths():
@@ -184,11 +197,29 @@ class MarkdownDocumentRepository:
                 )
             identifiers[document.metadata.canonical_id] = relative
             normalized_title = "".join(document.metadata.title.lower().split())
-            if normalized_title in titles:
-                errors.append(
-                    f"{relative}: duplicate title also used by {titles[normalized_title]}"
-                )
-            titles[normalized_title] = relative
+            book_root = next(
+                (
+                    root
+                    for root in book_roots
+                    if document.metadata.canonical_id.startswith(f"{root}/")
+                ),
+                None,
+            )
+            if book_root is not None:
+                book_scope = document.metadata.canonical_id.rsplit("/", 1)[0]
+                key = (book_scope, normalized_title)
+                if key in book_titles:
+                    errors.append(
+                        f"{relative}: duplicate title in {book_scope} "
+                        f"also used by {book_titles[key]}"
+                    )
+                book_titles[key] = relative
+            else:
+                if normalized_title in titles:
+                    errors.append(
+                        f"{relative}: duplicate title also used by {titles[normalized_title]}"
+                    )
+                titles[normalized_title] = relative
         return errors
 
     def parse(self, relative_path: str, text: str) -> CanonicalDocument:
@@ -217,6 +248,8 @@ class MarkdownDocumentRepository:
             next_concepts=_strings(raw.get("next_concepts")),
             related=_strings(raw.get("related")),
             source_ids=_strings(raw.get("source_ids")),
+            node_kind=str(raw.get("node_kind", "")),
+            entity_kind=str(raw.get("entity_kind", "")),
         )
         heading = f"# {metadata.title}\n"
         if not content.startswith(heading):
@@ -243,6 +276,24 @@ class MarkdownDocumentRepository:
     def _find_path(self, canonical_id: str) -> Path | None:
         """Resolve a stable canonical identity independently from its current path."""
 
+        if self._exclusive_path_index is not None:
+            indexed = self._exclusive_path_index.get(canonical_id)
+            if indexed is not None:
+                return indexed
+            preferred = self._path(canonical_id)
+            if not preferred.is_file():
+                return None
+            try:
+                document = self.parse(
+                    preferred.relative_to(self._vault).as_posix(),
+                    preferred.read_text(encoding="utf-8"),
+                )
+            except (OSError, UnicodeError, WoonError):
+                return None
+            if document.metadata.canonical_id != canonical_id:
+                return None
+            self._exclusive_path_index[canonical_id] = preferred
+            return preferred
         if not self._root.is_dir():
             return None
         matches: list[Path] = []
@@ -266,6 +317,33 @@ class MarkdownDocumentRepository:
             )
         return matches[0] if matches else None
 
+    def _build_path_index(self) -> dict[str, Path]:
+        """Index canonical locations once for one mutation transaction."""
+
+        index: dict[str, Path] = {}
+        if not self._root.is_dir():
+            return index
+        for path in self._canonical_markdown_paths():
+            try:
+                document = self.parse(
+                    path.relative_to(self._vault).as_posix(),
+                    path.read_text(encoding="utf-8"),
+                )
+            except (OSError, UnicodeError, WoonError):
+                continue
+            canonical_id = document.metadata.canonical_id
+            previous = index.get(canonical_id)
+            if previous is not None:
+                locations = [
+                    previous.relative_to(self._vault).as_posix(),
+                    path.relative_to(self._vault).as_posix(),
+                ]
+                raise WoonError(
+                    f"canonical_id {canonical_id!r} resolves to multiple files: {locations}"
+                )
+            index[canonical_id] = path
+        return index
+
     def _canonical_markdown_paths(self) -> tuple[Path, ...]:
         """Exclude the raw Wiki-owned source archive from canonical documents."""
 
@@ -274,6 +352,30 @@ class MarkdownDocumentRepository:
             for path in sorted(self._root.rglob("*.md"))
             if "_sources" not in path.relative_to(self._root).parts
         )
+
+    def _book_root_ids(self) -> frozenset[str]:
+        """Return canonical IDs declared as book entities in this Vault."""
+
+        roots: set[str] = set()
+        for path in self._canonical_markdown_paths():
+            try:
+                text = path.read_text(encoding="utf-8")
+                if not text.startswith("---\n"):
+                    continue
+                _, frontmatter, _ = text.split("---\n", 2)
+                metadata = yaml.safe_load(frontmatter) or {}
+            except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+                continue
+            canonical_id = metadata.get("canonical_id") if isinstance(metadata, dict) else None
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("node_kind") == "entity"
+                and metadata.get("entity_kind") == "book"
+                and isinstance(canonical_id, str)
+                and canonical_id.strip()
+            ):
+                roots.add(canonical_id.strip())
+        return frozenset(roots)
 
     @staticmethod
     def _render(metadata: DocumentMetadata, body: str) -> str:
@@ -293,6 +395,10 @@ class MarkdownDocumentRepository:
             "related": list(metadata.related),
             "source_ids": list(metadata.source_ids),
         }
+        if metadata.node_kind:
+            frontmatter["node_kind"] = metadata.node_kind
+        if metadata.entity_kind:
+            frontmatter["entity_kind"] = metadata.entity_kind
         yaml_text = yaml.safe_dump(
             frontmatter, allow_unicode=True, sort_keys=False, default_flow_style=False
         )

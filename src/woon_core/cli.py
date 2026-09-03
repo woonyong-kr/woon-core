@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import asdict
@@ -31,6 +32,16 @@ from woon_core.environment.python_ide import verify as verify_python_ide
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
 from woon_core.knowledge.answer_citation_evaluation import evaluate_answer_citations
+from woon_core.knowledge.book_contract import (
+    require_book_workflow_manifest,
+    require_current_book_contract,
+)
+from woon_core.knowledge.book_coverage import audit_book_coverage
+from woon_core.knowledge.book_intake import audit_book_intake
+from woon_core.knowledge.book_rights import (
+    load_book_rights_demotion,
+    load_book_rights_restoration,
+)
 from woon_core.knowledge.codex_daily_digest import (
     entries_from_records as daily_digest_entries_from_records,
 )
@@ -52,6 +63,12 @@ from woon_core.knowledge.codex_source_archive import (
     bundle_from_record as codex_source_bundle_from_record,
 )
 from woon_core.knowledge.codex_source_archive import record_codex_source_bundle
+from woon_core.knowledge.compiled_wiki import (
+    BookCoverageManifestUpdate,
+    CompiledWikiTransaction,
+    StagedBookAsset,
+    VerifiedBookPage,
+)
 from woon_core.knowledge.content_quality_evaluation import evaluate_content_quality
 from woon_core.knowledge.content_quality_review_plan import (
     assemble_content_quality_reviews,
@@ -172,8 +189,15 @@ Usage:
   woon knowledge initialize-curation [--vault <path>]
   woon knowledge refresh-provisional-curation [--vault <path>]
   woon knowledge reconcile-superseded-revisions [--vault <path>]
-  woon knowledge compile [--force] [--vault <path>]
+  woon knowledge compile [--force] [--page <canonical-id>...] [--vault <path>]
   woon knowledge compile-audit [--vault <path>]
+  woon knowledge apply-compiled-transaction --input <local-JSON> [--vault <path>]
+  woon knowledge book-coverage-audit [--vault <path>]
+  woon knowledge book-intake-audit [--manifest <name>] [--vault <path>]
+  woon knowledge book-promote --input <local-JSON> [--vault <path>]
+  woon knowledge book-promote-retire --input <local-JSON> [--vault <path>]
+  woon knowledge book-rights-demote --input <local-JSON> [--vault <path>]
+  woon knowledge book-rights-restore --input <local-JSON> [--vault <path>]
   woon knowledge learning-checkpoint --canonical-id <id> --unit <text>
     --status <confirmed|partial|retry> [--evidence <text>...] [--unstable <text>...]
     --next-question <text> --recorded-on <YYYY-MM-DD> --expected-revision <sha256>
@@ -584,6 +608,27 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "refresh-wiki-tree":
         _run_wiki_tree_refresh(raw_options, output)
+        return
+    if command == "book-coverage-audit":
+        _run_book_coverage_audit(raw_options, output)
+        return
+    if command == "book-intake-audit":
+        _run_book_intake_audit(raw_options, output)
+        return
+    if command == "book-promote":
+        _run_book_promotion(raw_options, output)
+        return
+    if command == "book-promote-retire":
+        _run_atomic_book_update(raw_options, output)
+        return
+    if command == "book-rights-demote":
+        _run_book_rights_demotion(raw_options, output)
+        return
+    if command == "book-rights-restore":
+        _run_book_rights_restoration(raw_options, output)
+        return
+    if command == "apply-compiled-transaction":
+        _run_apply_compiled_transaction(raw_options, output)
         return
     if command in {
         "migrate-compiled",
@@ -1442,7 +1487,7 @@ def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
     index = 0
     while index < len(arguments):
         option = arguments[index]
-        if option != "--vault":
+        if option not in {"--vault", "--canonical-prefix"}:
             raise WoonError(f"unexpected knowledge refresh-wiki-tree argument: {option}")
         if index + 1 >= len(arguments) or option in values:
             raise WoonError(f"{option} requires exactly one value")
@@ -1454,7 +1499,10 @@ def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
         if vault_option is not None
         else resolve_knowledge_vault()
     )
-    report = prepare_wiki_tree_refresh(vault)
+    report = prepare_wiki_tree_refresh(
+        vault,
+        canonical_prefix=values.get("--canonical-prefix"),
+    )
     if report.issues:
         raise WoonError("Wiki tree refresh rejected: " + "; ".join(report.issues[:12]))
     apply_wiki_tree_refresh(vault, report)
@@ -1464,6 +1512,7 @@ def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
                 "status": "ok",
                 "document_count": report.document_count,
                 "changed_count": report.changed_count,
+                "canonical_prefix": values.get("--canonical-prefix"),
             },
             ensure_ascii=False,
             indent=2,
@@ -1472,18 +1521,637 @@ def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
     )
 
 
+def _run_book_coverage_audit(arguments: list[str], output: TextIO) -> None:
+    """Reject incomplete, unverified, or shell-only book learning trees."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option != "--vault":
+            raise WoonError(f"unexpected knowledge book-coverage-audit argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    report = audit_book_coverage(vault)
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+    if not report.complete:
+        raise WoonError(
+            "book coverage audit is incomplete: "
+            f"errors={len(report.errors)} pending_books={report.pending_book_count}"
+        )
+
+
+def _run_book_intake_audit(arguments: list[str], output: TextIO) -> None:
+    """Reject omitted, duplicated, or rights-unsafe book source routing."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--manifest", "--vault"}:
+            raise WoonError(f"unexpected knowledge book-intake-audit argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    report = audit_book_intake(vault, values.get("--manifest", "official-books"))
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+    if not report.complete:
+        raise WoonError(f"book intake audit failed with {len(report.errors)} error(s)")
+
+
+def _run_book_promotion(arguments: list[str], output: TextIO) -> None:
+    """Promote a source-covered book page batch through the compiled Wiki owner."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--input", "--vault"}:
+            raise WoonError(f"unexpected knowledge book-promote argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--input" not in values:
+        raise WoonError("book-promote requires --input")
+    input_path = Path(values["--input"]).expanduser().resolve()
+    if not input_path.is_file() or input_path.is_symlink():
+        raise WoonError("book-promote input must be one regular local JSON file")
+    try:
+        payload = json.loads(input_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WoonError("book-promote input is invalid JSON") from error
+    if not isinstance(payload, dict) or not isinstance(payload.get("apply"), bool):
+        raise WoonError("book-promote input must explicitly set apply to true or false")
+    apply = payload["apply"]
+    require_current_book_contract(payload, "book-promote")
+    expected_fields = {
+        "apply",
+        "payload_schema_version",
+        "book_contract",
+        "workflow_phase",
+        "translation_required",
+        "pages",
+        "coverage_manifest",
+    }
+    if "staged_assets" in payload:
+        expected_fields.add("staged_assets")
+    if set(payload) != expected_fields:
+        raise WoonError("book-promote input fields are invalid for the current payload schema")
+    raw_pages = payload.get("pages") if isinstance(payload, dict) else None
+    if not isinstance(raw_pages, list) or not raw_pages:
+        raise WoonError("book-promote input must contain a non-empty pages array")
+    pages: list[VerifiedBookPage] = []
+    for index, raw in enumerate(raw_pages):
+        if not isinstance(raw, dict):
+            raise WoonError(f"book-promote pages[{index}] must be an object")
+        try:
+            pages.append(VerifiedBookPage(**raw))
+        except TypeError as error:
+            raise WoonError(f"book-promote pages[{index}] fields are invalid") from error
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    coverage_manifest = _parse_book_coverage_manifest_update(
+        payload.get("coverage_manifest"), vault
+    )
+    if coverage_manifest is None:
+        raise WoonError("book-promote requires an atomic coverage_manifest replacement")
+    require_book_workflow_manifest(payload, "book-promote")
+    staged_assets = _parse_staged_book_assets(payload.get("staged_assets"), input_path)
+    _, service = build_knowledge_service(vault)
+    if apply:
+        apply_report = service.promote_verified_book_pages(
+            tuple(pages), coverage_manifest, staged_assets
+        )
+        result = {**asdict(apply_report), "applied": True}
+    else:
+        preflight_report = service.preflight_verified_book_update(
+            tuple(pages),
+            {},
+            {},
+            {},
+            coverage_manifest,
+            staged_assets,
+        )
+        result = {**asdict(preflight_report), "applied": False}
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
+
+
+def _parse_staged_book_assets(
+    raw: object, input_path: Path
+) -> tuple[StagedBookAsset, ...]:
+    """Resolve byte-pinned asset sources without permitting path or symlink escapes."""
+
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise WoonError("book-promote staged_assets must be an array")
+    expected_fields = {
+        "staging_relative_path",
+        "archive_relative_path",
+        "sha256",
+        "size",
+        "provenance",
+        "source_entry_locator",
+    }
+    root = input_path.parent.resolve()
+    assets: list[StagedBookAsset] = []
+    for index, item in enumerate(raw):
+        label = f"book-promote staged_assets[{index}]"
+        if not isinstance(item, dict) or set(item) != expected_fields:
+            raise WoonError(f"{label} fields are invalid")
+        staging_relative = item.get("staging_relative_path")
+        candidate = Path(staging_relative) if isinstance(staging_relative, str) else Path()
+        if (
+            not isinstance(staging_relative, str)
+            or not staging_relative
+            or "\\" in staging_relative
+            or candidate.is_absolute()
+            or candidate.as_posix() != staging_relative
+            or candidate.parts[:1] != ("staged-source-assets",)
+            or ".." in candidate.parts
+        ):
+            raise WoonError(f"{label}.staging_relative_path is unsafe")
+        current = root
+        for part in candidate.parts:
+            current = current / part
+            if current.is_symlink():
+                raise WoonError(f"{label}.staging_relative_path must not use symlinks")
+        staging_path = (root / candidate).resolve()
+        try:
+            staging_path.relative_to(root)
+        except ValueError as error:
+            raise WoonError(f"{label}.staging_relative_path escapes its payload") from error
+        size = item.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise WoonError(f"{label}.size must be a positive integer")
+        for field in (
+            "archive_relative_path",
+            "sha256",
+            "provenance",
+            "source_entry_locator",
+        ):
+            if not isinstance(item.get(field), str) or not str(item[field]).strip():
+                raise WoonError(f"{label}.{field} must be a non-empty string")
+        assets.append(
+            StagedBookAsset(
+                staging_path=staging_path,
+                archive_relative_path=str(item["archive_relative_path"]),
+                sha256=str(item["sha256"]),
+                size=size,
+                provenance=str(item["provenance"]),
+                source_entry_locator=str(item["source_entry_locator"]),
+            )
+        )
+    return tuple(assets)
+
+
+def _run_apply_compiled_transaction(arguments: list[str], output: TextIO) -> None:
+    """Apply one exact source/claim/page/curation compiler transaction."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--input", "--vault"}:
+            raise WoonError(f"unexpected apply-compiled-transaction argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--input" not in values:
+        raise WoonError("apply-compiled-transaction requires --input")
+    input_path = Path(values["--input"]).expanduser().resolve()
+    if not input_path.is_file() or input_path.is_symlink():
+        raise WoonError("apply-compiled-transaction input must be one regular local JSON file")
+    try:
+        payload = json.loads(input_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WoonError("apply-compiled-transaction input is invalid JSON") from error
+    expected_fields = {
+        "apply",
+        "expected_revisions",
+        "sources_upsert",
+        "claims_upsert",
+        "pages_upsert",
+        "curations_upsert",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_fields:
+        raise WoonError("apply-compiled-transaction input fields are invalid")
+    if payload.get("apply") is not True:
+        raise WoonError("apply-compiled-transaction input must explicitly set apply to true")
+    expected_revisions = payload.get("expected_revisions")
+    if not isinstance(expected_revisions, dict) or not all(
+        isinstance(key, str) and (value is None or isinstance(value, str))
+        for key, value in expected_revisions.items()
+    ):
+        raise WoonError("apply-compiled-transaction expected_revisions are invalid")
+
+    arrays: dict[str, tuple[dict[str, object], ...]] = {}
+    for field in ("sources_upsert", "claims_upsert", "pages_upsert", "curations_upsert"):
+        raw = payload.get(field)
+        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+            raise WoonError(f"apply-compiled-transaction {field} must be an object array")
+        arrays[field] = tuple(raw)
+    transaction = CompiledWikiTransaction(
+        expected_revisions=expected_revisions,
+        sources_upsert=arrays["sources_upsert"],
+        claims_upsert=arrays["claims_upsert"],
+        pages_upsert=arrays["pages_upsert"],
+        curations_upsert=arrays["curations_upsert"],
+    )
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    _, service = build_knowledge_service(vault)
+    report = service.apply_compiled_wiki_transaction(transaction)
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
+    """Promote verified pages and retire wrappers in one rollback-safe mutation."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--input", "--vault"}:
+            raise WoonError(f"unexpected knowledge book-promote-retire argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--input" not in values:
+        raise WoonError("book-promote-retire requires --input")
+    input_path = Path(values["--input"]).expanduser().resolve()
+    if not input_path.is_file() or input_path.is_symlink():
+        raise WoonError("book-promote-retire input must be one regular local JSON file")
+    try:
+        payload = json.loads(input_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WoonError("book-promote-retire input is invalid JSON") from error
+    required_fields = {
+        "apply",
+        "payload_schema_version",
+        "book_contract",
+        "workflow_phase",
+        "translation_required",
+        "pages",
+        "retire_replacements",
+        "retirement_expected_revisions",
+        "retirement_body_sha256",
+        "coverage_manifest",
+    }
+    require_current_book_contract(payload, "book-promote-retire")
+    if not isinstance(payload, dict) or set(payload) != required_fields:
+        raise WoonError("book-promote-retire input fields are invalid")
+    apply = payload.get("apply")
+    if not isinstance(apply, bool):
+        raise WoonError("book-promote-retire input must explicitly set apply to true or false")
+    raw_pages = payload.get("pages")
+    replacements = payload.get("retire_replacements")
+    expected_revisions = payload.get("retirement_expected_revisions")
+    body_sha256 = payload.get("retirement_body_sha256")
+    if not isinstance(raw_pages, list) or not raw_pages:
+        raise WoonError("book-promote-retire input requires a non-empty pages array")
+    if not isinstance(replacements, dict) or not replacements:
+        raise WoonError("book-promote-retire input requires retire_replacements")
+    if not isinstance(expected_revisions, dict) or set(expected_revisions) != set(replacements):
+        raise WoonError("book-promote-retire retirement_expected_revisions must match replacements")
+    if not isinstance(body_sha256, dict) or set(body_sha256) != set(replacements):
+        raise WoonError("book-promote-retire retirement_body_sha256 must match replacements")
+    if not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in {**replacements, **expected_revisions, **body_sha256}.items()
+    ):
+        raise WoonError("book-promote-retire replacement fields must be strings")
+    pages: list[VerifiedBookPage] = []
+    for page_index, raw in enumerate(raw_pages):
+        if not isinstance(raw, dict):
+            raise WoonError(f"book-promote-retire pages[{page_index}] must be an object")
+        try:
+            pages.append(VerifiedBookPage(**raw))
+        except TypeError as error:
+            raise WoonError(
+                f"book-promote-retire pages[{page_index}] fields are invalid"
+            ) from error
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    coverage_manifest = _parse_book_coverage_manifest_update(
+        payload.get("coverage_manifest"), vault
+    )
+    if coverage_manifest is None:
+        raise WoonError("book-promote-retire requires an atomic coverage_manifest replacement")
+    require_book_workflow_manifest(payload, "book-promote-retire")
+    _, service = build_knowledge_service(vault)
+    if apply:
+        report = service.apply_verified_book_update(
+            tuple(pages),
+            replacements,
+            expected_revisions,
+            body_sha256,
+            coverage_manifest,
+        )
+        print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+    else:
+        preflight_report = service.preflight_verified_book_update(
+            tuple(pages),
+            replacements,
+            expected_revisions,
+            body_sha256,
+            coverage_manifest,
+        )
+        print(json.dumps(asdict(preflight_report), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_book_rights_demotion(arguments: list[str], output: TextIO) -> None:
+    """Preflight or atomically apply one rights-blocked book demotion."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--input", "--vault"}:
+            raise WoonError(f"unexpected knowledge book-rights-demote argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--input" not in values:
+        raise WoonError("book-rights-demote requires --input")
+    input_path = Path(values["--input"]).expanduser().resolve()
+    if not input_path.is_file() or input_path.is_symlink():
+        raise WoonError("book-rights-demote input must be one regular local JSON file")
+    apply, request = load_book_rights_demotion(input_path)
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    _, service = build_knowledge_service(vault)
+    report = (
+        service.apply_book_rights_demotion(request)
+        if apply
+        else service.preflight_book_rights_demotion(request)
+    )
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_book_rights_restoration(arguments: list[str], output: TextIO) -> None:
+    """Preflight or atomically restore one explicitly authorized private book."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--input", "--vault"}:
+            raise WoonError(f"unexpected knowledge book-rights-restore argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    if "--input" not in values:
+        raise WoonError("book-rights-restore requires --input")
+    input_path = Path(values["--input"]).expanduser().resolve()
+    if not input_path.is_file() or input_path.is_symlink():
+        raise WoonError("book-rights-restore input must be one regular local JSON file")
+    try:
+        payload = json.loads(input_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WoonError("book-rights-restore input is invalid JSON") from error
+    if not isinstance(payload, dict) or not isinstance(payload.get("apply"), bool):
+        raise WoonError(
+            "book-rights-restore input must explicitly set apply to true or false"
+        )
+    require_current_book_contract(payload, "book-rights-restore")
+    expected_fields = {
+        "apply",
+        "payload_schema_version",
+        "book_contract",
+        "workflow_phase",
+        "translation_required",
+        "pages",
+        "coverage_manifest",
+        "rights_restore",
+    }
+    if "staged_assets" in payload:
+        expected_fields.add("staged_assets")
+    if set(payload) != expected_fields:
+        raise WoonError("book-rights-restore input fields are invalid")
+    if payload.get("workflow_phase") != "source-landed":
+        raise WoonError("book-rights-restore must begin at source-landed")
+    if payload.get("translation_required") is not False:
+        raise WoonError("book-rights-restore for a Korean source requires translation false")
+    raw_pages = payload.get("pages")
+    if not isinstance(raw_pages, list) or not raw_pages:
+        raise WoonError("book-rights-restore requires a non-empty pages array")
+    pages: list[VerifiedBookPage] = []
+    for page_index, raw in enumerate(raw_pages):
+        if not isinstance(raw, dict):
+            raise WoonError(f"book-rights-restore pages[{page_index}] must be an object")
+        try:
+            pages.append(VerifiedBookPage(**raw))
+        except TypeError as error:
+            raise WoonError(
+                f"book-rights-restore pages[{page_index}] fields are invalid"
+            ) from error
+    request = load_book_rights_restoration(payload.get("rights_restore"))
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    coverage_manifest = _parse_book_coverage_manifest_update(
+        payload.get("coverage_manifest"), vault
+    )
+    if coverage_manifest is None:
+        raise WoonError("book-rights-restore requires an atomic coverage_manifest")
+    require_book_workflow_manifest(payload, "book-rights-restore")
+    staged_assets = _parse_staged_book_assets(payload.get("staged_assets"), input_path)
+    _, service = build_knowledge_service(vault)
+    report = (
+        service.apply_book_rights_restoration(
+            request, tuple(pages), coverage_manifest, staged_assets
+        )
+        if payload["apply"]
+        else service.preflight_book_rights_restoration(
+            request, tuple(pages), coverage_manifest, staged_assets
+        )
+    )
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
+
+
+def _parse_book_coverage_manifest_update(
+    raw: object, vault: Path
+) -> BookCoverageManifestUpdate | None:
+    """Parse one fail-closed full replacement or staged scope update."""
+
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise WoonError("book promotion coverage_manifest fields are invalid")
+    mode = raw.get("mode")
+    replace_fields = {"mode", "relative_path", "expected_sha256", "replacement"}
+    scope_fields = replace_fields | {
+        "base_relative_path",
+        "base_expected_sha256",
+        "scope_root_id",
+    }
+    expected_fields = scope_fields if mode == "merge-scope" else replace_fields
+    if mode not in {"replace", "merge-scope"} or set(raw) != expected_fields:
+        raise WoonError(
+            "book promotion coverage_manifest fields are invalid; explicitly use replace "
+            "or merge-scope with that mode's exact fields"
+        )
+    relative_path = raw.get("relative_path")
+    expected_sha256 = raw.get("expected_sha256")
+    replacement = raw.get("replacement")
+    if not isinstance(relative_path, str):
+        raise WoonError("book promotion coverage manifest path must be a string")
+    candidate = Path(relative_path)
+    expected_prefix = (
+        ("catalog", "book-coverage-scopes")
+        if mode == "merge-scope"
+        else ("catalog", "book-coverage")
+    )
+    expected_depth = 4 if mode == "merge-scope" else 3
+    if (
+        not relative_path
+        or "\\" in relative_path
+        or candidate.is_absolute()
+        or candidate.as_posix() != relative_path
+        or candidate.parts[:2] != expected_prefix
+        or len(candidate.parts) != expected_depth
+        or candidate.suffix != ".json"
+        or ".." in candidate.parts
+    ):
+        root = "/".join(expected_prefix)
+        suffix = "/<book>" if mode == "merge-scope" else ""
+        raise WoonError(
+            f"book promotion coverage manifest path must be one JSON file under {root}{suffix}"
+        )
+    path = vault / candidate
+    current = vault
+    for part in candidate.parts:
+        current = current / part
+        if current.is_symlink():
+            raise WoonError("book promotion coverage manifest path must not use symlinks")
+    if path.exists():
+        if not path.is_file():
+            raise WoonError("book promotion coverage manifest path must be a regular file")
+        if expected_sha256 is None:
+            raise WoonError("existing book promotion coverage manifest requires expected_sha256")
+        if (
+            not isinstance(expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        ):
+            raise WoonError(
+                "book promotion coverage manifest expected_sha256 must be a lowercase SHA-256"
+            )
+    elif expected_sha256 is not None:
+        raise WoonError("new book promotion coverage manifest requires expected_sha256 to be null")
+    if not isinstance(replacement, dict):
+        raise WoonError("book promotion coverage manifest replacement must be an object")
+    if mode == "merge-scope":
+        base_relative_path = raw.get("base_relative_path")
+        base_expected_sha256 = raw.get("base_expected_sha256")
+        scope_root_id = raw.get("scope_root_id")
+        base_candidate = Path(base_relative_path) if isinstance(base_relative_path, str) else Path()
+        if (
+            not isinstance(base_relative_path, str)
+            or not base_relative_path
+            or "\\" in base_relative_path
+            or base_candidate.is_absolute()
+            or base_candidate.as_posix() != base_relative_path
+            or base_candidate.parts[:2] != ("catalog", "book-coverage")
+            or len(base_candidate.parts) != 3
+            or base_candidate.suffix != ".json"
+            or ".." in base_candidate.parts
+        ):
+            raise WoonError(
+                "book promotion merge-scope base_relative_path must name one full "
+                "book coverage manifest"
+            )
+        if (
+            not isinstance(base_expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", base_expected_sha256) is None
+        ):
+            raise WoonError(
+                "book promotion merge-scope base_expected_sha256 must be a lowercase SHA-256"
+            )
+        if not isinstance(scope_root_id, str) or not scope_root_id.strip():
+            raise WoonError("book promotion merge-scope scope_root_id is required")
+        return BookCoverageManifestUpdate(
+            mode="merge-scope",
+            relative_path=relative_path,
+            expected_sha256=expected_sha256,
+            replacement=replacement,
+            base_relative_path=base_relative_path,
+            base_expected_sha256=base_expected_sha256,
+            scope_root_id=scope_root_id.strip(),
+        )
+    return BookCoverageManifestUpdate(
+        mode="replace",
+        relative_path=relative_path,
+        expected_sha256=expected_sha256,
+        replacement=replacement,
+    )
+
+
 def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) -> None:
     """Run explicit source-schema lifecycle actions outside normal retrieval."""
 
     force = False
+    page_ids: list[str] = []
     raw_options: list[str] = []
-    for option in arguments:
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
         if option == "--force":
             if command != "compile":
                 raise WoonError("--force is supported only by knowledge compile")
             force = True
+        elif option == "--page":
+            if command != "compile":
+                raise WoonError("--page is supported only by knowledge compile")
+            if index + 1 >= len(arguments):
+                raise WoonError("--page requires a canonical ID")
+            page_id = arguments[index + 1].strip()
+            if not page_id:
+                raise WoonError("--page requires a canonical ID")
+            page_ids.append(page_id)
+            index += 1
         else:
             raw_options.append(option)
+        index += 1
     vault, options = _parse_knowledge_options(raw_options)
     if options:
         raise WoonError(f"knowledge {command} takes no positional arguments")
@@ -1505,7 +2173,7 @@ def _run_compiled_knowledge(command: str, arguments: list[str], output: TextIO) 
         print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
         return
     if command == "compile":
-        compilation = service.compile(force=force)
+        compilation = service.compile(force=force, page_ids=tuple(page_ids))
         print(json.dumps(asdict(compilation), ensure_ascii=False, indent=2), file=output)
         return
     audit = service.compilation_audit()

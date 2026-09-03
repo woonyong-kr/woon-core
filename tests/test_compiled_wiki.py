@@ -1,31 +1,45 @@
 from __future__ import annotations
 
+import copy
 import hashlib
+import json
 import subprocess
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
 import pytest
 import yaml
+from pypdf import PdfWriter
 
+import woon_core.knowledge.compiled_wiki as compiled_wiki_module
 from woon_core.errors import WoonError
 from woon_core.knowledge.adapters import (
     GitKnowledgeHistory,
     MarkdownDocumentRepository,
     SQLiteFtsSearchIndex,
 )
+from woon_core.knowledge.book_coverage import audit_book_coverage
 from woon_core.knowledge.compiled_wiki import (
+    BookCoverageManifestUpdate,
+    CompilationAudit,
     CompiledWiki,
     CompiledWikiSettings,
     CuratedRevision,
+    StagedBookAsset,
+    VerifiedBookPage,
+    VerifiedBookUpdateReport,
     _contains_mermaid_color_directive,
+    _navigation_only_body,
     _normalize_compiled_display_body,
+    _retirement_body,
     _validate_claim_record,
     _validate_source,
 )
 from woon_core.knowledge.domain import DocumentMetadata, IndexedDocument
 from woon_core.knowledge.learning_checkpoint import LearningCheckpoint
 from woon_core.knowledge.service import KnowledgeService
+from woon_core.knowledge.wiki_tree import split_markdown
 
 
 class FailOnceIndex(SQLiteFtsSearchIndex):
@@ -101,6 +115,56 @@ flowchart TD
         )
 
 
+def test_book_writer_rejects_generated_learning_workflow_before_source_landing(
+    tmp_path: Path,
+) -> None:
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    record = VerifiedBookPage(
+        page_id="books/example/chapter-01/1-1",
+        title="1.1 원문 절",
+        body="원문 내용이다.\n\n## 이전과 다음\n\n- 다음: 다음 절\n",
+        statement="원문 절이다.",
+        current_use="원문을 읽는다.",
+        source_locator="source://book/example#page=1",
+        source_sha256="a" * 64,
+        frontmatter={},
+        expected_revision=None,
+    )
+
+    with pytest.raises(WoonError, match="generated learning workflow prose"):
+        compiler.validate_book_workflow_pages((record,), "source-landed")
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "This runnable harness preserves the source example's observable outcome.\n",
+        "Chapter 18 source code 23 preserves virtual time without real waiting.\n",
+        '```run-kotlin\nfun main() { println("compiled") }\n```\n',
+        "```run-kotlin\nclass VirtualTestScope { var currentTime = 0L }\n```\n",
+    ),
+)
+def test_book_writer_rejects_generated_harness_and_synthetic_replacements(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    record = VerifiedBookPage(
+        page_id="books/example/chapter-01/1-1",
+        title="1.1 원문 절",
+        body=body,
+        statement="원문 절이다.",
+        current_use="원문을 읽는다.",
+        source_locator="source://book/example#page=1",
+        source_sha256="a" * 64,
+        frontmatter={},
+        expected_revision=None,
+    )
+
+    with pytest.raises(WoonError, match="generated learning workflow prose"):
+        compiler.validate_book_workflow_pages((record,), "source-landed")
+
+
 def test_compiler_removes_retired_recent_document_list() -> None:
     body = """설명
 
@@ -166,6 +230,328 @@ def write_page(vault: Path, relative: str, title: str, body: str) -> None:
     )
 
 
+def verified_book_frontmatter(
+    page_id: str, title: str, parent_id: str | None = None
+) -> dict[str, object]:
+    frontmatter: dict[str, object] = {
+        "type": "Wiki",
+        "canonical_id": page_id,
+        "title": title,
+        "domain": "books",
+        "summary": "검증된 책 원문을 한국어 학습 흐름으로 재구성한 문서.",
+        "status": "Canonical",
+        "publish": False,
+        "access": "local-only",
+        "difficulty": "foundation",
+        "prerequisites": [],
+        "next_concepts": [],
+        "related": [],
+    }
+    if parent_id is not None:
+        frontmatter["parent"] = f"[[wiki/{parent_id}|상위 목차]]"
+    return frontmatter
+
+
+def atomic_book_service(
+    vault: Path,
+    *,
+    wrapper_body: str = ("## 목차\n\n- [[books/atomic-book/chapter-01|1장 실제 내용]]\n"),
+) -> tuple[CompiledWiki, KnowledgeService, FailOnceIndex, VerifiedBookPage, str, str]:
+    """Create one root -> empty wrapper -> leaf fixture for atomic update tests."""
+
+    root_id = "books/atomic-book"
+    wrapper_id = f"{root_id}/part-01"
+    leaf_id = f"{root_id}/chapter-01"
+    write_page(vault, "README.md", "Wiki", "<!-- fixture root -->")
+    write_page(vault, "books/README.md", "책", "<!-- fixture books hub -->")
+    write_page(
+        vault,
+        "books/programming-language.md",
+        "프로그래밍 언어",
+        "<!-- fixture book genre -->",
+    )
+    write_page(vault, f"{root_id}.md", "원자적 책", "기존 책 설명이다.\n")
+    write_page(vault, f"{wrapper_id}.md", "1부", wrapper_body)
+    write_page(vault, f"{leaf_id}.md", "1장 실제 내용", "실제 장 내용이다.\n")
+    compiler = CompiledWiki(compiled_settings(vault))
+    compiler.migrate()
+
+    pages_path = vault / "catalog/llm-wiki/pages.yaml"
+    payload = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    by_id = {page["page_id"]: page for page in payload["pages"]}
+    by_id["books/README"]["frontmatter"].update(
+        {
+            "node_kind": "hub",
+            "parent": "[[wiki/README|Wiki]]",
+            "view_mode": "tree",
+        }
+    )
+    by_id["books/programming-language"]["frontmatter"].update(
+        {
+            "node_kind": "hub",
+            "parent": "[[wiki/books/README|책]]",
+            "view_mode": "tree",
+        }
+    )
+    by_id[root_id]["frontmatter"]["parent"] = "[[wiki/books/programming-language|프로그래밍 언어]]"
+    by_id[root_id]["frontmatter"]["navigation_groups"] = [
+        {"label": "1부", "children": [wrapper_id]}
+    ]
+    by_id[wrapper_id]["frontmatter"]["parent"] = f"[[wiki/{root_id}|원자적 책]]"
+    by_id[wrapper_id]["frontmatter"]["navigation_groups"] = [{"label": "장", "children": [leaf_id]}]
+    by_id[leaf_id]["frontmatter"]["parent"] = f"[[wiki/{wrapper_id}|1부]]"
+    pages_path.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    compiler.compile(force=True)
+
+    index = FailOnceIndex(vault / ".local/search.sqlite3")
+    service = KnowledgeService(
+        MarkdownDocumentRepository(vault, vault / "wiki"),
+        index,
+        GitKnowledgeHistory(vault),
+        compiled_wiki=compiler,
+    )
+    service.reindex()
+    root = service.get(root_id)
+    wrapper = service.get(wrapper_id)
+    root_frontmatter = dict(by_id[root_id]["frontmatter"])
+    root_frontmatter["node_kind"] = "entity"
+    root_frontmatter["entity_kind"] = "book"
+    root_frontmatter["content_kind"] = "book"
+    root_frontmatter["navigation_groups"] = [{"label": "1부", "children": [leaf_id]}]
+    record = VerifiedBookPage(
+        page_id=root_id,
+        title="원자적 책",
+        body="",
+        statement="책 root는 실제 장을 직접 연결한다.",
+        current_use="책의 선형 목차를 탐색할 때 사용한다.",
+        source_locator="source://atomic-book#toc",
+        source_sha256="d" * 64,
+        frontmatter=root_frontmatter,
+        expected_revision=root.revision,
+    )
+    wrapper_body_sha256 = hashlib.sha256(_retirement_body(wrapper_body).encode("utf-8")).hexdigest()
+    return compiler, service, index, record, wrapper.revision, wrapper_body_sha256
+
+
+def atomic_book_coverage_update(
+    vault: Path,
+    *,
+    replacement_parent: str = "books/atomic-book",
+) -> tuple[BookCoverageManifestUpdate, Path, bytes]:
+    """Create one stale manifest and its source-covered post-retirement replacement."""
+
+    source_locator = "source://atomic-book#chapter-01-paragraph-01"
+    source_sha256 = "a" * 64
+    element_identity = json.dumps(
+        {
+            "kind": "claim",
+            "semantic_unit": "paragraph",
+            "source_locator": source_locator,
+            "source_sha256": source_sha256,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    element_id = f"claim:{hashlib.sha256(element_identity.encode('utf-8')).hexdigest()}"
+    delivery_span = "실제 장 내용이다."
+    structure_title = "1장 실제 내용"
+    structure_identity = json.dumps(
+        {
+            "kind": "chapter",
+            "source_locator": "source://atomic-book#chapter-01",
+            "source_sha256": source_sha256,
+            "title": structure_title,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    structure_id = f"structure:{hashlib.sha256(structure_identity.encode('utf-8')).hexdigest()}"
+    path = vault / "catalog/book-coverage/atomic-book.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    current = {
+        "schema_version": 2,
+        "book_id": "books/atomic-book",
+        "edition": {"label": "검증판", "source_sha256": "d" * 64},
+        "toc_evidence": [{"locator": "source://atomic-book#toc", "verified_on": "2026-09-01"}],
+        "toc_node_count": 1,
+        "toc_leaf_count": 1,
+        "source_structure_inventory_evidence": {
+            "locator": "evidence/source-structure.json",
+            "sha256": "9" * 64,
+            "verified_on": "2026-09-01",
+        },
+        "source_structure_elements": [
+            {
+                "structure_id": structure_id,
+                "kind": "chapter",
+                "title": structure_title,
+                "source_locator": "source://atomic-book#chapter-01",
+                "source_sha256": source_sha256,
+            }
+        ],
+        "source_structure_assignments": [
+            {
+                "structure_id": structure_id,
+                "disposition": "canonical-node",
+                "canonical_id": "books/atomic-book/chapter-01",
+            }
+        ],
+        "retired_source_section_wrappers": [],
+        "source_element_inventory_evidence": {
+            "locator": "evidence/source-elements.json",
+            "sha256": "c" * 64,
+            "verified_on": "2026-09-01",
+            "extraction_method": "manual-semantic-review",
+            "semantic_unit_policy_sha256": "f" * 64,
+        },
+        "source_elements": [
+            {
+                "element_id": element_id,
+                "kind": "claim",
+                "semantic_unit": "paragraph",
+                "source_locator": source_locator,
+                "source_sha256": source_sha256,
+            }
+        ],
+        "source_element_assignments": [
+            {
+                "element_id": element_id,
+                "owner_id": "books/atomic-book/chapter-01",
+                "delivery": "reader-span",
+                "delivery_span": delivery_span,
+                "delivery_span_sha256": hashlib.sha256(delivery_span.encode("utf-8")).hexdigest(),
+            }
+        ],
+        "nodes": [
+            {
+                "canonical_id": "books/atomic-book/chapter-01",
+                "parent_id": "books/atomic-book/part-01",
+                "kind": "chapter",
+                "leaf": True,
+                "has_direct_content": True,
+                "source_locator": "source://atomic-book#chapter-01",
+                "state": "source-covered",
+                "coverage": {
+                    "claims": {"expected": 1, "covered": 1},
+                    "examples": {"expected": 0, "covered": 0},
+                    "cautions": {"expected": 0, "covered": 0},
+                    "figures": {"expected": 0, "covered": 0},
+                    "code": {"expected": 0, "covered": 0},
+                },
+                "runnable": {"expected": 0, "verified": 0},
+                "korean_prose_reviewed": True,
+            }
+        ],
+    }
+    original = (json.dumps(current, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    path.write_bytes(original)
+    replacement = copy.deepcopy(current)
+    replacement["nodes"][0]["parent_id"] = replacement_parent
+    if replacement_parent == "books/atomic-book":
+        replacement["retired_source_section_wrappers"] = [
+            {
+                "wrapper_id": "books/atomic-book/part-01",
+                "map_id": "books/atomic-book",
+                "group_label": "1부",
+                "first_leaf_id": "books/atomic-book/chapter-01",
+                "source_locator": "source://atomic-book#part-01",
+                "relocated_delivery_span": delivery_span,
+                "relocated_delivery_span_sha256": hashlib.sha256(
+                    delivery_span.encode("utf-8")
+                ).hexdigest(),
+            }
+        ]
+    return (
+        BookCoverageManifestUpdate(
+            relative_path="catalog/book-coverage/atomic-book.json",
+            expected_sha256=hashlib.sha256(original).hexdigest(),
+            replacement=replacement,
+        ),
+        path,
+        original,
+    )
+
+
+def atomic_book_leaf_record(
+    vault: Path,
+    service: KnowledgeService,
+    body: str,
+) -> VerifiedBookPage:
+    leaf_id = "books/atomic-book/chapter-01"
+    payload = yaml.safe_load((vault / "catalog/llm-wiki/pages.yaml").read_text(encoding="utf-8"))
+    frontmatter = next(
+        page["frontmatter"] for page in payload["pages"] if page["page_id"] == leaf_id
+    )
+    frontmatter = dict(frontmatter)
+    frontmatter["parent"] = "[[wiki/books/atomic-book|원자적 책]]"
+    return VerifiedBookPage(
+        page_id=leaf_id,
+        title="1장 실제 내용",
+        body=body,
+        statement="퇴역 wrapper의 독자 내용을 실제 장 leaf에 보존한다.",
+        current_use="원자적 책의 실제 장 내용을 읽을 때 사용한다.",
+        source_locator="source://atomic-book#chapter-01",
+        source_sha256="d" * 64,
+        frontmatter=frontmatter,
+        expected_revision=service.get(leaf_id).revision,
+    )
+
+
+def atomic_book_new_coverage_update(
+    vault: Path,
+    *,
+    replacement_parent: str = "books/atomic-book",
+) -> tuple[BookCoverageManifestUpdate, Path]:
+    """Prepare a first coverage manifest without pre-creating its target."""
+
+    existing, path, _ = atomic_book_coverage_update(
+        vault,
+        replacement_parent=replacement_parent,
+    )
+    path.unlink()
+    return replace(existing, expected_sha256=None), path
+
+
+def atomic_book_scoped_coverage_update(
+    vault: Path,
+    *,
+    replacement_parent: str = "books/atomic-book",
+) -> tuple[BookCoverageManifestUpdate, Path, Path, bytes]:
+    """Pin a full TOC while staging only the verified chapter fragment."""
+
+    full_update, base_path, base_bytes = atomic_book_coverage_update(
+        vault,
+        replacement_parent=replacement_parent,
+    )
+    scope_root_id = "books/atomic-book/chapter-01"
+    relative_path = "catalog/book-coverage-scopes/atomic-book/chapter-01.json"
+    replacement = copy.deepcopy(full_update.replacement)
+    replacement["coverage_scope"] = {
+        "root_id": scope_root_id,
+        "base_relative_path": "catalog/book-coverage/atomic-book.json",
+        "base_sha256": hashlib.sha256(base_bytes).hexdigest(),
+    }
+    target = vault / relative_path
+    return (
+        BookCoverageManifestUpdate(
+            mode="merge-scope",
+            relative_path=relative_path,
+            expected_sha256=None,
+            replacement=replacement,
+            base_relative_path="catalog/book-coverage/atomic-book.json",
+            base_expected_sha256=hashlib.sha256(base_bytes).hexdigest(),
+            scope_root_id=scope_root_id,
+        ),
+        target,
+        base_path,
+        base_bytes,
+    )
+
+
 def approve_archive(vault: Path, review_id: str, body: str) -> str:
     """Add a human approval fixture bound to the exact normalized body."""
 
@@ -228,6 +614,199 @@ def add_curated_source(vault: Path, *, purpose: str) -> None:
     pages_path.write_text(
         yaml.safe_dump(pages, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
+
+
+def rights_restore_scope_fixture(
+    vault: Path,
+) -> tuple[CompiledWiki, VerifiedBookPage, VerifiedBookPage, VerifiedBookPage]:
+    book_id = "books/example"
+    chapter_id = f"{book_id}/chapter-01"
+    write_page(vault, f"{book_id}.md", "Example", "기존 책 지도이다.")
+    write_page(
+        vault,
+        f"{chapter_id}.md",
+        "1장",
+        "기존 장 목차이다.",
+    )
+    compiler = CompiledWiki(compiled_settings(vault))
+    compiler.migrate()
+
+    sources_payload = yaml.safe_load(
+        compiler._settings.sources_path.read_text(encoding="utf-8")
+    )
+    claims_payload = yaml.safe_load(
+        compiler._settings.claims_path.read_text(encoding="utf-8")
+    )
+    pages_payload = yaml.safe_load(
+        compiler._settings.pages_path.read_text(encoding="utf-8")
+    )
+    sources_by_id = {item["source_id"]: item for item in sources_payload["sources"]}
+    pages_by_id = {item["page_id"]: item for item in pages_payload["pages"]}
+    for page_id in (book_id, chapter_id):
+        page = pages_by_id[page_id]
+        render_source_id = page["render"]["source_id"]
+        current_source = sources_by_id[render_source_id]
+        suffix = hashlib.sha256(page_id.encode()).hexdigest()[:16]
+        rights_source_id = f"source://book-rights/{book_id}/notice/{suffix}"
+        rights_claim_id = f"claim://book-rights/{book_id}/notice/{suffix}"
+        rights_source = copy.deepcopy(current_source)
+        rights_source.update(
+            {
+                "source_id": rights_source_id,
+                "kind": "book-rights-decision",
+                "locator": f"rights://{page_id}",
+            }
+        )
+        rights_claim = {
+            "claim_id": rights_claim_id,
+            "kind": "book-rights-decision",
+            "status": "accepted",
+            "statement": f"{page_id} 권리 보류",
+            "source_ids": [rights_source_id],
+            "markdown": str(rights_source["body"]),
+        }
+        sources_payload["sources"].append(rights_source)
+        claims_payload["claims"].append(rights_claim)
+        page["source_ids"].append(rights_source_id)
+        page["claim_ids"].append(rights_claim_id)
+
+    compiler._settings.sources_path.write_text(
+        yaml.safe_dump(sources_payload, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    compiler._settings.claims_path.write_text(
+        yaml.safe_dump(claims_payload, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    compiler._settings.pages_path.write_text(
+        yaml.safe_dump(pages_payload, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    def current_record(page_id: str) -> VerifiedBookPage:
+        page = pages_by_id[page_id]
+        source = sources_by_id[page["render"]["source_id"]]
+        output = compiler._settings.output_root / page["output_path"]
+        return VerifiedBookPage(
+            page_id=page_id,
+            title=page["title"],
+            body=source["body"],
+            statement="현재 권리 페이지를 그대로 유지한다.",
+            current_use="현재 권리 페이지를 그대로 유지한다.",
+            source_locator="source://book/example#current",
+            source_sha256="a" * 64,
+            frontmatter=copy.deepcopy(page["frontmatter"]),
+            expected_revision=hashlib.sha256(output.read_bytes()).hexdigest(),
+        )
+
+    root = current_record(book_id)
+    chapter = replace(
+        current_record(chapter_id),
+        body="",
+        frontmatter={
+            **copy.deepcopy(pages_by_id[chapter_id]["frontmatter"]),
+            "navigation_groups": [
+                {"label": "첫 주제", "children": [f"{chapter_id}/1-1"]}
+            ],
+        },
+    )
+    leaf = VerifiedBookPage(
+        page_id=f"{chapter_id}/1-1",
+        title="1.1 첫 절",
+        body="원문 절이다.\n",
+        statement="첫 절 원문이다.",
+        current_use="첫 절을 읽는다.",
+        source_locator="source://book/example#page=1",
+        source_sha256="a" * 64,
+        frontmatter={
+            "access": "local-only",
+            "parent": f"[[wiki/{chapter_id}|1장]]",
+        },
+        expected_revision=None,
+    )
+    return compiler, root, chapter, leaf
+
+
+def test_book_rights_restore_preflight_and_apply_reject_same_omission_before_mutation(
+    tmp_path: Path,
+) -> None:
+    compiler, _, chapter, leaf = rights_restore_scope_fixture(tmp_path)
+    inputs_before = compiler.snapshot_inputs()
+    outputs_before = compiler.snapshot_outputs()
+
+    with pytest.raises(WoonError) as preflight_error:
+        compiler.validate_book_workflow_pages((chapter, leaf), "source-landed")
+    with pytest.raises(WoonError) as apply_error:
+        compiler.apply_verified_book_update(
+            (chapter, leaf),
+            {},
+            {},
+            rights_restore_book_id="books/example",
+        )
+
+    assert str(apply_error.value) == str(preflight_error.value)
+    assert "must replace every surviving rights page: books/example" in str(
+        preflight_error.value
+    )
+    assert compiler.snapshot_inputs() == inputs_before
+    assert compiler.snapshot_outputs() == outputs_before
+
+
+def test_book_rights_restore_requires_exact_carry_forward_and_allows_one_scope(
+    tmp_path: Path,
+) -> None:
+    compiler, root, chapter, leaf = rights_restore_scope_fixture(tmp_path)
+
+    with pytest.raises(WoonError, match="carry-forward changed its body"):
+        compiler.validate_book_workflow_pages(
+            (replace(root, body="변경하면 안 된다.\n"), chapter, leaf),
+            "source-landed",
+        )
+
+    compiler.validate_book_workflow_pages(
+        (root, chapter, leaf),
+        "source-landed",
+    )
+
+
+def test_book_dry_run_uses_resolved_temporary_vault_and_removes_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = tmp_path / "production"
+    (vault / "catalog").mkdir(parents=True)
+    (vault / "catalog/sentinel.txt").write_text("production", encoding="utf-8")
+    (vault / "wiki").mkdir()
+    compiler = CompiledWiki(compiled_settings(vault))
+    seen: dict[str, Path] = {}
+
+    def fake_install(self: CompiledWiki, assets: tuple[StagedBookAsset, ...]) -> None:
+        del self, assets
+
+    def fake_apply(
+        self: CompiledWiki,
+        *args: object,
+        **kwargs: object,
+    ) -> VerifiedBookUpdateReport:
+        del args, kwargs
+        seen["vault"] = self.vault
+        assert self.vault == self.vault.resolve()
+        (self.vault / "catalog/sentinel.txt").write_text("dry-run", encoding="utf-8")
+        return VerifiedBookUpdateReport(0, 0, 0, 0, (), (), ())
+
+    monkeypatch.setattr(CompiledWiki, "install_staged_book_assets", fake_install)
+    monkeypatch.setattr(CompiledWiki, "apply_verified_book_update", fake_apply)
+    coverage = BookCoverageManifestUpdate(
+        mode="replace",
+        relative_path="catalog/book-coverage/example.json",
+        expected_sha256=None,
+        replacement={"book_id": "books/example"},
+    )
+
+    compiler.dry_run_verified_book_update((), {}, {}, coverage)
+
+    assert (vault / "catalog/sentinel.txt").read_text(encoding="utf-8") == "production"
+    assert not seen["vault"].exists()
 
 
 def test_migration_creates_reproducible_source_schema_and_incremental_build(tmp_path: Path) -> None:
@@ -495,6 +1074,1598 @@ def test_curated_revision_preserves_legacy_source_and_archives_prior_curated_bod
         item["status"] == "superseded" and item["kind"] == "curated-document" for item in claims
     )
     assert compiler.audit().complete
+
+
+def test_verified_book_promotion_creates_child_and_archives_prior_revision(
+    tmp_path: Path,
+) -> None:
+    root_id = "books/kotlin-in-action"
+    child_id = f"{root_id}/chapter-01"
+    write_page(
+        tmp_path,
+        f"{root_id}.md",
+        "코틀린 인 액션 2판",
+        "책의 실제 목차를 따른다.",
+    )
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    first = VerifiedBookPage(
+        page_id=child_id,
+        title="1장 코틀린이란 무엇이며 왜 필요한가?",
+        body="## 문제 장면\n\nKotlin이 Java와 함께 동작하는 이유를 추적한다.\n",
+        statement="Kotlin과 Java의 상호운용 경계를 설명한다.",
+        current_use="Kotlin의 설계 목적과 JVM 경계를 학습할 때 사용한다.",
+        source_locator="source://kotlin-in-action-2e#pdf-page=25",
+        source_sha256="a" * 64,
+        frontmatter=verified_book_frontmatter(
+            child_id, "1장 코틀린이란 무엇이며 왜 필요한가?", root_id
+        ),
+    )
+
+    created = compiler.promote_verified_book_pages((first,))
+
+    assert created.curated == 1
+    assert created.compiled == 1
+    output = tmp_path / "wiki/books/kotlin-in-action/chapter-01.md"
+    assert "Kotlin이 Java와 함께 동작하는 이유" in output.read_text(encoding="utf-8")
+    assert compiler.audit().complete
+
+    repeated = compiler.promote_verified_book_pages((first,))
+    assert repeated.curated == 0
+    assert repeated.compiled == 0
+
+    with pytest.raises(
+        WoonError,
+        match="textual callouts must use ① through ⑩",
+    ):
+        compiler.promote_verified_book_pages(
+            (
+                replace(
+                    first,
+                    body="## 문제 장면\n\n```kotlin\nval answer = 42 // ❶\n```\n",
+                ),
+            )
+        )
+
+    second = replace(
+        first,
+        body="## 문제 장면\n\nKotlin과 Java가 같은 JVM type을 공유하는 경계를 추적한다.\n",
+        statement="Kotlin과 Java가 JVM type을 공유하는 경계를 설명한다.",
+    )
+    updated = compiler.promote_verified_book_pages((second,))
+
+    assert updated.curated == 1
+    sources = yaml.safe_load(
+        (tmp_path / "catalog/llm-wiki/sources.yaml").read_text(encoding="utf-8")
+    )["sources"]
+    book_sources = [item for item in sources if item["kind"] == "verified-book"]
+    assert {item["lifecycle"] for item in book_sources} == {"archived", "compiled"}
+    archived_source = next(item for item in book_sources if item["lifecycle"] == "archived")
+    assert archived_source["superseded_by"].startswith(f"source://verified-book/{child_id}/")
+    claims = yaml.safe_load(
+        (tmp_path / "catalog/llm-wiki/claims.yaml").read_text(encoding="utf-8")
+    )["claims"]
+    book_claims = [item for item in claims if item["kind"] == "verified-book-summary"]
+    assert {item["status"] for item in book_claims} == {"accepted", "superseded"}
+    assert compiler.audit().complete
+
+
+def test_verified_book_promotion_uses_page_bound_identity_for_shared_locator(
+    tmp_path: Path,
+) -> None:
+    root_id = "books/shared-source-book"
+    write_page(tmp_path, f"{root_id}.md", "공유 원문 책", "책의 실제 목차를 따른다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    shared_locator = "https://example.com/books/shared-chapter/"
+    records = tuple(
+        VerifiedBookPage(
+            page_id=f"{root_id}/section-{number}",
+            title=f"{number}절",
+            body=f"{number}절의 서로 다른 원문 요소를 설명한다.\n",
+            statement=f"{number}절의 원문 요소를 설명한다.",
+            current_use=f"{number}절을 학습할 때 사용한다.",
+            source_locator=shared_locator,
+            source_sha256="e" * 64,
+            frontmatter={
+                **verified_book_frontmatter(f"{root_id}/section-{number}", f"{number}절", root_id),
+                # A book builder previously copied the common URL here.
+                "source_ids": [shared_locator],
+            },
+        )
+        for number in (1, 2)
+    )
+
+    report = compiler.promote_verified_book_pages(records)
+
+    assert report.compiled == 2
+    metadata_source_ids: list[str] = []
+    for record in records:
+        text = (tmp_path / "wiki" / f"{record.page_id}.md").read_text(encoding="utf-8")
+        frontmatter = yaml.safe_load(text.split("---", 2)[1])
+        source_ids = frontmatter["source_ids"]
+        assert len(source_ids) == 1
+        assert source_ids[0].startswith(f"source://verified-book/{record.page_id}/")
+        assert shared_locator not in source_ids
+        metadata_source_ids.extend(source_ids)
+    assert len(set(metadata_source_ids)) == 2
+
+    sources = yaml.safe_load(
+        (tmp_path / "catalog/llm-wiki/sources.yaml").read_text(encoding="utf-8")
+    )["sources"]
+    verified = [item for item in sources if item["kind"] == "verified-book"]
+    assert len(verified) == 2
+    assert {item["locator"] for item in verified} == {shared_locator}
+    assert {item["source_id"] for item in verified} == set(metadata_source_ids)
+    assert compiler.audit().complete
+
+
+def test_verified_book_promotion_preserves_prior_catalog_provenance(
+    tmp_path: Path,
+) -> None:
+    root_id = "books/provenance-book"
+    child_id = f"{root_id}/chapter-01"
+    write_page(tmp_path, f"{root_id}.md", "근거 보존 책", "책의 실제 목차를 따른다.")
+    write_page(
+        tmp_path,
+        f"{child_id}.md",
+        "1장 기존 내용",
+        "이관 전 원문 근거를 가진 내용이다.",
+    )
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    pages_path = tmp_path / "catalog/llm-wiki/pages.yaml"
+    migrated_pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))["pages"]
+    migrated_child = next(item for item in migrated_pages if item["page_id"] == child_id)
+    legacy_source_id = migrated_child["render"]["source_id"]
+    locator = "https://example.com/books/provenance/chapter-01/"
+    record = VerifiedBookPage(
+        page_id=child_id,
+        title="1장 검증된 내용",
+        body="검증된 원문을 바탕으로 기존 설명을 갱신한다.\n",
+        statement="검증된 1장 내용을 설명한다.",
+        current_use="검증된 1장을 학습할 때 사용한다.",
+        source_locator=locator,
+        source_sha256="f" * 64,
+        frontmatter={
+            **verified_book_frontmatter(child_id, "1장 검증된 내용", root_id),
+            "source_ids": [locator],
+        },
+    )
+
+    compiler.promote_verified_book_pages((record,))
+
+    pages = yaml.safe_load(pages_path.read_text(encoding="utf-8"))["pages"]
+    child = next(item for item in pages if item["page_id"] == child_id)
+    verified_source_id = child["render"]["source_id"]
+    assert legacy_source_id in child["source_ids"]
+    assert verified_source_id in child["source_ids"]
+    assert locator not in child["source_ids"]
+    sources = yaml.safe_load(
+        (tmp_path / "catalog/llm-wiki/sources.yaml").read_text(encoding="utf-8")
+    )["sources"]
+    legacy = next(item for item in sources if item["source_id"] == legacy_source_id)
+    verified = next(item for item in sources if item["source_id"] == verified_source_id)
+    assert legacy["lifecycle"] == "compiled"
+    assert verified["locator"] == locator
+
+    text = (tmp_path / "wiki" / f"{child_id}.md").read_text(encoding="utf-8")
+    frontmatter = yaml.safe_load(text.split("---", 2)[1])
+    assert frontmatter["source_ids"] == [verified_source_id]
+    assert compiler.audit().complete
+
+
+def test_verified_book_service_requires_current_revision_and_rolls_back_index_failure(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
+    index.fail_next = True
+
+    with pytest.raises(RuntimeError, match="injected index failure"):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: wrapper_body_sha256},
+            coverage_update,
+        )
+
+    assert service.get(wrapper_id) is not None
+    assert compiler.audit().complete
+
+    service.apply_verified_book_update(
+        (record,),
+        {wrapper_id: "books/atomic-book"},
+        {wrapper_id: wrapper_revision},
+        {wrapper_id: wrapper_body_sha256},
+        coverage_update,
+    )
+    current = service.get("books/atomic-book")
+    stale = replace(record, expected_revision="stale-revision")
+    with pytest.raises(WoonError, match="changed after it was read"):
+        service.promote_verified_book_pages((stale,), coverage_update)
+    assert service.get("books/atomic-book").revision == current.revision
+
+
+def test_verified_book_asset_preflight_rejects_tampered_staging_bytes(
+    tmp_path: Path,
+) -> None:
+    _, service, _, record, _, _ = atomic_book_service(tmp_path)
+    coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
+    intended = b"original source image"
+    digest = hashlib.sha256(intended).hexdigest()
+    source_locator = "source://atomic-book#images/figure.png"
+    relative = (
+        "wiki/private/_sources/knowledge/local-only/atomic-book/images/figure.png"
+    )
+    coverage_update.replacement["source_asset_inventory"] = [
+        {
+            "asset_id": f"asset:{digest}",
+            "source_locator": source_locator,
+            "source_sha256": digest,
+            "archive_relative_path": relative,
+            "archive_sha256": digest,
+            "extraction_kind": "embedded-original",
+            "crop_provenance": None,
+        }
+    ]
+    staging = tmp_path / "staged-source-assets/figure.png"
+    staging.parent.mkdir()
+    staging.write_bytes(b"tampered source image")
+    asset = StagedBookAsset(
+        staging_path=staging,
+        archive_relative_path=relative,
+        sha256=digest,
+        size=len(intended),
+        provenance="embedded-original-byte-identical",
+        source_entry_locator=source_locator,
+    )
+
+    with pytest.raises(WoonError, match="source size or hash does not match"):
+        service.preflight_verified_book_update((record,), {}, {}, {}, coverage_update, (asset,))
+
+    assert not (tmp_path / relative).exists()
+
+
+def scan_crop_asset_fixture(
+    tmp_path: Path,
+) -> tuple[CompiledWiki, BookCoverageManifestUpdate, StagedBookAsset]:
+    """Prepare one PDF-bound crop without mutating the private archive target."""
+
+    compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
+    coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
+    pdf_relative = (
+        "wiki/private/_sources/knowledge/local-only/atomic-book/Atomic Book.pdf"
+    )
+    pdf_path = tmp_path / pdf_relative
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    with pdf_path.open("wb") as stream:
+        writer.write(stream)
+    pdf_digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    coverage_update.replacement["edition"]["source_sha256"] = pdf_digest
+    coverage_update.replacement["source_archive"] = {
+        "relative_path": pdf_relative,
+        "actual_title": "Atomic Book",
+        "sha256": pdf_digest,
+        "privacy": "local-only",
+    }
+
+    crop_box = [10, 10, 200, 200]
+    rendered_page = compiled_wiki_module._render_pdf_page_png(pdf_path, 1, 300)
+    crop_bytes = compiled_wiki_module._crop_png(rendered_page, tuple(crop_box))
+    crop_digest = hashlib.sha256(crop_bytes).hexdigest()
+    page_locator = "source://atomic-book/Atomic%20Book.pdf#PDF-page-1"
+    source_locator = f"{page_locator}:crop-10,10,200,200"
+    archive_relative = (
+        "wiki/private/_sources/knowledge/local-only/"
+        "atomic-book/images/chapter-01/figure-1-1.png"
+    )
+    coverage_update.replacement["source_asset_inventory"] = [
+        {
+            "asset_id": f"asset:{crop_digest}",
+            "source_locator": source_locator,
+            "source_sha256": crop_digest,
+            "archive_relative_path": archive_relative,
+            "archive_sha256": crop_digest,
+            "extraction_kind": "scan-crop",
+            "crop_provenance": {
+                "page_locator": page_locator,
+                "crop_box": crop_box,
+                "render_dpi": 300,
+                "source_page_sha256": hashlib.sha256(rendered_page).hexdigest(),
+            },
+        }
+    ]
+    staging = tmp_path / "staged-source-assets/figure-1-1.png"
+    staging.parent.mkdir()
+    staging.write_bytes(crop_bytes)
+    asset = StagedBookAsset(
+        staging_path=staging,
+        archive_relative_path=archive_relative,
+        sha256=crop_digest,
+        size=len(crop_bytes),
+        provenance="scan-crop-with-pinned-page-and-box",
+        source_entry_locator=source_locator,
+    )
+    return compiler, coverage_update, asset
+
+
+def test_verified_book_asset_preflight_accepts_pdf_bound_scan_crop(tmp_path: Path) -> None:
+    compiler, coverage_update, asset = scan_crop_asset_fixture(tmp_path)
+
+    counts = compiler.validate_staged_book_assets((asset,), coverage_update)
+
+    assert counts == (1, 0)
+    assert not (tmp_path / asset.archive_relative_path).exists()
+
+
+def test_verified_book_asset_preflight_rejects_scan_crop_source_pdf_hash(
+    tmp_path: Path,
+) -> None:
+    compiler, coverage_update, asset = scan_crop_asset_fixture(tmp_path)
+    coverage_update.replacement["source_archive"]["sha256"] = "f" * 64
+
+    with pytest.raises(WoonError, match="source PDF hash does not match"):
+        compiler.validate_staged_book_assets((asset,), coverage_update)
+
+
+def test_verified_book_asset_preflight_rejects_scan_crop_box_locator_mismatch(
+    tmp_path: Path,
+) -> None:
+    compiler, coverage_update, asset = scan_crop_asset_fixture(tmp_path)
+    inventory = coverage_update.replacement["source_asset_inventory"]
+    inventory[0]["crop_provenance"]["crop_box"] = [160, 160, 1800, 1000]
+
+    with pytest.raises(WoonError, match="locator and crop box do not match"):
+        compiler.validate_staged_book_assets((asset,), coverage_update)
+
+
+def test_verified_book_asset_preflight_rejects_scan_crop_page_out_of_range(
+    tmp_path: Path,
+) -> None:
+    compiler, coverage_update, asset = scan_crop_asset_fixture(tmp_path)
+    inventory = coverage_update.replacement["source_asset_inventory"]
+    page_locator = "source://atomic-book/Atomic%20Book.pdf#PDF-page-2"
+    source_locator = f"{page_locator}:crop-10,10,200,200"
+    inventory[0]["source_locator"] = source_locator
+    inventory[0]["crop_provenance"]["page_locator"] = page_locator
+    asset = replace(asset, source_entry_locator=source_locator)
+
+    with pytest.raises(WoonError, match="page is outside the source PDF"):
+        compiler.validate_staged_book_assets((asset,), coverage_update)
+
+
+def test_verified_book_asset_preflight_rejects_scan_crop_rendered_page_hash(
+    tmp_path: Path,
+) -> None:
+    compiler, coverage_update, asset = scan_crop_asset_fixture(tmp_path)
+    inventory = coverage_update.replacement["source_asset_inventory"]
+    inventory[0]["crop_provenance"]["source_page_sha256"] = "f" * 64
+
+    with pytest.raises(WoonError, match="rendered page hash does not match"):
+        compiler.validate_staged_book_assets((asset,), coverage_update)
+
+
+def test_verified_book_asset_preflight_rejects_unreproducible_scan_crop_output(
+    tmp_path: Path,
+) -> None:
+    compiler, coverage_update, asset = scan_crop_asset_fixture(tmp_path)
+    altered = b"not the crop selected by the pinned page and box"
+    altered_sha256 = hashlib.sha256(altered).hexdigest()
+    asset.staging_path.write_bytes(altered)
+    asset = replace(asset, sha256=altered_sha256, size=len(altered))
+    inventory = coverage_update.replacement["source_asset_inventory"]
+    inventory[0]["source_sha256"] = altered_sha256
+    inventory[0]["archive_sha256"] = altered_sha256
+
+    with pytest.raises(WoonError, match="output cannot be reproduced"):
+        compiler.validate_staged_book_assets((asset,), coverage_update)
+
+
+def test_verified_book_asset_preflight_rejects_destination_traversal(
+    tmp_path: Path,
+) -> None:
+    _, service, _, record, _, _ = atomic_book_service(tmp_path)
+    coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
+    content = b"source image"
+    digest = hashlib.sha256(content).hexdigest()
+    source_locator = "source://atomic-book#images/figure.png"
+    relative = "wiki/private/_sources/knowledge/local-only/../../outside.png"
+    coverage_update.replacement["source_asset_inventory"] = [
+        {
+            "asset_id": f"asset:{digest}",
+            "source_locator": source_locator,
+            "source_sha256": digest,
+            "archive_relative_path": relative,
+            "archive_sha256": digest,
+            "extraction_kind": "embedded-original",
+            "crop_provenance": None,
+        }
+    ]
+    staging = tmp_path / "staged-source-assets/figure.png"
+    staging.parent.mkdir()
+    staging.write_bytes(content)
+    asset = StagedBookAsset(
+        staging_path=staging,
+        archive_relative_path=relative,
+        sha256=digest,
+        size=len(content),
+        provenance="embedded-original-byte-identical",
+        source_entry_locator=source_locator,
+    )
+
+    with pytest.raises(WoonError, match="private source image archive"):
+        service.preflight_verified_book_update((record,), {}, {}, {}, coverage_update, (asset,))
+
+
+def test_verified_book_asset_landing_rolls_back_new_and_preserves_existing_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiler, service, _, record, _, _ = atomic_book_service(tmp_path)
+    coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
+    inventory: list[dict[str, object]] = []
+    assets: list[StagedBookAsset] = []
+    destinations: list[Path] = []
+    for name in ("new.png", "existing.png"):
+        content = f"source-{name}".encode()
+        digest = hashlib.sha256(content).hexdigest()
+        source_locator = f"source://atomic-book#images/{name}"
+        relative = (
+            "wiki/private/_sources/knowledge/local-only/"
+            f"atomic-book/images/{name}"
+        )
+        staging = tmp_path / f"staged-source-assets/{name}"
+        staging.parent.mkdir(exist_ok=True)
+        staging.write_bytes(content)
+        inventory.append(
+            {
+                "asset_id": f"asset:{digest}",
+                "source_locator": source_locator,
+                "source_sha256": digest,
+                "archive_relative_path": relative,
+                "archive_sha256": digest,
+                "extraction_kind": "embedded-original",
+                "crop_provenance": None,
+            }
+        )
+        assets.append(
+            StagedBookAsset(
+                staging_path=staging,
+                archive_relative_path=relative,
+                sha256=digest,
+                size=len(content),
+                provenance="embedded-original-byte-identical",
+                source_entry_locator=source_locator,
+            )
+        )
+        destinations.append(tmp_path / relative)
+    coverage_update.replacement["source_asset_inventory"] = inventory
+    destinations[1].parent.mkdir(parents=True)
+    existing_bytes = assets[1].staging_path.read_bytes()
+    destinations[1].write_bytes(existing_bytes)
+
+    def fail_after_asset_install(*_args: object, **_kwargs: object) -> None:
+        assert destinations[0].is_file()
+        assert destinations[1].read_bytes() == existing_bytes
+        raise RuntimeError("injected book transaction failure")
+
+    monkeypatch.setattr(compiler, "apply_verified_book_update", fail_after_asset_install)
+
+    with pytest.raises(RuntimeError, match="injected book transaction failure"):
+        service.apply_verified_book_update(
+            (record,), {}, {}, {}, coverage_update, tuple(assets)
+        )
+
+    assert not destinations[0].exists()
+    assert destinations[1].read_bytes() == existing_bytes
+
+
+def test_verified_book_promotion_accepts_existing_uncompiled_wiki_parent(
+    tmp_path: Path,
+) -> None:
+    write_page(tmp_path, "seed.md", "시드", "compiler catalog를 초기화한다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    write_page(
+        tmp_path,
+        "books/programming-language.md",
+        "프로그래밍 언어",
+        "책을 언어별로 찾는다.",
+    )
+    page_id = "personal/kotlin-in-action"
+    record = VerifiedBookPage(
+        page_id=page_id,
+        title="코틀린 인 액션 2판",
+        body="실제 책 목차를 따라 학습한다.\n",
+        statement="실제 책 목차를 설명한다.",
+        current_use="Kotlin 책의 장을 찾을 때 사용한다.",
+        source_locator="source://kotlin-in-action-2e#toc",
+        source_sha256="c" * 64,
+        frontmatter=verified_book_frontmatter(
+            page_id, "코틀린 인 액션 2판", "books/programming-language"
+        ),
+    )
+
+    report = compiler.promote_verified_book_pages((record,))
+
+    assert report.compiled == 1
+    assert compiler.audit().complete
+
+
+def test_atomic_verified_book_update_promotes_retires_compiles_and_reindexes_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    root_id = "books/atomic-book"
+    leaf_id = "books/atomic-book/chapter-01"
+    compile_calls = 0
+    rebuild_calls = 0
+    original_compile = compiler.compile
+    original_rebuild = index.rebuild
+
+    def counted_compile(*args: object, **kwargs: object):
+        nonlocal compile_calls
+        compile_calls += 1
+        return original_compile(*args, **kwargs)
+
+    def counted_rebuild(documents: list[IndexedDocument]) -> int:
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        return original_rebuild(documents)
+
+    monkeypatch.setattr(compiler, "compile", counted_compile)
+    monkeypatch.setattr(index, "rebuild", counted_rebuild)
+
+    report = service.apply_verified_book_update(
+        (record,),
+        {wrapper_id: root_id},
+        {wrapper_id: wrapper_revision},
+        {wrapper_id: wrapper_body_sha256},
+    )
+
+    assert report.curated == 1
+    assert report.retired == 1
+    assert report.retired_page_ids == (wrapper_id,)
+    assert compile_calls == 1
+    assert rebuild_calls == 1
+    with pytest.raises(WoonError, match="canonical document not found"):
+        service.get(wrapper_id)
+    assert not (tmp_path / f"wiki/{wrapper_id}.md").exists()
+    pages = yaml.safe_load((tmp_path / "catalog/llm-wiki/pages.yaml").read_text(encoding="utf-8"))[
+        "pages"
+    ]
+    by_id = {page["page_id"]: page for page in pages}
+    assert by_id[leaf_id]["frontmatter"]["parent"] == f"[[wiki/{root_id}|1부]]"
+    assert by_id[root_id]["frontmatter"]["navigation_groups"] == [
+        {"label": "1부", "children": [leaf_id]}
+    ]
+    sources = yaml.safe_load(
+        (tmp_path / "catalog/llm-wiki/sources.yaml").read_text(encoding="utf-8")
+    )["sources"]
+    promoted_source = next(
+        item for item in sources if item["source_id"] == by_id[root_id]["render"]["source_id"]
+    )
+    retired_source = next(item for item in sources if item["locator"] == f"{wrapper_id}.md")
+    assert promoted_source["locator"] == record.source_locator
+    assert retired_source["locator"] == f"{wrapper_id}.md"
+    assert retired_source["lifecycle"] == "archived"
+    assert retired_source["superseded_by"] == promoted_source["source_id"]
+    assert compiler.audit().complete
+
+
+def test_atomic_verified_book_update_accepts_empty_authored_book_map_body(
+    tmp_path: Path,
+) -> None:
+    _, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(tmp_path)
+
+    report = service.apply_verified_book_update(
+        (replace(record, body=""),),
+        {"books/atomic-book/part-01": "books/atomic-book"},
+        {"books/atomic-book/part-01": wrapper_revision},
+        {"books/atomic-book/part-01": wrapper_body_sha256},
+    )
+
+    assert report.retired_page_ids == ("books/atomic-book/part-01",)
+    rendered = (tmp_path / "wiki/books/atomic-book.md").read_text(encoding="utf-8")
+    metadata, body = split_markdown(rendered)
+    assert metadata["navigation_groups"] == [
+        {"label": "1부", "children": ["books/atomic-book/chapter-01"]}
+    ]
+    assert body.strip() == (
+        "# 원자적 책\n\n"
+        "<!-- woon-wiki-children:start -->\n"
+        "## 1부\n"
+        "- [[wiki/books/atomic-book/chapter-01|1장 실제 내용]]\n"
+        "<!-- woon-wiki-children:end -->"
+    )
+
+
+def test_verified_book_promotion_rejects_empty_leaf_body(tmp_path: Path) -> None:
+    write_page(tmp_path, "seed.md", "시드", "컴파일러 catalog를 초기화한다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    service = KnowledgeService(
+        MarkdownDocumentRepository(tmp_path, tmp_path / "wiki"),
+        FailOnceIndex(tmp_path / ".local/search.sqlite3"),
+        GitKnowledgeHistory(tmp_path),
+        compiled_wiki=compiler,
+    )
+    page_id = "books/atomic-book/chapter-01"
+    record = VerifiedBookPage(
+        page_id=page_id,
+        title="1장",
+        body="",
+        statement="빈 leaf를 허용하지 않는다.",
+        current_use="검증용이다.",
+        source_locator="source://atomic-book#chapter-01",
+        source_sha256="d" * 64,
+        frontmatter=verified_book_frontmatter(page_id, "1장", "books/atomic-book"),
+    )
+
+    with pytest.raises(WoonError, match="body must be a non-empty string"):
+        service.promote_verified_book_pages((record,))
+
+
+def test_atomic_verified_book_update_replaces_coverage_manifest_in_same_transaction(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    coverage_update, coverage_path, _ = atomic_book_coverage_update(tmp_path)
+    wrapper_id = "books/atomic-book/part-01"
+
+    report = service.apply_verified_book_update(
+        (record,),
+        {wrapper_id: "books/atomic-book"},
+        {wrapper_id: wrapper_revision},
+        {wrapper_id: wrapper_body_sha256},
+        coverage_update,
+    )
+
+    assert report.retired_page_ids == (wrapper_id,)
+    assert json.loads(coverage_path.read_text(encoding="utf-8")) == coverage_update.replacement
+    assert coverage_path.read_bytes() == (
+        json.dumps(
+            coverage_update.replacement,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def test_scoped_book_preflight_is_read_only_and_preserves_full_manifest(
+    tmp_path: Path,
+) -> None:
+    _, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(tmp_path)
+    update, target, base_path, base_bytes = atomic_book_scoped_coverage_update(tmp_path)
+    generation_before = index.generation()
+
+    report = service.preflight_verified_book_update(
+        (record,),
+        {"books/atomic-book/part-01": "books/atomic-book"},
+        {"books/atomic-book/part-01": wrapper_revision},
+        {"books/atomic-book/part-01": wrapper_body_sha256},
+        update,
+    )
+
+    assert report.ready is True
+    assert report.coverage_mode == "merge-scope"
+    assert report.base_manifest_preserved is True
+    assert not target.exists()
+    assert base_path.read_bytes() == base_bytes
+    assert index.generation() == generation_before
+
+
+def test_scoped_book_preflight_rejects_unpreserved_wrapper_reader_body(
+    tmp_path: Path,
+) -> None:
+    reader_body = "1부가 이 책의 가상화 흐름을 소개한다.\n"
+    compiler, service, index, _, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path,
+        wrapper_body=reader_body,
+    )
+    update, target, base_path, base_bytes = atomic_book_scoped_coverage_update(tmp_path)
+    leaf_id = "books/atomic-book/chapter-01"
+    leaf_record = atomic_book_leaf_record(tmp_path, service, "실제 장 내용이다.\n")
+    input_before = compiler.snapshot_inputs(extra_paths=(target,))
+    generation_before = index.generation()
+
+    with pytest.raises(WoonError, match="reader content is not preserved"):
+        service.preflight_verified_book_update(
+            (leaf_record,),
+            {"books/atomic-book/part-01": leaf_id},
+            {"books/atomic-book/part-01": wrapper_revision},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+            update,
+        )
+
+    assert compiler.snapshot_inputs(extra_paths=(target,)) == input_before
+    assert not target.exists()
+    assert base_path.read_bytes() == base_bytes
+    assert index.generation() == generation_before
+
+
+def test_scoped_book_preflight_accepts_exact_wrapper_reader_body_in_first_leaf(
+    tmp_path: Path,
+) -> None:
+    reader_body = "1부가 이 책의 가상화 흐름을 소개한다.\n"
+    _, service, index, _, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path,
+        wrapper_body=reader_body,
+    )
+    update, target, base_path, base_bytes = atomic_book_scoped_coverage_update(tmp_path)
+    leaf_id = "books/atomic-book/chapter-01"
+    leaf_record = atomic_book_leaf_record(
+        tmp_path,
+        service,
+        f"실제 장 내용이다.\n\n{reader_body}",
+    )
+    generation_before = index.generation()
+
+    report = service.preflight_verified_book_update(
+        (leaf_record,),
+        {"books/atomic-book/part-01": leaf_id},
+        {"books/atomic-book/part-01": wrapper_revision},
+        {"books/atomic-book/part-01": wrapper_body_sha256},
+        update,
+    )
+
+    assert report.ready is True
+    assert not target.exists()
+    assert base_path.read_bytes() == base_bytes
+    assert index.generation() == generation_before
+
+
+def test_atomic_scoped_book_update_writes_only_verified_fragment(
+    tmp_path: Path,
+) -> None:
+    _, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(tmp_path)
+    update, target, base_path, base_bytes = atomic_book_scoped_coverage_update(tmp_path)
+
+    report = service.apply_verified_book_update(
+        (record,),
+        {"books/atomic-book/part-01": "books/atomic-book"},
+        {"books/atomic-book/part-01": wrapper_revision},
+        {"books/atomic-book/part-01": wrapper_body_sha256},
+        update,
+    )
+
+    assert report.retired_page_ids == ("books/atomic-book/part-01",)
+    assert json.loads(target.read_text(encoding="utf-8")) == update.replacement
+    assert base_path.read_bytes() == base_bytes
+
+
+def test_scoped_book_update_rejects_base_manifest_drift_before_mutation(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    update, target, base_path, _ = atomic_book_scoped_coverage_update(tmp_path)
+    base_path.write_text('{"changed": true}\n', encoding="utf-8")
+    input_before = compiler.snapshot_inputs(extra_paths=(base_path, target))
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+
+    with pytest.raises(WoonError, match="base manifest changed after scope review"):
+        service.apply_verified_book_update(
+            (record,),
+            {"books/atomic-book/part-01": "books/atomic-book"},
+            {"books/atomic-book/part-01": wrapper_revision},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+            update,
+        )
+
+    assert compiler.snapshot_inputs(extra_paths=(base_path, target)) == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert not target.exists()
+
+
+def test_atomic_scoped_book_update_rolls_back_failed_scope_audit(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    update, target, base_path, base_bytes = atomic_book_scoped_coverage_update(
+        tmp_path,
+        replacement_parent="books/wrong-parent",
+    )
+    input_before = compiler.snapshot_inputs(extra_paths=(target,))
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+
+    with pytest.raises(WoonError, match="stale scoped book coverage"):
+        service.apply_verified_book_update(
+            (record,),
+            {"books/atomic-book/part-01": "books/atomic-book"},
+            {"books/atomic-book/part-01": wrapper_revision},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+            update,
+        )
+
+    assert compiler.snapshot_inputs(extra_paths=(target,)) == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert not target.exists()
+    assert base_path.read_bytes() == base_bytes
+
+
+def test_verified_book_promotion_replaces_coverage_manifest_without_retirement(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    service.apply_verified_book_update(
+        (record,),
+        {wrapper_id: "books/atomic-book"},
+        {wrapper_id: wrapper_revision},
+        {wrapper_id: wrapper_body_sha256},
+    )
+    coverage_update, coverage_path, _ = atomic_book_coverage_update(
+        tmp_path,
+        replacement_parent="books/atomic-book",
+    )
+    coverage_update.replacement["edition"]["label"] = "검증판 개정"
+    record = replace(record, expected_revision=service.get("books/atomic-book").revision)
+
+    report = service.promote_verified_book_pages((record,), coverage_update)
+
+    assert report.curated == 0
+    assert json.loads(coverage_path.read_text(encoding="utf-8")) == coverage_update.replacement
+
+
+def test_verified_book_promotion_creates_first_coverage_manifest_atomically(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    coverage_update, coverage_path = atomic_book_new_coverage_update(tmp_path)
+
+    report = service.apply_verified_book_update(
+        (record,),
+        {"books/atomic-book/part-01": "books/atomic-book"},
+        {"books/atomic-book/part-01": wrapper_revision},
+        {"books/atomic-book/part-01": wrapper_body_sha256},
+        coverage_update,
+    )
+
+    assert report.retired_page_ids == ("books/atomic-book/part-01",)
+    assert json.loads(coverage_path.read_text(encoding="utf-8")) == coverage_update.replacement
+
+
+def test_book_coverage_manifest_rejects_existing_file_without_revision(
+    tmp_path: Path,
+) -> None:
+    compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
+    coverage_update, coverage_path, _ = atomic_book_coverage_update(tmp_path)
+
+    with pytest.raises(WoonError, match="existing book coverage manifest requires"):
+        compiler.validate_book_coverage_manifest_update(
+            replace(coverage_update, expected_sha256=None)
+        )
+
+    assert coverage_path.is_file()
+
+
+def test_book_coverage_manifest_rejects_missing_file_with_revision(
+    tmp_path: Path,
+) -> None:
+    compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
+    coverage_update, coverage_path, _ = atomic_book_coverage_update(tmp_path)
+    coverage_path.unlink()
+
+    with pytest.raises(WoonError, match="new book coverage manifest requires"):
+        compiler.validate_book_coverage_manifest_update(coverage_update)
+
+    assert not coverage_path.exists()
+
+
+def test_book_coverage_manifest_revalidates_missing_to_existing_race(
+    tmp_path: Path,
+) -> None:
+    compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
+    coverage_update, coverage_path = atomic_book_new_coverage_update(tmp_path)
+    assert compiler.validate_book_coverage_manifest_update(coverage_update) == coverage_path
+
+    coverage_path.write_text('{"concurrent": true}\n', encoding="utf-8")
+
+    with pytest.raises(WoonError, match="existing book coverage manifest requires"):
+        compiler.validate_book_coverage_manifest_update(coverage_update)
+
+
+def test_book_coverage_manifest_rejects_symlink_and_non_regular_target(
+    tmp_path: Path,
+) -> None:
+    compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
+    update, path = atomic_book_new_coverage_update(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    path.symlink_to(outside)
+
+    with pytest.raises(WoonError, match="must not use symlinks"):
+        compiler.validate_book_coverage_manifest_update(update)
+
+    path.unlink()
+    path.mkdir()
+    with pytest.raises(WoonError, match="must be a regular file"):
+        compiler.validate_book_coverage_manifest_update(update)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "../catalog/book-coverage/atomic-book.json",
+        "catalog/book-coverage/nested/atomic-book.json",
+        "catalog/atomic-book.json",
+        "/catalog/book-coverage/atomic-book.json",
+        "catalog\\book-coverage\\atomic-book.json",
+    ),
+)
+def test_book_coverage_manifest_rejects_noncanonical_path(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
+    update, _ = atomic_book_new_coverage_update(tmp_path)
+
+    with pytest.raises(WoonError, match="one JSON file under catalog/book-coverage"):
+        compiler.validate_book_coverage_manifest_update(
+            replace(update, relative_path=relative_path)
+        )
+
+
+def test_atomic_verified_book_update_allows_unchanged_unrelated_coverage_error(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
+    unrelated_id = "books/unrelated-in-progress"
+    unrelated_frontmatter = verified_book_frontmatter(unrelated_id, "집필 중인 다른 책")
+    unrelated_frontmatter["entity_kind"] = "book"
+    compiler.promote_verified_book_pages(
+        (
+            VerifiedBookPage(
+                page_id=unrelated_id,
+                title="집필 중인 다른 책",
+                body="이 책은 아직 집필 중이다.\n",
+                statement="집필 중인 책의 현재 범위를 설명한다.",
+                current_use="다른 책의 진행 상태를 확인할 때 사용한다.",
+                source_locator="source://unrelated-book#toc",
+                source_sha256="e" * 64,
+                frontmatter=unrelated_frontmatter,
+            ),
+        )
+    )
+    before = audit_book_coverage(tmp_path)
+    unrelated_error = "books/unrelated-in-progress: book coverage manifest is missing"
+    assert unrelated_error in before.errors
+
+    report = service.apply_verified_book_update(
+        (record,),
+        {"books/atomic-book/part-01": "books/atomic-book"},
+        {"books/atomic-book/part-01": wrapper_revision},
+        {"books/atomic-book/part-01": wrapper_body_sha256},
+        coverage_update,
+    )
+
+    assert report.retired_page_ids == ("books/atomic-book/part-01",)
+    assert audit_book_coverage(tmp_path).errors == (unrelated_error,)
+
+
+def test_atomic_verified_book_update_rejects_stale_coverage_manifest_before_mutation(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    coverage_update, coverage_path, original = atomic_book_coverage_update(tmp_path)
+    stale_update = replace(coverage_update, expected_sha256="0" * 64)
+    input_before = compiler.snapshot_inputs(extra_paths=(coverage_path,))
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+
+    with pytest.raises(WoonError, match="coverage manifest changed after review"):
+        service.apply_verified_book_update(
+            (record,),
+            {"books/atomic-book/part-01": "books/atomic-book"},
+            {"books/atomic-book/part-01": wrapper_revision},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+            stale_update,
+        )
+
+    assert compiler.snapshot_inputs(extra_paths=(coverage_path,)) == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert coverage_path.read_bytes() == original
+
+
+def test_atomic_verified_book_update_rolls_back_manifest_on_coverage_audit_failure(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    coverage_update, coverage_path, original = atomic_book_coverage_update(
+        tmp_path,
+        replacement_parent="books/wrong-parent",
+    )
+    input_before = compiler.snapshot_inputs(extra_paths=(coverage_path,))
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+
+    with pytest.raises(WoonError, match="left stale book coverage"):
+        service.apply_verified_book_update(
+            (record,),
+            {"books/atomic-book/part-01": "books/atomic-book"},
+            {"books/atomic-book/part-01": wrapper_revision},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+            coverage_update,
+        )
+
+    assert compiler.snapshot_inputs(extra_paths=(coverage_path,)) == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert coverage_path.read_bytes() == original
+    assert service.get("books/atomic-book/part-01") is not None
+
+
+def test_atomic_verified_book_update_rolls_back_sparse_count_only_manifest(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    coverage_update, coverage_path, original = atomic_book_coverage_update(tmp_path)
+    coverage_update.replacement["source_elements"] = []
+    coverage_update.replacement["source_element_assignments"] = []
+    input_before = compiler.snapshot_inputs(extra_paths=(coverage_path,))
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+
+    with pytest.raises(WoonError, match="left stale book coverage"):
+        service.apply_verified_book_update(
+            (record,),
+            {"books/atomic-book/part-01": "books/atomic-book"},
+            {"books/atomic-book/part-01": wrapper_revision},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+            coverage_update,
+        )
+
+    assert compiler.snapshot_inputs(extra_paths=(coverage_path,)) == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert coverage_path.read_bytes() == original
+    assert service.get("books/atomic-book/part-01") is not None
+
+
+def test_atomic_verified_book_update_removes_new_manifest_on_coverage_audit_failure(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    coverage_update, coverage_path = atomic_book_new_coverage_update(
+        tmp_path,
+        replacement_parent="books/wrong-parent",
+    )
+    input_before = compiler.snapshot_inputs(extra_paths=(coverage_path,))
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+
+    with pytest.raises(WoonError, match="left stale book coverage"):
+        service.apply_verified_book_update(
+            (record,),
+            {"books/atomic-book/part-01": "books/atomic-book"},
+            {"books/atomic-book/part-01": wrapper_revision},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+            coverage_update,
+        )
+
+    assert compiler.snapshot_inputs(extra_paths=(coverage_path,)) == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert not coverage_path.exists()
+    assert service.get("books/atomic-book/part-01") is not None
+
+
+def test_atomic_verified_book_update_restores_inputs_outputs_and_index_on_failure(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    root_id = "books/atomic-book"
+    input_before = compiler.snapshot_inputs()
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+    index.fail_next = True
+
+    with pytest.raises(RuntimeError, match="injected index failure"):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: root_id},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: wrapper_body_sha256},
+        )
+
+    assert compiler.snapshot_inputs() == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert service.get(wrapper_id) is not None
+    assert compiler.audit().complete
+
+
+def test_atomic_verified_book_update_restores_compiler_state_on_final_audit_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    root_id = "books/atomic-book"
+    input_before = compiler.snapshot_inputs()
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+    original_audit = compiler.audit
+    failed_once = False
+
+    def fail_final_audit_once() -> CompilationAudit:
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            return CompilationAudit(0, 0, ("injected final audit failure",))
+        return original_audit()
+
+    monkeypatch.setattr(compiler, "audit", fail_final_audit_once)
+
+    with pytest.raises(WoonError, match="injected final audit failure"):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: root_id},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: wrapper_body_sha256},
+        )
+
+    assert compiler.snapshot_inputs() == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert original_audit().complete
+
+
+def test_atomic_verified_book_update_rolls_back_tree_side_effect_on_refresh_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    root_path = tmp_path / "wiki/books/atomic-book.md"
+    input_before = compiler.snapshot_inputs()
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+
+    def fail_after_tree_side_effect(vault: Path, report: object) -> None:
+        del vault, report
+        root_path.write_text("injected partial tree write\n", encoding="utf-8")
+        raise RuntimeError("injected tree refresh failure")
+
+    monkeypatch.setattr(
+        compiled_wiki_module,
+        "apply_wiki_tree_refresh",
+        fail_after_tree_side_effect,
+    )
+
+    with pytest.raises(RuntimeError, match="injected tree refresh failure"):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: wrapper_body_sha256},
+        )
+
+    assert compiler.snapshot_inputs() == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert service.get(wrapper_id) is not None
+
+
+def test_atomic_verified_book_update_rolls_back_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    root_path = tmp_path / "wiki/books/atomic-book.md"
+    input_before = compiler.snapshot_inputs()
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+
+    def interrupt_after_tree_side_effect(vault: Path, report: object) -> None:
+        del vault, report
+        root_path.write_text("injected interrupted tree write\n", encoding="utf-8")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        compiled_wiki_module,
+        "apply_wiki_tree_refresh",
+        interrupt_after_tree_side_effect,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: wrapper_body_sha256},
+        )
+
+    assert compiler.snapshot_inputs() == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert service.get(wrapper_id) is not None
+
+
+def test_atomic_verified_book_update_rolls_back_index_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    input_before = compiler.snapshot_inputs()
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+    original_rebuild = index.rebuild
+    interrupted = False
+
+    def interrupt_once(documents: list[IndexedDocument]) -> int:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return original_rebuild(documents)
+
+    monkeypatch.setattr(index, "rebuild", interrupt_once)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: wrapper_body_sha256},
+        )
+
+    assert compiler.snapshot_inputs() == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert service.get(wrapper_id) is not None
+
+
+def test_atomic_verified_book_update_rolls_back_tree_on_rendered_ui_audit_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    coverage_update, coverage_path, _ = atomic_book_coverage_update(tmp_path)
+    wrapper_id = "books/atomic-book/part-01"
+    root_path = tmp_path / "wiki/books/atomic-book.md"
+    input_before = compiler.snapshot_inputs(extra_paths=(coverage_path,))
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+    original_apply = compiled_wiki_module.apply_wiki_tree_refresh
+
+    def apply_stale_rendered_link(vault: Path, report: object) -> None:
+        original_apply(vault, report)
+        current = root_path.read_text(encoding="utf-8")
+        root_path.write_text(
+            current.replace(
+                "[[wiki/books/atomic-book/chapter-01|",
+                "[[wiki/books/atomic-book/stale-chapter|",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        compiled_wiki_module,
+        "apply_wiki_tree_refresh",
+        apply_stale_rendered_link,
+    )
+
+    with pytest.raises(WoonError, match="left stale book coverage"):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: wrapper_body_sha256},
+            coverage_update,
+        )
+
+    assert compiler.snapshot_inputs(extra_paths=(coverage_path,)) == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+    assert service.get(wrapper_id) is not None
+
+
+def test_atomic_verified_book_update_rejects_stale_retirement_before_mutation(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, _, wrapper_body_sha256 = atomic_book_service(tmp_path)
+    input_before = compiler.snapshot_inputs()
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+
+    with pytest.raises(WoonError, match="retired book page changed after it was read"):
+        service.apply_verified_book_update(
+            (record,),
+            {"books/atomic-book/part-01": "books/atomic-book"},
+            {"books/atomic-book/part-01": "stale"},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+        )
+
+    assert compiler.snapshot_inputs() == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+
+
+def test_atomic_verified_book_update_refuses_to_retire_reader_content(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path, wrapper_body="이 Part에는 독자가 읽어야 할 소개가 있다.\n"
+    )
+    input_before = compiler.snapshot_inputs()
+    output_before = compiler.snapshot_outputs()
+
+    with pytest.raises(WoonError, match="reader content is not preserved"):
+        service.apply_verified_book_update(
+            (record,),
+            {"books/atomic-book/part-01": "books/atomic-book"},
+            {"books/atomic-book/part-01": wrapper_revision},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+        )
+
+    assert compiler.snapshot_inputs() == input_before
+    assert compiler.snapshot_outputs() == output_before
+
+
+def test_atomic_verified_book_update_preserves_reviewed_reader_body_in_replacement(
+    tmp_path: Path,
+) -> None:
+    reader_body = "1부가 이 책의 가상화 흐름을 소개한다.\n"
+    compiler, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path,
+        wrapper_body=reader_body,
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    leaf_id = "books/atomic-book/chapter-01"
+    leaf_record = atomic_book_leaf_record(
+        tmp_path,
+        service,
+        f"실제 장 내용이다.\n\n{reader_body}",
+    )
+
+    report = service.apply_verified_book_update(
+        (replace(record, body=""), leaf_record),
+        {wrapper_id: leaf_id},
+        {wrapper_id: wrapper_revision},
+        {wrapper_id: wrapper_body_sha256},
+    )
+
+    assert report.retired_page_ids == (wrapper_id,)
+    assert reader_body.strip() in service.get(leaf_id).body
+    assert reader_body.strip() not in service.get("books/atomic-book").body
+    assert compiler.audit().complete
+
+
+def test_atomic_verified_book_update_hashes_body_after_generated_views_are_removed(
+    tmp_path: Path,
+) -> None:
+    reader_body = "1부가 이 책의 가상화 흐름을 소개한다.\n"
+    wrapper_body = (
+        reader_body
+        + "\n## 하위 키워드\n\n<!-- woon-wiki-children:start -->\n"
+        + "- [[wiki/books/atomic-book/chapter-01|1장 실제 내용]]\n"
+        + "<!-- woon-wiki-children:end -->\n"
+    )
+    compiler, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path,
+        wrapper_body=wrapper_body,
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    leaf_id = "books/atomic-book/chapter-01"
+    leaf_record = atomic_book_leaf_record(
+        tmp_path,
+        service,
+        f"실제 장 내용이다.\n\n{reader_body}",
+    )
+
+    report = service.apply_verified_book_update(
+        (replace(record, body=""), leaf_record),
+        {wrapper_id: leaf_id},
+        {wrapper_id: wrapper_revision},
+        {wrapper_id: wrapper_body_sha256},
+    )
+
+    assert report.retired_page_ids == (wrapper_id,)
+    assert reader_body.strip() in service.get(leaf_id).body
+    assert compiler.audit().complete
+
+
+def test_retirement_body_excludes_previous_next_navigation() -> None:
+    body = (
+        "절이 설명하는 고유한 독자 내용을 보존한다.\n\n"
+        "## 이전과 다음\n\n"
+        "- 이전: [[wiki/books/book/previous|이전]]\n"
+        "- 다음: [[wiki/books/book/next|다음]]\n"
+    )
+
+    assert _retirement_body(body) == "절이 설명하는 고유한 독자 내용을 보존한다.\n"
+
+
+def test_navigation_only_body_accepts_exact_legacy_linear_book_heading_only() -> None:
+    navigation = (
+        "## 책 전체 선형 이동\n\n"
+        "- [[wiki/books/book/chapter-01|1장]]\n"
+        "- [[wiki/books/book/chapter-02|2장]]\n"
+    )
+
+    assert _navigation_only_body(navigation)
+    assert not _navigation_only_body(navigation + "\n이 책은 메모리 계층을 설명한다.\n")
+    assert not _navigation_only_body("## 책 전체 선형 이동 안내\n")
+
+
+def test_atomic_verified_book_update_accepts_parent_owned_navigation_wrapper(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, _, _ = atomic_book_service(tmp_path)
+    wrapper_id = "books/atomic-book/part-01"
+    pages_path = tmp_path / "catalog/llm-wiki/pages.yaml"
+    payload = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    wrapper_page = next(page for page in payload["pages"] if page["page_id"] == wrapper_id)
+    wrapper_page["frontmatter"].pop("navigation_groups")
+    pages_path.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    compiler.compile(force=True)
+    service.reindex()
+    wrapper = service.get(wrapper_id)
+    wrapper_body_sha256 = hashlib.sha256(_retirement_body(wrapper.body).encode("utf-8")).hexdigest()
+
+    report = service.apply_verified_book_update(
+        (replace(record, expected_revision=service.get("books/atomic-book").revision),),
+        {wrapper_id: "books/atomic-book"},
+        {wrapper_id: wrapper.revision},
+        {wrapper_id: wrapper_body_sha256},
+    )
+
+    assert report.retired_page_ids == (wrapper_id,)
+    assert compiler.audit().complete
+
+
+def test_atomic_verified_book_update_accepts_parent_map_navigation_shell(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, _, _ = atomic_book_service(tmp_path)
+    root_id = "books/atomic-book"
+    wrapper_id = f"{root_id}/part-01"
+    leaf_id = f"{root_id}/chapter-01"
+    pages_path = tmp_path / "catalog/llm-wiki/pages.yaml"
+    payload = yaml.safe_load(pages_path.read_text(encoding="utf-8"))
+    by_id = {page["page_id"]: page for page in payload["pages"]}
+    by_id[wrapper_id]["frontmatter"].pop("navigation_groups")
+    by_id[leaf_id]["frontmatter"]["parent"] = f"[[wiki/{root_id}|원자적 책]]"
+    pages_path.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    compiler.compile(force=True)
+    service.reindex()
+    wrapper = service.get(wrapper_id)
+    wrapper_body_sha256 = hashlib.sha256(_retirement_body(wrapper.body).encode("utf-8")).hexdigest()
+
+    report = service.apply_verified_book_update(
+        (replace(record, expected_revision=service.get(root_id).revision),),
+        {wrapper_id: root_id},
+        {wrapper_id: wrapper.revision},
+        {wrapper_id: wrapper_body_sha256},
+    )
+
+    assert report.retired_page_ids == (wrapper_id,)
+    assert compiler.audit().complete
+
+
+def test_atomic_verified_book_update_rejects_retirement_body_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, wrapper_revision, _ = atomic_book_service(tmp_path)
+    wrapper_id = "books/atomic-book/part-01"
+    input_before = compiler.snapshot_inputs()
+
+    with pytest.raises(WoonError, match="retirement body changed after review"):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: "0" * 64},
+        )
+
+    assert compiler.snapshot_inputs() == input_before
+
+
+@pytest.mark.parametrize(
+    "body_sha256",
+    (
+        {},
+        {
+            "books/atomic-book/part-01": "0" * 64,
+            "books/atomic-book/part-02": "1" * 64,
+        },
+    ),
+)
+def test_atomic_verified_book_update_requires_exact_retirement_body_keys(
+    tmp_path: Path,
+    body_sha256: dict[str, str],
+) -> None:
+    compiler, service, _, record, wrapper_revision, _ = atomic_book_service(tmp_path)
+    wrapper_id = "books/atomic-book/part-01"
+    input_before = compiler.snapshot_inputs()
+
+    with pytest.raises(WoonError, match="retirement_body_sha256 must match replacements"):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper_revision},
+            body_sha256,
+        )
+
+    assert compiler.snapshot_inputs() == input_before
+
+
+def test_atomic_verified_book_update_rejects_unpreserved_reader_body(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path,
+        wrapper_body="1부가 이 책의 가상화 흐름을 소개한다.\n",
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    input_before = compiler.snapshot_inputs()
+
+    with pytest.raises(WoonError, match="reader content is not preserved"):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: wrapper_body_sha256},
+        )
+
+    assert compiler.snapshot_inputs() == input_before
 
 
 def test_learning_checkpoint_uses_compiler_curation_and_receipt(tmp_path: Path) -> None:

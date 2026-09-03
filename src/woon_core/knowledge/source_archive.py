@@ -14,7 +14,7 @@ from urllib.parse import quote
 import yaml
 
 from woon_core.errors import WoonError
-from woon_core.io import atomic_write
+from woon_core.io import atomic_write, exclusive_file_lock
 
 _EXCLUDED_DIRECTORIES = {
     ".git",
@@ -23,6 +23,7 @@ _EXCLUDED_DIRECTORIES = {
     ".ruff_cache",
     "__pycache__",
     "node_modules",
+    "rights-quarantine",
 }
 _EXCLUDED_FILES = {".DS_Store", ".gitkeep"}
 _SECRET_NAMES = {".env"}
@@ -55,6 +56,23 @@ def archive_private_source_corpus(
     """
 
     root = vault.expanduser().resolve()
+    with exclusive_file_lock(root / ".local/woon-knowledge/mutation.lock"):
+        return _archive_private_source_corpus_locked(
+            source,
+            root,
+            source_name,
+            wiki_subject,
+        )
+
+
+def _archive_private_source_corpus_locked(
+    source: Path,
+    root: Path,
+    source_name: str,
+    wiki_subject: str,
+) -> SourceArchiveResult:
+    """Run one archive transaction while the canonical mutation lock is held."""
+
     origin = source.expanduser().resolve()
     name = _safe_name(source_name)
     subject = _wiki_subject(root, wiki_subject)
@@ -69,17 +87,36 @@ def archive_private_source_corpus(
     if not origin.exists() and destination.is_dir():
         records, excluded, byte_count = _inventory(destination, name, destination_relative)
         _verify_records(root, records)
-        _write_metadata(
-            catalog_path,
-            ledger_path,
-            receipt_path,
-            name,
-            subject,
-            destination_relative,
-            records,
-            excluded,
-            byte_count,
-        )
+        replacements = _source_id_replacements(catalog_path, records)
+        reference_paths = _source_reference_paths(root)
+        previous = {
+            path: path.read_bytes() if path.is_file() else None
+            for path in (catalog_path, ledger_path, receipt_path, *reference_paths)
+        }
+        try:
+            _write_metadata(
+                catalog_path,
+                ledger_path,
+                receipt_path,
+                name,
+                subject,
+                destination_relative,
+                records,
+                excluded,
+                byte_count,
+            )
+            _migrate_source_id_references(reference_paths, replacements)
+            _verify_source_id_references(
+                (catalog_path, ledger_path, receipt_path, *reference_paths),
+                replacements,
+            )
+        except BaseException:
+            for path, content in previous.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_write(path, content, mode=0o600 if path == receipt_path else 0o644)
+            raise
         _verify_catalog(catalog_path, records, subject)
         return SourceArchiveResult(
             source_name=name,
@@ -151,8 +188,20 @@ def _inventory(
     excluded: list[dict[str, str]] = []
     byte_count = 0
     for directory, names, filenames in os.walk(source):
-        names[:] = sorted(name for name in names if name not in _EXCLUDED_DIRECTORIES)
         base = Path(directory)
+        excluded_directories = sorted(name for name in names if name in _EXCLUDED_DIRECTORIES)
+        for name in excluded_directories:
+            excluded.append(
+                {
+                    "locator": (base / name).relative_to(source).as_posix() + "/",
+                    "reason": (
+                        "managed-rights-quarantine"
+                        if name == "rights-quarantine"
+                        else "tool-or-cache-directory"
+                    ),
+                }
+            )
+        names[:] = sorted(name for name in names if name not in _EXCLUDED_DIRECTORIES)
         for filename in sorted(filenames):
             path = base / filename
             relative = path.relative_to(source)
@@ -303,7 +352,16 @@ def _write_metadata(
                 receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 receipt_payload = {}
-        if receipt_payload.get("wiki_subject") != wiki_subject:
+        expected_catalog_sha256 = hashlib.sha256(
+            _catalog_bytes(source_name, wiki_subject, records, excluded)
+        ).hexdigest()
+        if (
+            receipt_payload.get("wiki_subject") != wiki_subject
+            or receipt_payload.get("catalog_sha256") != expected_catalog_sha256
+            or receipt_payload.get("files") != len(records)
+            or receipt_payload.get("excluded") != len(excluded)
+            or receipt_payload.get("bytes") != byte_count
+        ):
             atomic_write(
                 receipt_path,
                 _receipt_bytes(
@@ -326,6 +384,84 @@ def _write_metadata(
             else:
                 atomic_write(path, content, mode=0o600 if path == receipt_path else 0o644)
         raise
+
+
+def _source_id_replacements(
+    catalog_path: Path,
+    records: list[dict[str, object]],
+) -> dict[str, str]:
+    """Match renamed archive records by exact bytes and target, never by title guess."""
+
+    if not catalog_path.is_file():
+        return {}
+    payload = yaml.safe_load(catalog_path.read_text(encoding="utf-8")) or {}
+    prior_records = payload.get("records") if isinstance(payload, dict) else None
+    if not isinstance(prior_records, list):
+        return {}
+    new_by_identity = {
+        (record.get("target"), record.get("sha256")): record.get("source_id")
+        for record in records
+    }
+    replacements: dict[str, str] = {}
+    for record in prior_records:
+        if not isinstance(record, dict):
+            continue
+        old_id = record.get("source_id")
+        new_id = new_by_identity.get((record.get("target"), record.get("sha256")))
+        if (
+            isinstance(old_id, str)
+            and isinstance(new_id, str)
+            and old_id
+            and new_id
+            and old_id != new_id
+        ):
+            replacements[old_id] = new_id
+    return replacements
+
+
+def _source_reference_paths(vault: Path) -> tuple[Path, ...]:
+    """Return canonical machine-readable catalogs that may own archive source IDs."""
+
+    fixed = tuple(
+        vault / "catalog/llm-wiki" / name
+        for name in ("sources.yaml", "claims.yaml", "pages.yaml")
+        if (vault / "catalog/llm-wiki" / name).is_file()
+    )
+    discovered = tuple(
+        sorted(
+            path
+            for directory in (
+                vault / "catalog/book-intake",
+                vault / "catalog/book-coverage",
+            )
+            if directory.is_dir()
+            for path in directory.glob("*.json")
+            if path.is_file() and not path.is_symlink()
+        )
+    )
+    return (*fixed, *discovered)
+
+
+def _migrate_source_id_references(paths: tuple[Path, ...], replacements: dict[str, str]) -> None:
+    for path in paths:
+        content = path.read_bytes()
+        updated = content
+        for old_id, new_id in sorted(replacements.items()):
+            updated = updated.replace(old_id.encode("utf-8"), new_id.encode("utf-8"))
+        if updated != content:
+            atomic_write(path, updated)
+
+
+def _verify_source_id_references(
+    paths: tuple[Path, ...], replacements: dict[str, str]
+) -> None:
+    for path in paths:
+        if not path.is_file():
+            continue
+        content = path.read_bytes()
+        for old_id in replacements:
+            if old_id.encode("utf-8") in content:
+                raise WoonError(f"retired source archive ID remains after repair: {path.name}")
 
 
 def _require_disjoint(source: Path, vault: Path) -> None:

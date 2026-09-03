@@ -794,6 +794,158 @@ title: 큐
     assert "큐를 다시 학습했다" in merged
 
 
+def test_compiler_context_refactor_preserves_exact_output_bytes() -> None:
+    existing = '''---
+type: Wiki
+title: 큐
+canonical_id: ai/queue
+facets: ["개념", "학습"]
+knowledge_state: "확인 필요"
+record_owner: choi-woonyoung
+aliases:
+- FIFO
+parent: '[[wiki/algorithm/README|알고리즘과 자료구조]]'
+---
+
+# 큐
+
+## 현재 이해
+
+<!-- woon-wiki-current:start -->
+대화에서 남긴 현재 이해
+<!-- woon-wiki-current:end -->
+
+## 시간 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 실행 — 큐를 다시 학습했다.
+<!-- woon-wiki-timeline:end -->
+'''
+    rendered = '''---
+type: 키워드
+title: 큐
+summary: 먼저 들어온 항목을 먼저 처리한다.
+facets:
+- 개념
+- 학습
+node_kind: detail
+view_mode: article
+updated: '2026-09-01'
+---
+
+# 큐
+
+근거로 다시 만든 설명
+'''
+    expected = '''---
+type: Wiki
+title: 큐
+summary: 먼저 들어온 항목을 먼저 처리한다.
+facets:
+- 개념
+- 학습
+node_kind: detail
+view_mode: article
+updated: '2026-09-01'
+canonical_id: ai/queue
+parent: '[[wiki/algorithm/README|알고리즘과 자료구조]]'
+aliases:
+- FIFO
+record_owner: choi-woonyoung
+knowledge_state: "근거 확인됨"
+state_reason: accepted-evidence-receipt
+---
+
+# 큐
+
+근거로 다시 만든 설명
+
+## 핵심 정리
+
+<!-- woon-wiki-current:start -->
+대화에서 남긴 현재 이해
+<!-- woon-wiki-current:end -->
+
+## 한 줄 이력
+
+<!-- woon-wiki-timeline:start -->
+- 2026-08-24 · 실행 — 큐를 다시 학습했다.
+<!-- woon-wiki-timeline:end -->
+'''
+
+    assert preserve_managed_context(existing, rendered) == expected
+
+
+def test_compiler_context_parses_existing_and_rendered_frontmatter_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = '''---
+type: Wiki
+title: 큐
+canonical_id: ai/queue
+facets: [개념, 학습]
+knowledge_state: 확인 필요
+aliases: [FIFO]
+---
+
+# 큐
+
+기존 설명
+'''
+    rendered = '''---
+type: 키워드
+title: 큐
+summary: 먼저 들어온 항목을 먼저 처리한다.
+---
+
+# 큐
+
+근거로 다시 만든 설명
+'''
+    original_safe_load = yaml.safe_load
+    safe_load_calls = 0
+
+    def counted_safe_load(stream: object) -> object:
+        nonlocal safe_load_calls
+        safe_load_calls += 1
+        return original_safe_load(stream)
+
+    monkeypatch.setattr(yaml, "safe_load", counted_safe_load)
+
+    preserve_managed_context(existing, rendered)
+
+    assert safe_load_calls == 2
+
+
+def test_compiler_context_keeps_existing_fail_closed_errors() -> None:
+    retired = '''---
+type: Wiki
+title: 큐
+knowledge_state: 폐기됨
+---
+
+# 큐
+
+폐기된 설명
+'''
+    rendered = '''---
+type: Wiki
+title: 큐
+---
+
+# 큐
+
+새 설명
+'''
+
+    with pytest.raises(WoonError, match="retired Wiki document"):
+        preserve_managed_context(retired, rendered)
+    with pytest.raises(WoonError, match="requires YAML frontmatter"):
+        preserve_managed_context("", "# 큐\n\n새 설명\n")
+    with pytest.raises(WoonError, match="frontmatter is malformed"):
+        preserve_managed_context("", "---\n- Wiki\n---\n\n# 큐\n\n새 설명\n")
+
+
 def test_compiler_render_does_not_duplicate_managed_timeline() -> None:
     existing = """---
 type: Wiki

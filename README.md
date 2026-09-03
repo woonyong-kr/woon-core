@@ -43,6 +43,12 @@ woon skills plan --profile core,python --target codex
 woon skills eval-routing --executor all --repeat 3
 woon knowledge compile-audit --vault /path/to/woon-knowledge
 woon knowledge compile --vault /path/to/woon-knowledge
+woon knowledge book-intake-audit --manifest official-books --vault /path/to/woon-knowledge
+woon knowledge book-coverage-audit --vault /path/to/woon-knowledge
+woon knowledge book-promote --input /path/to/verified-book-pages.json --vault /path/to/woon-knowledge
+woon knowledge book-promote-retire --input /path/to/atomic-book-update.json --vault /path/to/woon-knowledge
+woon knowledge book-rights-demote --input /path/to/book-rights-demotion.json --vault /path/to/woon-knowledge
+woon knowledge apply-compiled-transaction --input /path/to/catalog-transaction.json --vault /path/to/woon-knowledge
 woon knowledge index --vault /path/to/woon-knowledge
 woon knowledge search '검색어' --vault /path/to/woon-knowledge
 woon knowledge learning-checkpoint --canonical-id personal/topic --unit '현재 범위' \
@@ -58,6 +64,62 @@ woon career create --id company-role-2026 --company Company --role Role --jd /pa
 woon career analyze --id company-role-2026 --vault /path/to/woon-knowledge
 woon career context --id company-role-2026 --vault /path/to/woon-knowledge
 ```
+
+`book-promote`와 `book-promote-retire` 입력은 현재 `payload_schema_version`과
+hash-pinned `book_contract`, 명시적 `coverage_manifest.mode`를 반드시 포함한다. 전권이
+schema v2로 검증된 경우에만 `replace`를 사용한다. 한 장만 검증됐고 기존 전권 manifest의
+나머지 장이 아직 legacy·pending이면 `merge-scope`를 사용한다. 이 모드는 전권 manifest의
+경로와 SHA-256을 고정한 채 `catalog/book-coverage-scopes/<book>/<scope>.json`만 원자적으로
+생성·갱신한다. 전권 파일은 byte-for-byte 유지되고, scoped audit 0건만 해당 장의 완료
+근거가 된다. 전권 audit는 나머지 장을 `pending_books`로 계속 보고하며 책 전체 완료로
+승격하지 않는다. `book-promote-retire`에서 `apply: false`는 revision·hash·scope 경계를
+검사하는 read-only preflight이고, 동일 payload를 `apply: true`로 바꿔야 실제 writer가
+compiler·tree·scope fragment·검색 index를 하나의 rollback 경계에서 갱신한다.
+
+```json
+{
+  "mode": "merge-scope",
+  "relative_path": "catalog/book-coverage-scopes/book-slug/chapter-02.json",
+  "expected_sha256": null,
+  "base_relative_path": "catalog/book-coverage/book-slug.json",
+  "base_expected_sha256": "<current-full-manifest-sha256>",
+  "scope_root_id": "books/book-slug/chapter-02",
+  "replacement": {
+    "schema_version": 2,
+    "book_id": "books/book-slug",
+    "coverage_scope": {
+      "root_id": "books/book-slug/chapter-02",
+      "base_relative_path": "catalog/book-coverage/book-slug.json",
+      "base_sha256": "<current-full-manifest-sha256>"
+    }
+  }
+}
+```
+
+schema v5 이하 payload와 `coverage_manifest.mode`가 없는 implicit full replacement는
+fail-closed한다. 기존 payload를 hash만 바꿔 재사용하지 말고 현재 contract로 다시 생성한다.
+현재 book contract는 원문의 claim·example·caution·figure·code를 semantic unit으로
+전수 inventory하고 stable locator·source hash·exact-one leaf assignment를 요구한다. non-code는
+실제 reader body의 unique exact span 또는 hash-pinned figure delivery를 가리켜야 하며, node별
+coverage count는 모든 element assignment에서 파생된다. count-only manifest나 과거 schema의
+payload는 승격 전에 거부된다.
+source structure inventory는 저자·역자 서문과 소개, 본문, 부록, 참고문헌, 찾아보기를
+원문 순서로 전수 분류하며 의미 있는 front/back matter와 부록을 canonical leaf로 요구한다.
+Markdown 본문의 설명 표식은 밝은 원형 숫자 `①`부터 `⑩`까지 사용하며, 낮은 대비의
+검은 원형 숫자 `❶`부터 `❿`까지가 남은 payload는 승격 전에 거부한다. 원본 figure asset은
+변형하지 않는다.
+번호 section은 descendant wrapper가 아니라 Map H2 group이고, 퇴역 wrapper prose는 첫 terminal
+leaf의 exact relocated span evidence로 보존한다.
+승격할 기존 page, coverage manifest, retire할 wrapper의 현재 revision·hash를 다시 확인한 뒤
+compiler input·generated output·coverage manifest·검색 index를 하나의 rollback 경계에서
+갱신한다. 본문과 coverage를 따로 쓰거나 `book-promote`와 retirement를 분리해 중간 tree를
+노출하지 않는다.
+
+`apply-compiled-transaction` 입력은 `apply`, `expected_revisions`, `sources_upsert`,
+`claims_upsert`, `pages_upsert`, `curations_upsert`만 받는다. `apply`는 `true`여야 하고,
+기존 page는 현재 Markdown SHA-256, 신규 page는 `null` revision과 실제 부재를 요구한다.
+명령은 compiler catalog 입력, generated output, compile audit와 검색 index를 하나의 exclusive
+lock과 rollback 경계에서 갱신하며 source·claim ID의 비동일 충돌을 거부한다.
 
 ## 지원 파이프라인
 

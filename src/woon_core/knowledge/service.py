@@ -3,20 +3,40 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from woon_core.errors import WoonError
+from woon_core.io import atomic_write
+from woon_core.knowledge.book_intake import (
+    audit_book_intake,
+    validate_book_promotion_rights,
+)
+from woon_core.knowledge.book_rights import (
+    PRIVATE_AUTHORIZATION_DECISION,
+    BookRightsDemotion,
+    BookRightsDemotionReport,
+    BookRightsRestoration,
+    BookRightsRestorationReport,
+)
 from woon_core.knowledge.compiled_wiki import (
+    BookCoverageManifestUpdate,
     CompilationAudit,
     CompiledWiki,
+    CompiledWikiTransaction,
+    CompiledWikiTransactionReport,
     CompileReport,
     CuratedRevision,
     CuratedRevisionReport,
     MigrationReport,
     RetiredPageReport,
     RevisionReconciliationReport,
+    StagedBookAsset,
+    VerifiedBookPage,
+    VerifiedBookPreflightReport,
+    VerifiedBookUpdateReport,
 )
 from woon_core.knowledge.domain import (
     CanonicalDocument,
@@ -128,13 +148,13 @@ class KnowledgeService:
             self._assert_compiled_current()
             return self._reindex_unlocked()
 
-    def compile(self, *, force: bool = False) -> CompileReport:
+    def compile(self, *, force: bool = False, page_ids: tuple[str, ...] = ()) -> CompileReport:
         """Build changed LLM Wiki pages and keep the bounded search index aligned."""
 
         if self._compiled_wiki is None:
             raise WoonError("compiled Wiki is not enabled for this knowledge vault")
         with self._repository.exclusive():
-            report = self._compiled_wiki.compile(force=force)
+            report = self._compiled_wiki.compile(force=force, page_ids=page_ids)
             if report.compiled:
                 self._reindex_unlocked()
             return report
@@ -201,6 +221,594 @@ class KnowledgeService:
                     ) from recovery_error
                 raise
             return report
+
+    def promote_verified_book_pages(
+        self,
+        pages: tuple[VerifiedBookPage, ...],
+        coverage_manifest: BookCoverageManifestUpdate | None = None,
+        staged_assets: tuple[StagedBookAsset, ...] = (),
+    ) -> CuratedRevisionReport:
+        """Atomically promote book pages with their optimistic coverage replacement."""
+
+        report = self.apply_verified_book_update(
+            pages,
+            {},
+            {},
+            {},
+            coverage_manifest,
+            staged_assets,
+        )
+        return CuratedRevisionReport(
+            curated=report.curated,
+            compiled=report.compiled,
+            unchanged=report.unchanged,
+            page_ids=report.page_ids,
+            staged_asset_count=report.staged_asset_count,
+            unchanged_asset_count=report.unchanged_asset_count,
+        )
+
+    def apply_compiled_wiki_transaction(
+        self, transaction: CompiledWikiTransaction
+    ) -> CompiledWikiTransactionReport:
+        """Apply one optimistic compiler catalog transaction and reindex atomically."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        page_ids = tuple(str(page.get("page_id", "")) for page in transaction.pages_upsert)
+        if not page_ids:
+            raise WoonError("compiled Wiki transaction requires at least one page upsert")
+        with self._repository.exclusive():
+            for page_id in page_ids:
+                expected_revision = transaction.expected_revisions.get(page_id)
+                current = self._repository.get(page_id)
+                if expected_revision is None:
+                    if current is not None:
+                        raise WoonError(
+                            "compiled Wiki transaction expected a new page but it already exists: "
+                            f"{page_id}"
+                        )
+                    continue
+                if current is None:
+                    raise WoonError(
+                        "compiled Wiki transaction expected an existing page but it is missing: "
+                        f"{page_id}"
+                    )
+                if current.revision != expected_revision:
+                    raise WoonError(
+                        "compiled Wiki transaction page changed after it was read; "
+                        f"reload and merge before writing: {page_id}"
+                    )
+
+            input_snapshot = self._compiled_wiki.snapshot_inputs()
+            output_snapshot = self._compiled_wiki.snapshot_outputs(
+                extra_relative_paths=tuple(
+                    str(page.get("output_path", "")) for page in transaction.pages_upsert
+                )
+            )
+            try:
+                report = self._compiled_wiki.apply_compiled_wiki_transaction(transaction)
+                self._reindex_unlocked()
+            except Exception as transaction_error:
+                try:
+                    self._compiled_wiki.restore_inputs(input_snapshot)
+                    self._compiled_wiki.restore_outputs(output_snapshot)
+                    self._reindex_unlocked()
+                except Exception as recovery_error:
+                    raise WoonError(
+                        "compiled Wiki transaction failed and recovery was incomplete: "
+                        f"transaction={transaction_error}; recovery={recovery_error}"
+                    ) from recovery_error
+                raise
+            return report
+
+    def apply_verified_book_update(
+        self,
+        pages: tuple[VerifiedBookPage, ...],
+        replacements: dict[str, str],
+        retirement_expected_revisions: dict[str, str],
+        retirement_body_sha256: dict[str, str],
+        coverage_manifest: BookCoverageManifestUpdate | None = None,
+        staged_assets: tuple[StagedBookAsset, ...] = (),
+    ) -> VerifiedBookUpdateReport:
+        """Atomically promote pages, retire wrappers, and rebuild search once.
+
+        Every promoted and retired identity is re-read under the repository lock.
+        A compiler, generated-output, or index failure restores the single input
+        snapshot and all generated outputs before rebuilding the previous index.
+        """
+
+        compiler = self._compiled_wiki
+        if compiler is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            coverage_path = self._validate_verified_book_update_request(
+                pages,
+                replacements,
+                retirement_expected_revisions,
+                retirement_body_sha256,
+                coverage_manifest,
+            )
+            if staged_assets and coverage_manifest is None:
+                raise WoonError("staged book assets require a coverage manifest")
+            asset_counts = (
+                compiler.validate_staged_book_assets(staged_assets, coverage_manifest)
+                if coverage_manifest is not None
+                else (0, 0)
+            )
+            input_snapshot = compiler.snapshot_inputs(
+                extra_paths=(coverage_path,) if coverage_path is not None else ()
+            )
+            output_snapshot = compiler.snapshot_outputs(
+                extra_relative_paths=tuple(f"{page.page_id}.md" for page in pages)
+            )
+            asset_snapshot = compiler.snapshot_staged_book_assets(staged_assets)
+            try:
+                compiler.install_staged_book_assets(staged_assets)
+                report = compiler.apply_verified_book_update(
+                    pages,
+                    replacements,
+                    retirement_body_sha256,
+                    coverage_manifest,
+                )
+                self._reindex_unlocked()
+            except BaseException as update_error:
+                try:
+                    compiler.restore_inputs(input_snapshot)
+                    compiler.restore_outputs(output_snapshot)
+                    compiler.restore_staged_book_assets(asset_snapshot)
+                    self._reindex_unlocked()
+                except BaseException as recovery_error:
+                    raise WoonError(
+                        "verified book update failed and recovery was incomplete: "
+                        f"update={update_error}; recovery={recovery_error}"
+                    ) from recovery_error
+                raise
+            return replace(
+                report,
+                staged_asset_count=asset_counts[0],
+                unchanged_asset_count=asset_counts[1],
+            )
+
+    def preflight_verified_book_update(
+        self,
+        pages: tuple[VerifiedBookPage, ...],
+        replacements: dict[str, str],
+        retirement_expected_revisions: dict[str, str],
+        retirement_body_sha256: dict[str, str],
+        coverage_manifest: BookCoverageManifestUpdate,
+        staged_assets: tuple[StagedBookAsset, ...] = (),
+    ) -> VerifiedBookPreflightReport:
+        """Validate revisions and coverage hashes without mutating the Vault."""
+
+        compiler = self._compiled_wiki
+        if compiler is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            coverage_path = self._validate_verified_book_update_request(
+                pages,
+                replacements,
+                retirement_expected_revisions,
+                retirement_body_sha256,
+                coverage_manifest,
+            )
+            asset_counts = compiler.validate_staged_book_assets(staged_assets, coverage_manifest)
+        if coverage_path is None:  # pragma: no cover - public preflight requires coverage
+            raise WoonError("verified book preflight requires a coverage manifest")
+        return VerifiedBookPreflightReport(
+            ready=True,
+            page_count=len(pages),
+            retirement_count=len(replacements),
+            coverage_mode=coverage_manifest.mode,
+            coverage_path=coverage_manifest.relative_path,
+            base_manifest_preserved=coverage_manifest.mode == "merge-scope",
+            staged_asset_count=asset_counts[0],
+            unchanged_asset_count=asset_counts[1],
+        )
+
+    def preflight_book_rights_restoration(
+        self,
+        request: BookRightsRestoration,
+        pages: tuple[VerifiedBookPage, ...],
+        coverage_manifest: BookCoverageManifestUpdate,
+        staged_assets: tuple[StagedBookAsset, ...] = (),
+    ) -> BookRightsRestorationReport:
+        """Validate a private-only authorization and source restore without writing."""
+
+        compiler = self._compiled_wiki
+        if compiler is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            coverage_path = self._validate_verified_book_update_request(
+                pages,
+                {},
+                {},
+                {},
+                coverage_manifest,
+                allow_blocked_restore=True,
+            )
+            if coverage_path is None:  # pragma: no cover - restore requires coverage
+                raise WoonError("book rights restore requires a coverage manifest")
+            self._validate_book_rights_restoration(
+                request, pages, coverage_manifest
+            )
+            asset_counts = compiler.validate_staged_book_assets(
+                staged_assets, coverage_manifest
+            )
+            compiler.dry_run_verified_book_update(
+                pages,
+                {},
+                {},
+                coverage_manifest,
+                staged_assets,
+                rights_restore_book_id=request.book_id,
+            )
+        return BookRightsRestorationReport(
+            ready=True,
+            applied=False,
+            page_count=len(pages),
+            coverage_mode=coverage_manifest.mode,
+            coverage_path=coverage_manifest.relative_path,
+            intake_relative_path=request.book_intake["relative_path"],
+            quarantine_manifest_count=len(request.quarantine_manifests),
+            staged_asset_count=asset_counts[0],
+            unchanged_asset_count=asset_counts[1],
+        )
+
+    def apply_book_rights_restoration(
+        self,
+        request: BookRightsRestoration,
+        pages: tuple[VerifiedBookPage, ...],
+        coverage_manifest: BookCoverageManifestUpdate,
+        staged_assets: tuple[StagedBookAsset, ...] = (),
+    ) -> BookRightsRestorationReport:
+        """Atomically authorize private use, restore pages, assets, and the search index."""
+
+        compiler = self._compiled_wiki
+        if compiler is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            coverage_path = self._validate_verified_book_update_request(
+                pages,
+                {},
+                {},
+                {},
+                coverage_manifest,
+                allow_blocked_restore=True,
+            )
+            if coverage_path is None:  # pragma: no cover - restore requires coverage
+                raise WoonError("book rights restore requires a coverage manifest")
+            intake_path, intake_bytes = self._validate_book_rights_restoration(
+                request, pages, coverage_manifest
+            )
+            asset_counts = compiler.validate_staged_book_assets(
+                staged_assets, coverage_manifest
+            )
+            input_snapshot = compiler.snapshot_inputs(
+                extra_paths=(coverage_path, intake_path)
+            )
+            output_snapshot = compiler.snapshot_outputs(
+                extra_relative_paths=tuple(f"{page.page_id}.md" for page in pages)
+            )
+            asset_snapshot = compiler.snapshot_staged_book_assets(staged_assets)
+            try:
+                atomic_write(intake_path, intake_bytes)
+                compiler.install_staged_book_assets(staged_assets)
+                compiler.apply_verified_book_update(
+                    pages,
+                    {},
+                    {},
+                    coverage_manifest,
+                    rights_restore_book_id=request.book_id,
+                )
+                intake_audit = audit_book_intake(compiler.vault, intake_path.stem)
+                if not intake_audit.complete:
+                    raise WoonError(
+                        "book rights restore left stale intake: " + intake_audit.errors[0]
+                    )
+                self._reindex_unlocked()
+            except BaseException as update_error:
+                try:
+                    compiler.restore_inputs(input_snapshot)
+                    compiler.restore_outputs(output_snapshot)
+                    compiler.restore_staged_book_assets(asset_snapshot)
+                    self._reindex_unlocked()
+                except BaseException as recovery_error:
+                    raise WoonError(
+                        "book rights restore failed and recovery was incomplete: "
+                        f"update={update_error}; recovery={recovery_error}"
+                    ) from recovery_error
+                raise
+        return BookRightsRestorationReport(
+            ready=True,
+            applied=True,
+            page_count=len(pages),
+            coverage_mode=coverage_manifest.mode,
+            coverage_path=coverage_manifest.relative_path,
+            intake_relative_path=request.book_intake["relative_path"],
+            quarantine_manifest_count=len(request.quarantine_manifests),
+            staged_asset_count=asset_counts[0],
+            unchanged_asset_count=asset_counts[1],
+        )
+
+    def _validate_book_rights_restoration(
+        self,
+        request: BookRightsRestoration,
+        pages: tuple[VerifiedBookPage, ...],
+        coverage_manifest: BookCoverageManifestUpdate,
+    ) -> tuple[Path, bytes]:
+        """Bind approval, archive, quarantine, intake, and source hashes exactly."""
+
+        compiler = self._compiled_wiki
+        if compiler is None:  # pragma: no cover - callers guard this
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        if any(
+            page.page_id != request.book_id
+            and not page.page_id.startswith(request.book_id + "/")
+            for page in pages
+        ):
+            raise WoonError("book rights restore page is outside book_id")
+        source_hashes = {page.source_sha256 for page in pages}
+        authorized_hash = request.rights_evidence["source_archive_sha256"]
+        if source_hashes != {authorized_hash}:
+            raise WoonError("book rights restore page source hash is not authorized")
+        replacement = coverage_manifest.replacement
+        if replacement.get("book_id") != request.book_id:
+            raise WoonError("book rights restore coverage book_id mismatch")
+        if replacement.get("workflow_phase") != "source-landed":
+            raise WoonError("book rights restore must begin at source-landed")
+        if replacement.get("translation_required") is not False:
+            raise WoonError("book rights restore for a Korean source requires translation false")
+        edition = replacement.get("edition")
+        if not isinstance(edition, dict) or edition.get("source_sha256") != authorized_hash:
+            raise WoonError("book rights restore coverage source hash is not authorized")
+
+        archive_path = self._private_rights_path(
+            compiler.vault,
+            str(request.rights_evidence["source_archive_relative_path"]),
+            "source archive",
+        )
+        if archive_path.is_symlink() or not archive_path.is_file():
+            raise WoonError("book rights restore source archive is missing")
+        if hashlib.sha256(archive_path.read_bytes()).hexdigest() != authorized_hash:
+            raise WoonError("book rights restore source archive hash changed")
+
+        intake_path = self._private_rights_path(
+            compiler.vault,
+            request.book_intake["relative_path"],
+            "book intake",
+        )
+        intake_content = intake_path.read_bytes() if intake_path.is_file() else b""
+        if hashlib.sha256(intake_content).hexdigest() != request.book_intake["expected_sha256"]:
+            raise WoonError("book rights restore intake changed after authorization review")
+        try:
+            intake = json.loads(intake_content)
+        except json.JSONDecodeError as error:
+            raise WoonError("book rights restore intake is invalid JSON") from error
+        bundles = intake.get("bundles") if isinstance(intake, dict) else None
+        if not isinstance(bundles, list):
+            raise WoonError("book rights restore intake bundles are invalid")
+        matches = [
+            bundle
+            for bundle in bundles
+            if isinstance(bundle, dict)
+            and bundle.get("id") == request.book_intake["bundle_id"]
+            and bundle.get("target") == request.book_id
+        ]
+        if len(matches) != 1:
+            raise WoonError("book rights restore intake bundle is missing or ambiguous")
+        bundle = matches[0]
+        if bundle.get("rights_status") not in {
+            "processing-prohibited",
+            "unverified-commercial",
+        } or bundle.get("processing_state") != "blocked-rights":
+            raise WoonError("book rights restore requires one currently blocked intake bundle")
+        if (
+            bundle.get("rights_status") == "processing-prohibited"
+            and not request.quarantine_manifests
+        ):
+            raise WoonError("book rights restore of a demoted book requires quarantine evidence")
+
+        for item in request.quarantine_manifests:
+            manifest_path = self._private_rights_path(
+                compiler.vault, item["relative_path"], "quarantine manifest"
+            )
+            manifest_bytes = manifest_path.read_bytes() if manifest_path.is_file() else b""
+            if hashlib.sha256(manifest_bytes).hexdigest() != item["expected_sha256"]:
+                raise WoonError("book rights restore quarantine manifest hash changed")
+            try:
+                manifest = json.loads(manifest_bytes)
+            except json.JSONDecodeError as error:
+                raise WoonError(
+                    "book rights restore quarantine manifest is invalid JSON"
+                ) from error
+            if manifest.get("book_id") != request.book_id:
+                raise WoonError("book rights restore quarantine book_id mismatch")
+            prior_rights = manifest.get("rights_evidence")
+            if not isinstance(prior_rights, dict) or prior_rights.get(
+                "source_archive_sha256"
+            ) != authorized_hash:
+                raise WoonError("book rights restore quarantine source hash mismatch")
+            if manifest_path.parent.parent != archive_path.parent / "rights-quarantine":
+                raise WoonError("book rights restore quarantine is not beside its source archive")
+            entries = manifest.get("entries")
+            if not isinstance(entries, list) or manifest.get("entry_count") != len(entries):
+                raise WoonError("book rights restore quarantine entries are invalid")
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise WoonError("book rights restore quarantine entry is invalid")
+                relative = entry.get("quarantine_relative_path")
+                if not isinstance(relative, str):
+                    raise WoonError("book rights restore quarantine entry path is invalid")
+                pure = PurePosixPath(relative)
+                if pure.is_absolute() or ".." in pure.parts or pure.as_posix() != relative:
+                    raise WoonError("book rights restore quarantine entry path is unsafe")
+                entry_path = (manifest_path.parent / Path(*pure.parts)).resolve()
+                try:
+                    entry_path.relative_to(manifest_path.parent.resolve())
+                except ValueError as error:
+                    raise WoonError("book rights restore quarantine entry escapes") from error
+                if entry_path.is_symlink() or not entry_path.is_file():
+                    raise WoonError("book rights restore quarantine entry is missing")
+                content = entry_path.read_bytes()
+                if (
+                    hashlib.sha256(content).hexdigest() != entry.get("sha256")
+                    or len(content) != entry.get("bytes")
+                ):
+                    raise WoonError("book rights restore quarantine entry changed")
+
+        bundle.pop("private_processing_authorized", None)
+        bundle["rights_status"] = PRIVATE_AUTHORIZATION_DECISION
+        bundle["processing_state"] = "content-in-progress"
+        bundle["rights_evidence"] = request.rights_evidence
+        intake_bytes = (json.dumps(intake, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        return intake_path, intake_bytes
+
+    @staticmethod
+    def _private_rights_path(vault: Path, relative: str, label: str) -> Path:
+        pure = PurePosixPath(relative)
+        if pure.is_absolute() or ".." in pure.parts or pure.as_posix() != relative:
+            raise WoonError(f"book rights restore {label} path is unsafe")
+        path = (vault / Path(*pure.parts)).resolve()
+        try:
+            path.relative_to(vault.resolve())
+        except ValueError as error:
+            raise WoonError(f"book rights restore {label} path escapes Vault") from error
+        return path
+
+    def preflight_book_rights_demotion(
+        self, request: BookRightsDemotion
+    ) -> BookRightsDemotionReport:
+        """Validate an exact rights demotion under the canonical repository lock."""
+
+        compiler = self._compiled_wiki
+        if compiler is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            self._validate_book_rights_revisions(request)
+            return compiler.preflight_book_rights_demotion(request)
+
+    def apply_book_rights_demotion(
+        self, request: BookRightsDemotion
+    ) -> BookRightsDemotionReport:
+        """Apply and index one rights demotion with byte-exact outer rollback."""
+
+        compiler = self._compiled_wiki
+        if compiler is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            self._validate_book_rights_revisions(request)
+            compiler.preflight_book_rights_demotion(request)
+            snapshot = compiler.snapshot_book_rights_demotion(request)
+            try:
+                report = compiler.apply_book_rights_demotion(request)
+                self._reindex_unlocked()
+            except BaseException as update_error:
+                try:
+                    compiler.restore_book_rights_demotion(snapshot)
+                    self._reindex_unlocked()
+                except BaseException as recovery_error:
+                    raise WoonError(
+                        "book rights demotion failed and recovery was incomplete: "
+                        f"update={update_error}; recovery={recovery_error}"
+                    ) from recovery_error
+                raise
+            return report
+
+    def _validate_book_rights_revisions(self, request: BookRightsDemotion) -> None:
+        if set(request.expected_revisions) != set(request.target_ids):
+            raise WoonError("book rights demotion revisions must match exact page targets")
+        for page_id, expected_revision in request.expected_revisions.items():
+            current = self._repository.get(page_id)
+            if current is None:
+                raise WoonError(f"book rights demotion page does not exist: {page_id}")
+            if current.revision != expected_revision:
+                raise WoonError(
+                    "book rights demotion page changed after review; reload before writing: "
+                    f"{page_id}"
+                )
+
+    def _validate_verified_book_update_request(
+        self,
+        pages: tuple[VerifiedBookPage, ...],
+        replacements: dict[str, str],
+        retirement_expected_revisions: dict[str, str],
+        retirement_body_sha256: dict[str, str],
+        coverage_manifest: BookCoverageManifestUpdate | None,
+        *,
+        allow_blocked_restore: bool = False,
+    ) -> Path | None:
+        """Validate one request while the repository lock is held."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        if not pages:
+            raise WoonError("verified book update requires at least one promoted page")
+        if set(retirement_expected_revisions) != set(replacements):
+            raise WoonError(
+                "verified book update retirement_expected_revisions must match replacements"
+            )
+        if set(retirement_body_sha256) != set(replacements):
+            raise WoonError("verified book update retirement_body_sha256 must match replacements")
+        promoted_ids = {page.page_id for page in pages}
+        overlap = promoted_ids.intersection(replacements)
+        if overlap:
+            raise WoonError(
+                "verified book update cannot promote and retire the same page: "
+                f"{sorted(overlap)[0]}"
+            )
+        unverified_survivors = set(replacements.values()).difference(promoted_ids)
+        if unverified_survivors:
+            raise WoonError(
+                "verified book update replacement must be included in promoted pages: "
+                f"{sorted(unverified_survivors)[0]}"
+            )
+        for page in pages:
+            current = self._repository.get(page.page_id)
+            if current is None:
+                if page.expected_revision is not None:
+                    raise WoonError(
+                        f"verified book page does not exist but expected a revision: {page.page_id}"
+                    )
+            elif page.expected_revision != current.revision:
+                raise WoonError(
+                    "verified book page changed after it was read; reload and merge before writing"
+                )
+        for page_id, expected_revision in retirement_expected_revisions.items():
+            current = self._repository.get(page_id)
+            if current is None:
+                raise WoonError(f"retired book page does not exist: {page_id}")
+            if current.revision != expected_revision:
+                raise WoonError(
+                    "retired book page changed after it was read; reload and merge before writing"
+                )
+        self._compiled_wiki.validate_verified_book_retirement_content(
+            pages,
+            replacements,
+            retirement_body_sha256,
+        )
+        workflow_phase = "source-landed"
+        if coverage_manifest is not None:
+            candidate_phase = coverage_manifest.replacement.get("workflow_phase")
+            if isinstance(candidate_phase, str):
+                workflow_phase = candidate_phase
+        self._compiled_wiki.validate_book_workflow_pages(
+            pages,
+            workflow_phase,
+        )
+        if coverage_manifest is not None:
+            book_id = coverage_manifest.replacement.get("book_id")
+            if isinstance(book_id, str) and book_id:
+                validate_book_promotion_rights(
+                    self._compiled_wiki.vault,
+                    book_id,
+                    {page.source_sha256 for page in pages},
+                    allow_blocked_restore=allow_blocked_restore,
+                )
+        return (
+            self._compiled_wiki.validate_book_coverage_manifest_update(coverage_manifest)
+            if coverage_manifest is not None
+            else None
+        )
 
     def revise_uncompiled_body(
         self,
@@ -340,15 +948,26 @@ class KnowledgeService:
         except WoonError as error:
             return sorted(set([*errors, str(error)]))
         ids = {document.metadata.canonical_id for document in documents}
+        book_roots = {
+            document.metadata.canonical_id
+            for document in documents
+            if document.metadata.entity_kind == "book"
+        }
         titles: dict[str, str] = {}
         sources: dict[str, str] = {}
         for document in documents:
-            title = _fingerprint(document.metadata.title)
-            if previous := titles.get(title):
-                errors.append(
-                    f"{document.metadata.canonical_id}: normalized title also used by {previous}"
-                )
-            titles[title] = document.metadata.canonical_id
+            is_book_descendant = any(
+                document.metadata.canonical_id.startswith(f"{book_root}/")
+                for book_root in book_roots
+            )
+            if not is_book_descendant:
+                title = _fingerprint(document.metadata.title)
+                if previous := titles.get(title):
+                    errors.append(
+                        f"{document.metadata.canonical_id}: normalized title also used by "
+                        f"{previous}"
+                    )
+                titles[title] = document.metadata.canonical_id
             for source_id in document.metadata.source_ids:
                 if previous := sources.get(source_id):
                     errors.append(

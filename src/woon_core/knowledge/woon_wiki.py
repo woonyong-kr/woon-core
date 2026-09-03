@@ -83,6 +83,7 @@ ALLOWED_KNOWLEDGE_STATES = {
     "폐기됨",
 }
 ALLOWED_STATE_AUTHORITIES = {"conversation", "evidence-compiler", "curation", "user"}
+_UNRESOLVED_FRONTMATTER = object()
 
 _FILE_STEM_RE = re.compile(r"[^0-9A-Za-z가-힣_-]+")
 _WIKILINK_TARGET_RE = re.compile(r"\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^]]+)?]]")
@@ -431,6 +432,9 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
 
     if existing and _frontmatter_text(existing, "knowledge_state") == "폐기됨":
         raise WoonError("A retired Wiki document cannot be compiled again")
+    existing_frontmatter = _frontmatter_mapping(existing) if existing else {}
+    if existing_frontmatter is None:
+        existing_frontmatter = {}
     # A curated source can contain a previously rendered managed section.  The
     # compiler also carries the live section from ``existing`` below, so first
     # remove managed sections from the rendered body.  Otherwise every forced
@@ -444,13 +448,29 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
     )
     merged = _strip_managed_section(merged, "시간 이력", WIKI_TIMELINE_START, WIKI_TIMELINE_END)
     merged = strip_generated_wiki_views(merged)
+    merged_frontmatter = _frontmatter_mapping(merged)
+    if merged_frontmatter is None:
+        if re.match(r"\A---\n[\s\S]*?\n---", merged) is not None:
+            raise WoonError("Wiki frontmatter is malformed")
+        raise WoonError("Wiki document requires YAML frontmatter")
     merged = _remove_frontmatter_keys(
-        merged, ("parent_topics", "parent_moc", "map_role", "mindmap_role")
+        merged,
+        ("parent_topics", "parent_moc", "map_role", "mindmap_role"),
+        frontmatter=merged_frontmatter,
     )
+    for key in ("parent_topics", "parent_moc", "map_role", "mindmap_role"):
+        merged_frontmatter.pop(key, None)
     merged = _upsert_frontmatter_value(merged, "type", "Wiki")
-    existing_identity = _frontmatter_value(existing, "canonical_id") if existing else None
+    merged_frontmatter["type"] = "Wiki"
+    existing_identity = existing_frontmatter.get("canonical_id")
     if existing_identity is not None and not _frontmatter_raw(merged, "canonical_id"):
-        merged = _set_frontmatter_object(merged, "canonical_id", existing_identity)
+        merged = _set_frontmatter_object(
+            merged,
+            "canonical_id",
+            existing_identity,
+            frontmatter=merged_frontmatter,
+        )
+        merged_frontmatter["canonical_id"] = existing_identity
     for key in (
         "node_kind",
         "parent",
@@ -474,15 +494,22 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
         "relationship_to_owner",
         "identifiers",
     ):
-        value = _frontmatter_value(existing, key) if existing else None
-        if value is not None and _frontmatter_value(merged, key) is None:
-            merged = _set_frontmatter_object(merged, key, value)
+        value = existing_frontmatter.get(key)
+        if value is not None and merged_frontmatter.get(key) is None:
+            merged = _set_frontmatter_object(
+                merged,
+                key,
+                value,
+                frontmatter=merged_frontmatter,
+            )
+            merged_frontmatter[key] = value
     merged = _upsert_frontmatter_value(
         merged, "knowledge_state", json.dumps("근거 확인됨", ensure_ascii=False)
     )
     merged = _upsert_frontmatter_value(merged, "state_reason", "accepted-evidence-receipt")
+    merged_parent = merged_frontmatter.get("parent")
     if not existing:
-        return _normalize_article_view(merged)
+        return _normalize_article_view(merged, parent=merged_parent)
     current = _optional_marker_block(existing, WIKI_CURRENT_START, WIKI_CURRENT_END)
     timeline = _optional_marker_block(existing, WIKI_TIMELINE_START, WIKI_TIMELINE_END)
     if timeline is not None:
@@ -500,8 +527,10 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
         )
     navigation = _optional_marker_block(existing, WIKI_NAVIGATION_START, WIKI_NAVIGATION_END)
     if current is None and timeline is None and navigation is None:
-        preserved = preserve_generated_wiki_views(existing, _normalize_article_view(merged))
-        return _normalize_article_view(preserved)
+        preserved = preserve_generated_wiki_views(
+            existing, _normalize_article_view(merged, parent=merged_parent)
+        )
+        return _normalize_article_view(preserved, parent=merged_parent)
     blocks: list[str] = []
     if navigation is not None:
         blocks.extend(("## 주제 연결", "", navigation, ""))
@@ -510,8 +539,10 @@ def preserve_managed_context(existing: str, rendered: str) -> str:
     if timeline is not None:
         blocks.extend(("", "## 시간 이력", "", timeline))
     merged = merged.rstrip() + "\n\n" + "\n".join(blocks).rstrip() + "\n"
-    preserved = preserve_generated_wiki_views(existing, _normalize_article_view(merged))
-    return _normalize_article_view(preserved)
+    preserved = preserve_generated_wiki_views(
+        existing, _normalize_article_view(merged, parent=merged_parent)
+    )
+    return _normalize_article_view(preserved, parent=merged_parent)
 
 
 def _normalize_existing_wiki(
@@ -1483,38 +1514,62 @@ def _frontmatter_raw(text: str, key: str) -> str:
 def _frontmatter_value(text: str, key: str) -> object | None:
     """Read one frontmatter value without flattening YAML sequences."""
 
+    data = _frontmatter_mapping(text)
+    return data.get(key) if data is not None else None
+
+
+def _frontmatter_mapping(text: str) -> dict[str, object] | None:
+    """Parse a document frontmatter once for callers that need several keys."""
+
     match = re.match(r"\A---\n(?P<yaml>[\s\S]*?)\n---", text)
     if match is None:
         return None
     data = yaml.safe_load(match.group("yaml")) or {}
     if not isinstance(data, dict):
         return None
-    return data.get(key)
+    return data
 
 
-def _set_frontmatter_object(text: str, key: str, value: object) -> str:
+def _set_frontmatter_object(
+    text: str,
+    key: str,
+    value: object,
+    *,
+    frontmatter: dict[str, object] | None = None,
+) -> str:
     """Set one YAML value while preserving the Markdown body verbatim."""
 
     match = re.match(r"\A---\n(?P<yaml>[\s\S]*?)\n---(?P<body>[\s\S]*)\Z", text)
     if match is None:
         raise WoonError("Wiki document requires YAML frontmatter")
-    data = yaml.safe_load(match.group("yaml")) or {}
-    if not isinstance(data, dict):
-        raise WoonError("Wiki frontmatter is malformed")
+    if frontmatter is None:
+        data = yaml.safe_load(match.group("yaml")) or {}
+        if not isinstance(data, dict):
+            raise WoonError("Wiki frontmatter is malformed")
+    else:
+        data = dict(frontmatter)
     data[key] = value
     rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
     return f"---\n{rendered}---{match.group('body')}"
 
 
-def _remove_frontmatter_keys(text: str, keys: tuple[str, ...]) -> str:
+def _remove_frontmatter_keys(
+    text: str,
+    keys: tuple[str, ...],
+    *,
+    frontmatter: dict[str, object] | None = None,
+) -> str:
     """Remove retired root properties without touching the Markdown body."""
 
     match = re.match(r"\A---\n(?P<yaml>[\s\S]*?)\n---(?P<body>[\s\S]*)\Z", text)
     if match is None:
         raise WoonError("Wiki document requires YAML frontmatter")
-    data = yaml.safe_load(match.group("yaml")) or {}
-    if not isinstance(data, dict):
-        raise WoonError("Wiki frontmatter is malformed")
+    if frontmatter is None:
+        data = yaml.safe_load(match.group("yaml")) or {}
+        if not isinstance(data, dict):
+            raise WoonError("Wiki frontmatter is malformed")
+    else:
+        data = dict(frontmatter)
     changed = False
     for key in keys:
         if key in data:
@@ -1542,7 +1597,9 @@ def _frontmatter_list(text: str, key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _normalize_article_view(text: str) -> str:
+def _normalize_article_view(
+    text: str, *, parent: object = _UNRESOLVED_FRONTMATTER
+) -> str:
     """Keep structural metadata in Properties instead of a repeated body card."""
 
     start_count = text.count(WIKI_OVERVIEW_START)
@@ -1562,18 +1619,20 @@ def _normalize_article_view(text: str) -> str:
     # renderer canonicalizes the space below H1, so the compiler must emit the
     # same bytes or every compile/refresh cycle invalidates its receipts.
     updated = re.sub(r"(?m)^(# .+?)\n{3,}", r"\1\n\n", updated, count=1)
-    updated = _normalize_managed_prose(updated)
+    updated = _normalize_managed_prose(updated, parent=parent)
     return _normalize_timeline_heading(updated)
 
 
-def _normalize_managed_prose(text: str) -> str:
+def _normalize_managed_prose(
+    text: str, *, parent: object = _UNRESOLVED_FRONTMATTER
+) -> str:
     """Remove legacy archive scaffolding that repeats the current conclusion."""
 
     frontmatter_match = re.match(r"\A---\n.*?\n---", text, flags=re.DOTALL)
     prefix_end = frontmatter_match.end() if frontmatter_match is not None else 0
     prefix = text[:prefix_end]
     body = text[prefix_end:].replace("추정 의도: ", "")
-    updated = _normalize_semantic_sections(prefix + body)
+    updated = _normalize_semantic_sections(prefix + body, parent=parent)
     updated = _compact_interview_archive(updated)
 
     if INTERVIEW_CURRENT_START in updated and WIKI_CURRENT_START in updated:
@@ -1604,7 +1663,9 @@ def _normalize_managed_prose(text: str) -> str:
     )
 
 
-def _normalize_semantic_sections(text: str) -> str:
+def _normalize_semantic_sections(
+    text: str, *, parent: object = _UNRESOLVED_FRONTMATTER
+) -> str:
     """Replace conversation scaffolding with headings that explain reader use."""
 
     updated = re.sub(r"(?m)^## 현재 이해[ \t]*$", f"## {WIKI_CURRENT_HEADING}", text)
@@ -1622,7 +1683,8 @@ def _normalize_semantic_sections(text: str) -> str:
     )
     updated = re.sub(rf"(?m)^(## (?:{semantic}))[ \t]*\n(?!\n)", r"\1\n\n", updated)
 
-    parent = _frontmatter_value(updated, "parent")
+    if parent is _UNRESOLVED_FRONTMATTER:
+        parent = _frontmatter_value(updated, "parent")
     parent_target = _optional_wikilink_target(parent) if isinstance(parent, str) else None
     if parent_target is None:
         return updated

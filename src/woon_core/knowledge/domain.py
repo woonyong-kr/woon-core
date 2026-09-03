@@ -19,6 +19,8 @@ class DocumentMetadata:
     next_concepts: tuple[str, ...] = field(default_factory=tuple)
     related: tuple[str, ...] = field(default_factory=tuple)
     source_ids: tuple[str, ...] = field(default_factory=tuple)
+    node_kind: str = ""
+    entity_kind: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,66 @@
+{
+  "apply": false,
+  "payload_schema_version": 5,
+  "book_contract": {
+    "version": 5,
+    "sha256": "baac13e55136f63e1bf7a10516189d1232aff5d10c005b5048a6a441085c3bca"
+  },
+  "pages": [
+    {
+      "page_id": "books/book-slug/chapter-02",
+      "title": "2장 제목",
+      "body": "",
+      "statement": "2장의 검증된 목차를 제공한다.",
+      "current_use": "2장의 절을 선형적으로 탐색할 때 사용한다.",
+      "source_locator": "source://book-edition#chapter-02",
+      "source_sha256": "<source-sha256>",
+      "frontmatter": {
+        "access": "local-only",
+        "parent": "[[wiki/books/book-slug|책 제목]]",
+        "navigation_groups": []
+      },
+      "expected_revision": "<current-page-revision>"
+    }
+  ],
+  "retire_replacements": {
+    "books/book-slug/chapter-02/legacy-wrapper": "books/book-slug/chapter-02"
+  },
+  "retirement_expected_revisions": {
+    "books/book-slug/chapter-02/legacy-wrapper": "<current-wrapper-revision>"
+  },
+  "retirement_body_sha256": {
+    "books/book-slug/chapter-02/legacy-wrapper": "<reviewed-retirement-body-sha256>"
+  },
+  "coverage_manifest": {
+    "mode": "merge-scope",
+    "relative_path": "catalog/book-coverage-scopes/book-slug/chapter-02.json",
+    "expected_sha256": null,
+    "base_relative_path": "catalog/book-coverage/book-slug.json",
+    "base_expected_sha256": "<current-full-manifest-sha256>",
+    "scope_root_id": "books/book-slug/chapter-02",
+    "replacement": {
+      "schema_version": 2,
+      "book_id": "books/book-slug",
+      "coverage_scope": {
+        "root_id": "books/book-slug/chapter-02",
+        "base_relative_path": "catalog/book-coverage/book-slug.json",
+        "base_sha256": "<current-full-manifest-sha256>"
+      },
+      "edition": {
+        "label": "검증한 판본",
+        "source_sha256": "<source-sha256>"
+      },
+      "toc_evidence": [],
+      "toc_node_count": 0,
+      "toc_leaf_count": 0,
+      "source_structure_inventory_evidence": {},
+      "source_structure_elements": [],
+      "source_structure_assignments": [],
+      "retired_source_section_wrappers": [],
+      "source_element_inventory_evidence": {},
+      "source_elements": [],
+      "source_element_assignments": [],
+      "nodes": []
+    }
+  }
+}

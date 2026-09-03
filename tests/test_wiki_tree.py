@@ -3,10 +3,62 @@ from pathlib import Path
 from woon_core.knowledge.wiki_tree import (
     CHILDREN_END,
     CHILDREN_START,
+    SOURCE_INDEX_END,
+    SOURCE_INDEX_START,
     apply_wiki_tree_refresh,
+    is_wiki_source_archive,
     prepare_wiki_tree_refresh,
     preserve_generated_wiki_views,
 )
+
+
+def test_refresh_preserves_existing_children_before_source_index(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+        body=(
+            "## 하위 키워드\n\n"
+            f"{CHILDREN_START}\n"
+            "- [[wiki/child|하위]]\n"
+            f"{CHILDREN_END}\n\n"
+            "## 원자료\n\n"
+            f"{SOURCE_INDEX_START}\n"
+            "- [원자료](private/_sources/source.md)\n"
+            f"{SOURCE_INDEX_END}"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/child.md",
+        title="하위",
+        canonical_id="child",
+        node_kind="topic",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("하위",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / "wiki/README.md"].decode("utf-8")
+    assert rendered == (tmp_path / "wiki/README.md").read_text(encoding="utf-8")
+    assert rendered.index("## 하위 키워드") < rendered.index("## 원자료")
+
+
+def test_source_archive_detection_uses_the_vault_relative_boundary(tmp_path: Path) -> None:
+    wiki_root = tmp_path / "wiki"
+    archived = wiki_root / "private/_sources/knowledge/book/source.md"
+    normal = wiki_root / "concepts/source.md"
+    outside = tmp_path / "outside/source.md"
+
+    assert is_wiki_source_archive(archived, wiki_root)
+    assert not is_wiki_source_archive(normal, wiki_root)
+    assert not is_wiki_source_archive(outside, wiki_root)
 
 
 def test_preserved_view_reuses_an_empty_managed_heading() -> None:
@@ -20,6 +72,59 @@ def test_preserved_view_reuses_an_empty_managed_heading() -> None:
 
     assert preserved.count("## 하위 키워드") == 1
     assert preserved.count(CHILDREN_START) == 1
+
+
+def test_preserved_book_map_keeps_h2_topics_without_generic_children_heading() -> None:
+    rendered = "---\ntype: Wiki\n---\n\n# 책\n\n책 소개다.\n"
+    existing = (
+        "---\ntype: Wiki\n---\n\n# 책\n\n"
+        f"{CHILDREN_START}\n## 1부\n- [[wiki/book/chapter-01|1장]]\n"
+        f"{CHILDREN_END}\n\n책 소개다.\n"
+    )
+
+    preserved = preserve_generated_wiki_views(existing, rendered)
+
+    assert preserved.count(CHILDREN_START) == 1
+    assert "## 1부\n- [[wiki/book/chapter-01|1장]]" in preserved
+    assert "## 하위 키워드" not in preserved
+
+
+def test_refresh_removing_direct_h1_navigation_keeps_canonical_spacing(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/article.md",
+        title="문서",
+        canonical_id="article",
+        node_kind="detail",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("문서",),
+        view_mode="article",
+        body=(
+            f"{CHILDREN_START}\n"
+            "- [[wiki/README|퇴역한 링크]]\n"
+            f"{CHILDREN_END}\n\n"
+            "## 남은 목차\n\n"
+            "- 항목"
+        ),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / "wiki/article.md"].decode("utf-8")
+    assert "# 문서\n\n## 남은 목차" in rendered
+    assert "# 문서\n\n\n## 남은 목차" not in rendered
 
 
 def test_refresh_removes_stale_empty_latest_heading(tmp_path: Path) -> None:
@@ -136,6 +241,65 @@ def _write_history(vault: Path, parent_path: str, parent_title: str) -> None:
         body="- 2026-08-25 · 최초 기록",
         extra="entity_section: history\n",
     )
+
+
+def test_book_front_matter_titles_may_repeat_across_book_entities(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software.md",
+        title="소프트웨어",
+        canonical_id="books/software",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("소프트웨어",),
+    )
+    for index in (1, 2):
+        book_path = f"wiki/personal/book-{index}.md"
+        child_path = f"wiki/personal/book-{index}/afterword.md"
+        _write_page(
+            tmp_path,
+            book_path,
+            title=f"검증 책 {index}",
+            canonical_id=f"personal/book-{index}",
+            node_kind="entity",
+            parent="[[wiki/books/software|소프트웨어]]",
+            keywords=(f"검증 책 {index}",),
+            view_mode="linear",
+            body=f"- [[{child_path.removesuffix('.md')}|맺음말]]",
+            extra="entity_kind: book\n",
+        )
+        _write_page(
+            tmp_path,
+            child_path,
+            title="맺음말",
+            canonical_id=f"personal/book-{index}/afterword",
+            node_kind="detail",
+            parent=f"[[{book_path.removesuffix('.md')}|검증 책 {index}]]",
+            keywords=("맺음말",),
+            view_mode="article",
+        )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert not any("duplicate identity '맺음말'" in issue for issue in report.issues)
 
 
 def test_entity_does_not_repeat_an_authored_link_in_latest_related_documents(
@@ -406,6 +570,413 @@ def test_root_and_hub_render_only_direct_keyword_links(tmp_path: Path) -> None:
     assert "## 최신 하위 문서" not in hub
 
 
+def test_book_chapter_shows_only_direct_toc_depth_without_latest_descendants(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai.md",
+        title="AI",
+        canonical_id="books/ai",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("AI",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/llm.md",
+        title="LLM 책",
+        canonical_id="books/llm",
+        node_kind="entity",
+        parent="[[wiki/books/ai|AI]]",
+        keywords=("LLM 책",),
+        extra=(
+            "entity_kind: book\n"
+            "navigation_groups:\n"
+            "- label: 장\n"
+            "  children:\n"
+            "  - books/llm/chapter-01\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/llm/chapter-01.md",
+        title="1장",
+        canonical_id="books/llm/chapter-01",
+        node_kind="topic",
+        parent="[[wiki/books/llm|LLM 책]]",
+        keywords=("1장",),
+        extra=(
+            "view_mode: linear\n"
+            "navigation_groups:\n"
+                "- label: 시작 흐름\n"
+            "  children:\n"
+            "  - books/llm/chapter-01/1-1\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/llm/chapter-01/1-1.md",
+        title="1.1 시작",
+        canonical_id="books/llm/chapter-01/1-1",
+        node_kind="topic",
+        parent="[[wiki/books/llm/chapter-01|1장]]",
+        keywords=("1.1 시작",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: 1.1 시작\n"
+            "  children:\n"
+            "  - books/llm/chapter-01/1-1/1-1-1\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/llm/chapter-01/1-1/1-1-1.md",
+        title="1.1.1 첫 절",
+        canonical_id="books/llm/chapter-01/1-1/1-1-1",
+        node_kind="detail",
+        parent="[[wiki/books/llm/chapter-01/1-1|1.1 시작]]",
+        keywords=("1.1.1 첫 절",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+    assert report.issues == ()
+    chapter = report.pages[tmp_path / "wiki/books/llm/chapter-01.md"].decode("utf-8")
+
+    children = chapter.split(CHILDREN_START, maxsplit=1)[1].split(CHILDREN_END, maxsplit=1)[0]
+    assert "[[wiki/books/llm/chapter-01/1-1|1.1 시작]]" in children
+    assert "1-1-1" not in children
+    assert "## 최신 하위 문서" not in chapter
+    assert "<!-- woon-wiki-latest:start -->" not in chapter
+
+
+def test_book_root_and_chapter_render_source_topics_as_h2_with_direct_links(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software.md",
+        title="소프트웨어",
+        canonical_id="books/software",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("소프트웨어",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software/refactoring.md",
+        title="리팩터링 2판",
+        canonical_id="books/refactoring-2e",
+        node_kind="entity",
+        parent="[[wiki/books/software|소프트웨어]]",
+        keywords=("리팩터링 2판",),
+        view_mode="linear",
+        body="",
+        extra=(
+            "entity_kind: book\n"
+            "navigation_groups:\n"
+            "- label: 1부 원리\n"
+            "  children:\n"
+            "  - books/refactoring-2e/chapter-01\n"
+            "  - books/refactoring-2e/chapter-02\n"
+            "- label: 부록\n"
+            "  children:\n"
+            "  - books/refactoring-2e/appendix-a\n"
+        ),
+    )
+    for number in (1, 2):
+        extra = ""
+        if number == 1:
+            extra = (
+                "navigation_groups:\n"
+                "- label: 1.1 시작점\n"
+                "  children:\n"
+                "  - books/refactoring-2e/chapter-01/1-1\n"
+                "  - books/refactoring-2e/chapter-01/1-1-start\n"
+                "  - books/refactoring-2e/chapter-01/1-1-tests\n"
+            )
+        _write_page(
+            tmp_path,
+            f"wiki/books/software/refactoring/chapter-{number:02d}.md",
+            title=f"{number}장",
+            canonical_id=f"books/refactoring-2e/chapter-{number:02d}",
+            node_kind="topic",
+            parent="[[wiki/books/software/refactoring|리팩터링 2판]]",
+            keywords=(f"{number}장",),
+            view_mode="linear",
+            extra=extra,
+        )
+    _write_page(
+        tmp_path,
+        "wiki/books/software/refactoring/chapter-01/1-1.md",
+        title="1.1 시작점",
+        canonical_id="books/refactoring-2e/chapter-01/1-1",
+        node_kind="detail",
+        parent="[[wiki/books/software/refactoring/chapter-01|1장]]",
+        keywords=("1.1 시작점",),
+        view_mode="article",
+        body="이 절에서 다룰 출발점과 이후 세부 절을 연결하는 원문 도입 설명을 충분히 보존한다.",
+    )
+    for slug, title in (("1-1-start", "1.1.1 시작"), ("1-1-tests", "1.1.2 테스트")):
+        _write_page(
+            tmp_path,
+            f"wiki/books/software/refactoring/chapter-01/{slug}.md",
+            title=title,
+            canonical_id=f"books/refactoring-2e/chapter-01/{slug}",
+            node_kind="detail",
+            parent="[[wiki/books/software/refactoring/chapter-01|1장]]",
+            keywords=(title,),
+            view_mode="article",
+        )
+    _write_page(
+        tmp_path,
+        "wiki/books/software/refactoring/appendix-a.md",
+        title="부록 A",
+        canonical_id="books/refactoring-2e/appendix-a",
+        node_kind="detail",
+        parent="[[wiki/books/software/refactoring|리팩터링 2판]]",
+        keywords=("부록 A",),
+        view_mode="article",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    book = report.pages[tmp_path / "wiki/books/software/refactoring.md"].decode("utf-8")
+    chapter = report.pages[tmp_path / "wiki/books/software/refactoring/chapter-01.md"].decode(
+        "utf-8"
+    )
+    assert "## 1부 원리\n- [[wiki/books/software/refactoring/chapter-01|1장]]" in book
+    assert "- [[wiki/books/software/refactoring/chapter-02|2장]]" in book
+    assert "## 부록\n- [[wiki/books/software/refactoring/appendix-a|부록 A]]" in book
+    assert (
+        "## 1.1 시작점\n- [[wiki/books/software/refactoring/chapter-01/1-1-start|1.1.1 시작]]"
+    ) in chapter
+    assert "[[wiki/books/software/refactoring/chapter-01/1-1|1.1 시작점]]" not in chapter
+    assert ("- [[wiki/books/software/refactoring/chapter-01/1-1-tests|1.1.2 테스트]]") in chapter
+    assert "## 하위 키워드" not in book
+    assert "## 하위 키워드" not in chapter
+    assert "1. [[" not in book and "1. [[" not in chapter
+    assert "chapter-01/1-1-start/" not in chapter
+
+    apply_wiki_tree_refresh(tmp_path, report)
+    rerun = prepare_wiki_tree_refresh(tmp_path)
+    assert rerun.issues == ()
+    assert rerun.changed_count == 0
+
+
+def test_nested_book_navigation_map_renders_h2_topics_with_direct_links(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software.md",
+        title="소프트웨어",
+        canonical_id="books/software",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("소프트웨어",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software/llm.md",
+        title="밑바닥부터 만들면서 배우는 LLM",
+        canonical_id="personal/build-llm-from-scratch",
+        node_kind="entity",
+        parent="[[wiki/books/software|소프트웨어]]",
+        keywords=("밑바닥부터 만들면서 배우는 LLM",),
+        body="",
+        extra=(
+            "entity_kind: book\n"
+            "navigation_groups:\n"
+            "- label: 1부 LLM 만들기\n"
+            "  children:\n"
+            "  - personal/build-llm-from-scratch/chapter-03\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software/llm/chapter-03.md",
+        title="3장 텍스트 데이터 처리",
+        canonical_id="personal/build-llm-from-scratch/chapter-03",
+        node_kind="topic",
+        parent="[[wiki/books/software/llm|밑바닥부터 만들면서 배우는 LLM]]",
+        keywords=("3장 텍스트 데이터 처리",),
+        body="",
+        extra=(
+            "navigation_groups:\n"
+            "- label: 3.3 토큰화\n"
+            "  children:\n"
+            "  - personal/build-llm-from-scratch/chapter-03/3-3\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software/llm/chapter-03/3-3.md",
+        title="3.3 토큰화",
+        canonical_id="personal/build-llm-from-scratch/chapter-03/3-3",
+        node_kind="topic",
+        parent="[[wiki/books/software/llm/chapter-03|3장 텍스트 데이터 처리]]",
+        keywords=("3.3 토큰화",),
+        body="",
+        extra=(
+            "navigation_groups:\n"
+            "- label: 3.3.1 단어 단위 토큰화\n"
+            "  children:\n"
+            "  - personal/build-llm-from-scratch/chapter-03/3-3/3-3-1\n"
+            "- label: 3.3.2 부분 단어 토큰화\n"
+            "  children:\n"
+            "  - personal/build-llm-from-scratch/chapter-03/3-3/3-3-2\n"
+        ),
+    )
+    for suffix, title in (
+        ("3-3-1", "3.3.1 단어 단위 토큰화"),
+        ("3-3-2", "3.3.2 부분 단어 토큰화"),
+    ):
+        _write_page(
+            tmp_path,
+            f"wiki/books/software/llm/chapter-03/3-3/{suffix}.md",
+            title=title,
+            canonical_id=f"personal/build-llm-from-scratch/chapter-03/3-3/{suffix}",
+            node_kind="detail",
+            parent="[[wiki/books/software/llm/chapter-03/3-3|3.3 토큰화]]",
+            keywords=(title,),
+            view_mode="article",
+            body="토큰화 결과를 원문 예제로 확인한다.",
+        )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    nested = report.pages[
+        tmp_path / "wiki/books/software/llm/chapter-03/3-3.md"
+    ].decode("utf-8")
+    assert (
+        "## 3.3.1 단어 단위 토큰화\n"
+        "- [[wiki/books/software/llm/chapter-03/3-3/3-3-1|3.3.1 단어 단위 토큰화]]"
+    ) in nested
+    assert (
+        "## 3.3.2 부분 단어 토큰화\n"
+        "- [[wiki/books/software/llm/chapter-03/3-3/3-3-2|3.3.2 부분 단어 토큰화]]"
+    ) in nested
+    assert "- 3.3.1 단어 단위 토큰화" not in nested
+
+
+def test_book_map_with_children_requires_source_owned_navigation_groups(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software.md",
+        title="소프트웨어",
+        canonical_id="books/software",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("소프트웨어",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software/book.md",
+        title="검증 책",
+        canonical_id="books/verified",
+        node_kind="entity",
+        parent="[[wiki/books/software|소프트웨어]]",
+        keywords=("검증 책",),
+        view_mode="linear",
+        body="## 장\n\n- [[wiki/books/software/book/chapter-01|1장]]",
+        extra="entity_kind: book\n",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/software/book/chapter-01.md",
+        title="1장",
+        canonical_id="books/verified/chapter-01",
+        node_kind="topic",
+        parent="[[wiki/books/software/book|검증 책]]",
+        keywords=("1장",),
+        view_mode="linear",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == (
+        "wiki/books/software/book.md: book map requires navigation_groups for every "
+        "source part, appendix, or section topic",
+    )
+
+
 def test_temporal_children_render_open_range_closed_range_and_single_day(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
@@ -665,22 +1236,24 @@ def test_books_are_separate_genre_catalog_with_link_only_book_contents(tmp_path:
         parent="[[wiki/books/ai|AI·머신러닝]]",
         keywords=("LLM 책",),
         view_mode="linear",
-        extra="entity_kind: book\n",
-        body=(
-            "## 목차\n\n- [[#Ch 1|Ch 1]]\n\n"
-            "## Ch 1\n\n- [[wiki/ai/attention|Attention]]\n\n"
-            "## 학습 체크포인트\n"
-            "<!-- woon-learning-checkpoint:start -->\n"
-            "- 범위: Ch 1\n"
-            "- 상태: 확인됨\n"
-            "- 기록일: 2026-08-30\n"
-            "- 실행 증거:\n"
-            "  - 핵심 개념을 설명했다.\n"
-            "- 아직 불안정함:\n"
-            "  - 없음\n"
-            "- 다음 인출 질문: 다음 장의 첫 개념은 무엇인가?\n"
-            "<!-- woon-learning-checkpoint:end -->"
+        extra=(
+            "entity_kind: book\n"
+            "navigation_groups:\n"
+            "- label: 장\n"
+            "  children:\n"
+            "  - books/llm/chapter-01\n"
         ),
+            body="",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/llm/chapter-01.md",
+        title="Ch 1",
+        canonical_id="books/llm/chapter-01",
+        node_kind="topic",
+        parent="[[wiki/books/llm|LLM 책]]",
+        keywords=("Ch 1",),
+        body="## 첫 절\n\n첫 장의 학습 본문이다.",
     )
     _write_page(
         tmp_path,
@@ -1341,7 +1914,7 @@ def test_book_page_accepts_text_group_with_indented_chapter_links(tmp_path: Path
         keywords=("LLM 책",),
         view_mode="linear",
         extra="entity_kind: book\n",
-        body="- 1. 기초\n  - [[wiki/books/ch-1|Ch 1]]",
+        body="## 1. 기초\n\n- [[wiki/books/ch-1|Ch 1]]",
     )
 
     report = prepare_wiki_tree_refresh(tmp_path)
@@ -1349,7 +1922,7 @@ def test_book_page_accepts_text_group_with_indented_chapter_links(tmp_path: Path
     assert report.issues == ()
 
 
-def test_learning_book_accepts_whole_book_resolution_before_contents(tmp_path: Path) -> None:
+def test_learning_book_rejects_legacy_study_horizons(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -1393,16 +1966,19 @@ def test_learning_book_accepts_whole_book_resolution_before_contents(tmp_path: P
             "### 2주 · 핵심\n\n- [[wiki/books/ch-1|Ch 1]]\n\n"
             "### 1달 · 전체\n\n- [[wiki/books/ch-1|Ch 1]]\n\n"
             "### 5달 · 심화\n\n- [[wiki/books/ch-1|Ch 1]]\n\n"
-            "## 목차\n\n- 1. 기초\n  - [[wiki/books/ch-1|Ch 1]]"
+            "## 1. 기초\n\n- [[wiki/books/ch-1|Ch 1]]"
         ),
     )
 
     report = prepare_wiki_tree_refresh(tmp_path)
 
-    assert report.issues == ()
+    assert report.issues == (
+        "wiki/books/programming/kotlin.md: book page must follow the verified table "
+        "of contents without 2주·1달·5달 study horizons",
+    )
 
 
-def test_learning_book_rejects_missing_whole_book_resolution(tmp_path: Path) -> None:
+def test_learning_book_accepts_verified_contents_without_study_horizons(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -1445,10 +2021,286 @@ def test_learning_book_rejects_missing_whole_book_resolution(tmp_path: Path) -> 
 
     report = prepare_wiki_tree_refresh(tmp_path)
 
-    assert report.pages == {}
+    assert report.issues == ()
+
+
+def test_learning_book_projects_every_declared_child_as_visible(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/programming.md",
+        title="프로그래밍",
+        canonical_id="books/programming",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("프로그래밍",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/programming/kotlin.md",
+        title="Kotlin 책",
+        canonical_id="books/kotlin",
+        node_kind="entity",
+        parent="[[wiki/books/programming|프로그래밍]]",
+        keywords=("Kotlin 책",),
+        view_mode="linear",
+        extra=(
+            "entity_kind: book\n"
+            "content_kind: book\n"
+            "navigation_groups:\n"
+            "- label: 목차\n"
+            "  children:\n"
+            "  - books/kotlin/chapter-01\n"
+        ),
+            body="",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/programming/kotlin/chapter-01.md",
+        title="1장",
+        canonical_id="books/kotlin/chapter-01",
+        node_kind="detail",
+        parent="[[wiki/books/programming/kotlin|Kotlin 책]]",
+        keywords=("1장",),
+        view_mode="linear",
+        body="장 본문",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / "wiki/books/programming/kotlin.md"].decode("utf-8")
+    assert "## 목차\n- [[wiki/books/programming/kotlin/chapter-01|1장]]" in rendered
+    assert "## 하위 키워드" not in rendered
+
+
+def test_learning_book_rejects_same_page_chapter_anchors(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/programming.md",
+        title="프로그래밍",
+        canonical_id="books/programming",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("프로그래밍",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/programming/kotlin.md",
+        title="Kotlin 책",
+        canonical_id="books/kotlin",
+        node_kind="entity",
+        parent="[[wiki/books/programming|프로그래밍]]",
+        keywords=("Kotlin 책",),
+        view_mode="linear",
+        extra="entity_kind: book\ncontent_kind: book\n",
+        body="## 목차\n\n- [[#1장|1장]]",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
     assert report.issues == (
-        "wiki/books/programming/kotlin.md: learning book requires one whole-book "
-        "2주·1달·5달 learning resolution",
+        "wiki/books/programming/kotlin.md: book contents must link to chapter pages, not anchors",
+    )
+
+
+def test_learning_book_rejects_nested_heading_links_as_fake_children(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/kotlin.md",
+        title="Kotlin in Action",
+        canonical_id="books/kotlin",
+        node_kind="entity",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("Kotlin in Action",),
+        extra="entity_kind: book\n",
+        body=(
+            "## 목차\n\n"
+            "- 1부\n"
+            "  - [[wiki/books/kotlin/chapter-01|1장]]\n"
+            "    - [[wiki/books/kotlin/chapter-01/section-01|1.1절]]\n"
+        ),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert (
+        "wiki/books/kotlin.md: book page body must contain only headings and hyperlink rows"
+    ) in report.issues
+
+
+def test_numbered_lesson_must_stay_under_its_owning_chapter(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: Kotlin\n"
+            "  children:\n"
+            "  - personal/kotlin-in-action/chapter-02\n"
+            "  - personal/kotlin-in-action/chapter-02/2-1-1-first-program\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/kotlin-in-action/chapter-02.md",
+        title="Ch 2",
+        canonical_id="personal/kotlin-in-action/chapter-02",
+        node_kind="topic",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("Kotlin Chapter 2",),
+        view_mode="linear",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/kotlin-in-action/chapter-02/2-1-1-first-program.md",
+        title="2.1.1 첫 프로그램",
+        canonical_id="personal/kotlin-in-action/chapter-02/2-1-1-first-program",
+        node_kind="topic",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("2.1.1 첫 프로그램",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert (
+        "wiki/personal/kotlin-in-action/chapter-02/2-1-1-first-program.md: "
+        "numbered lesson must stay below "
+        "wiki/personal/kotlin-in-action/chapter-02.md"
+    ) in report.issues
+
+
+def test_numbered_lesson_accepts_verified_nested_section_depth(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/book/chapter-02.md",
+        title="2장",
+        canonical_id="personal/book/chapter-02",
+        node_kind="topic",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("2장",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/book/chapter-02/2-3.md",
+        title="2.3 구현하기",
+        canonical_id="personal/book/chapter-02/2-3",
+        node_kind="topic",
+        parent="[[wiki/personal/book/chapter-02|2장]]",
+        keywords=("2.3 구현하기",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/book/chapter-02/2-3/2-3-1.md",
+        title="2.3.1 첫 구현",
+        canonical_id="personal/book/chapter-02/2-3/2-3-1",
+        node_kind="detail",
+        parent="[[wiki/personal/book/chapter-02/2-3|2.3]]",
+        keywords=("2.3.1 첫 구현",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert not any("numbered lesson" in issue for issue in report.issues)
+
+
+def test_chapter_body_rejects_manual_duplicates_of_managed_lesson_links(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/kotlin-in-action/chapter-02.md",
+        title="Ch 2",
+        canonical_id="personal/kotlin-in-action/chapter-02",
+        node_kind="topic",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("Kotlin Chapter 2",),
+        view_mode="linear",
+        body=(
+            "상세 설명을 상위 페이지에 복제한다.\n\n"
+            "- [[wiki/personal/kotlin-in-action/chapter-02/2-1-1-first-program|2.1.1]]"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/kotlin-in-action/chapter-02/2-1-1-first-program.md",
+        title="2.1.1 첫 프로그램",
+        canonical_id="personal/kotlin-in-action/chapter-02/2-1-1-first-program",
+        node_kind="topic",
+        parent="[[wiki/personal/kotlin-in-action/chapter-02|Ch 2]]",
+        keywords=("2.1.1 첫 프로그램",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == (
+        "wiki/personal/kotlin-in-action/chapter-02.md: chapter body must not duplicate "
+        "managed lesson links: personal/kotlin-in-action/chapter-02/2-1-1-first-program",
     )
 
 
@@ -1555,3 +2407,113 @@ def test_resource_topic_rejects_prose_and_child_entity_cards(tmp_path: Path) -> 
     assert any("must contain only hyperlink rows" in issue for issue in report.issues)
     assert any("must not own intermediate Wiki children" in issue for issue in report.issues)
     assert any("resource entity cards are retired" in issue for issue in report.issues)
+
+
+def test_book_chapter_map_rejects_h2_topic_wrapper_child(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/book/chapter-01.md",
+        title="1장 기초",
+        canonical_id="personal/book/chapter-01",
+        node_kind="topic",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("1장 기초",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: 1.1 함수\n"
+            "  children:\n"
+            "  - personal/book/chapter-01/1-1-function\n"
+            "  - personal/book/chapter-01/1-1-1-declaration\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/book/chapter-01/1-1-function.md",
+        title="1.1 함수",
+        canonical_id="personal/book/chapter-01/1-1-function",
+        node_kind="detail",
+        parent="[[wiki/personal/book/chapter-01|1장 기초]]",
+        keywords=("1.1 함수",),
+        body="[[wiki/personal/book/chapter-01/1-1-1-declaration|함수 선언]]",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/book/chapter-01/1-1-1-declaration.md",
+        title="1.1.1 함수 선언",
+        canonical_id="personal/book/chapter-01/1-1-1-declaration",
+        node_kind="detail",
+        parent="[[wiki/personal/book/chapter-01|1장 기초]]",
+        keywords=("1.1.1 함수 선언",),
+        body="함수 선언을 설명한다.",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert (
+        "wiki/personal/book/chapter-01.md: chapter H2 topic must not be repeated as a "
+        "wrapper child: personal/book/chapter-01/1-1-function"
+    ) in report.issues
+
+
+def test_book_chapter_map_keeps_source_section_with_direct_content(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/book/chapter-01.md",
+        title="1장 기초",
+        canonical_id="personal/book/chapter-01",
+        node_kind="topic",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("1장 기초",),
+        extra=(
+            "navigation_groups:\n"
+            "- label: 1.1 함수\n"
+            "  children:\n"
+            "  - personal/book/chapter-01/1-1-function\n"
+            "  - personal/book/chapter-01/1-1-1-declaration\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/book/chapter-01/1-1-function.md",
+        title="1.1 함수",
+        canonical_id="personal/book/chapter-01/1-1-function",
+        node_kind="detail",
+        parent="[[wiki/personal/book/chapter-01|1장 기초]]",
+        keywords=("1.1 함수",),
+        body=(
+            "함수는 입력을 받아 값을 계산하며, 이 절의 도입에서는 선언과 호출의 "
+            "공통 실행 흐름을 먼저 설명한다."
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/personal/book/chapter-01/1-1-1-declaration.md",
+        title="1.1.1 함수 선언",
+        canonical_id="personal/book/chapter-01/1-1-1-declaration",
+        node_kind="detail",
+        parent="[[wiki/personal/book/chapter-01|1장 기초]]",
+        keywords=("1.1.1 함수 선언",),
+        body="함수 선언을 설명한다.",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert not any("wrapper child" in issue for issue in report.issues)

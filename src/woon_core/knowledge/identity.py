@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from woon_core.errors import WoonError
 
 
@@ -20,6 +22,15 @@ def validate_canonical_id(value: str) -> str:
         if any(not (character.isalnum() or character == "-") for character in segment):
             raise _invalid_canonical_id()
     return canonical_id
+
+
+def is_book_scoped_canonical_id(value: str) -> bool:
+    """Return whether a page identity is scoped below one book chapter or appendix."""
+
+    return any(
+        re.fullmatch(r"chapter-\d{2}|appendix-[a-z]", segment) is not None
+        for segment in value.split("/")
+    )
 
 
 def _invalid_canonical_id() -> WoonError:

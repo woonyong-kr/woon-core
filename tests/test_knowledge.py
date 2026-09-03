@@ -46,6 +46,16 @@ class CountingRepository(MarkdownDocumentRepository):
         return super().list_documents()
 
 
+class CountingParseRepository(MarkdownDocumentRepository):
+    def __init__(self, vault: Path, canonical_root: Path) -> None:
+        super().__init__(vault, canonical_root)
+        self.parse_calls = 0
+
+    def parse(self, relative_path: str, text: str) -> CanonicalDocument:
+        self.parse_calls += 1
+        return super().parse(relative_path, text)
+
+
 def make_service(tmp_path: Path) -> KnowledgeService:
     canonical_root = tmp_path / "wiki/canonical"
     canonical_root.mkdir(parents=True, exist_ok=True)
@@ -207,6 +217,108 @@ def test_archive_rejects_duplicate_normalized_title(tmp_path: Path) -> None:
 
     with pytest.raises(WoonError, match="same normalized title"):
         service.archive(duplicate, "## 설명\n\n두 번째 문서.")
+
+
+def test_audit_allows_book_scoped_title_to_match_general_concept(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.archive(metadata(), "## 설명\n\n일반 개념 문서.")
+    book = tmp_path / "wiki/canonical/personal/book.md"
+    book.parent.mkdir(parents=True, exist_ok=True)
+    book.write_text(
+        "---\ncanonical_id: personal/book\ntitle: 검증 책\ndomain: personal\n"
+        "summary: 책 범위 제목 검증용 정본이다.\nnode_kind: entity\nentity_kind: book\n"
+        "---\n\n# 검증 책\n\n책 본문이다.\n",
+        encoding="utf-8",
+    )
+    chapter = tmp_path / "wiki/canonical/personal/book/chapter-01.md"
+    chapter.parent.mkdir(parents=True)
+    chapter.write_text(
+        "---\n"
+        "canonical_id: personal/book/chapter-01\n"
+        "title: 포트와 어댑터\n"
+        "domain: personal\n"
+        "summary: 책 1장의 설명이다.\n"
+        "purpose: 책 순서에서 1장을 읽는다.\n"
+        "---\n\n"
+        "# 포트와 어댑터\n\n"
+        "## 설명\n\n책의 원문 순서를 보존한다.\n",
+        encoding="utf-8",
+    )
+
+    errors = service.audit()
+
+    assert not any("title also used" in error for error in errors)
+
+
+def test_audit_allows_same_frontmatter_title_in_different_books(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    for slug, title in (("first-book", "첫 번째 책"), ("second-book", "두 번째 책")):
+        book = tmp_path / f"wiki/canonical/personal/{slug}.md"
+        book.parent.mkdir(parents=True, exist_ok=True)
+        book.write_text(
+            "---\n"
+            f"canonical_id: personal/{slug}\n"
+            f"title: {title}\n"
+            "domain: personal\n"
+            "summary: 책 범위 제목 검증용 정본이다.\n"
+            "node_kind: entity\n"
+            "entity_kind: book\n"
+            "---\n\n"
+            f"# {title}\n\n책 본문이다.\n",
+            encoding="utf-8",
+        )
+        afterword = tmp_path / f"wiki/canonical/personal/{slug}/afterword.md"
+        afterword.parent.mkdir(parents=True, exist_ok=True)
+        afterword.write_text(
+            "---\n"
+            f"canonical_id: personal/{slug}/afterword\n"
+            "title: 맺음말\n"
+            "domain: personal\n"
+            "summary: 책의 맺음말이다.\n"
+            "purpose: 책의 결론을 읽는다.\n"
+            "---\n\n"
+            "# 맺음말\n\n책의 결론이다.\n",
+            encoding="utf-8",
+        )
+
+    errors = service.audit()
+
+    assert not any("normalized title also used" in error for error in errors)
+
+
+def test_audit_rejects_duplicate_title_within_same_book_chapter(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    book = tmp_path / "wiki/canonical/personal/book.md"
+    book.parent.mkdir(parents=True, exist_ok=True)
+    book.write_text(
+        "---\ncanonical_id: personal/book\ntitle: 검증 책\ndomain: personal\n"
+        "summary: 책 범위 제목 검증용 정본이다.\nnode_kind: entity\nentity_kind: book\n"
+        "---\n\n# 검증 책\n\n책 본문이다.\n",
+        encoding="utf-8",
+    )
+    first = tmp_path / "wiki/canonical/personal/book/chapter-01/first.md"
+    duplicate = tmp_path / "wiki/canonical/personal/book/chapter-01/duplicate.md"
+    duplicate.parent.mkdir(parents=True)
+    for path, canonical_id in (
+        (first, "personal/book/chapter-01/first"),
+        (duplicate, "personal/book/chapter-01/duplicate"),
+    ):
+        path.write_text(
+            "---\n"
+            f"canonical_id: {canonical_id}\n"
+            "title: 같은 절 제목\n"
+            "domain: personal\n"
+            "summary: 책 내부 중복 제목을 검증한다.\n"
+            "purpose: 같은 장 안의 탐색 충돌을 막는다.\n"
+            "---\n\n"
+            "# 같은 절 제목\n\n"
+            "## 설명\n\n본문이다.\n",
+            encoding="utf-8",
+        )
+
+    errors = service.audit()
+
+    assert any("duplicate title in personal/book/chapter-01" in error for error in errors)
 
 
 def test_concurrent_update_allows_exactly_one_revision(tmp_path: Path) -> None:
@@ -733,3 +845,33 @@ def test_repository_resolves_stable_canonical_id_after_page_move(tmp_path: Path)
     assert saved.document.relative_path == "wiki/new-location/topic.md"
     assert moved.is_file()
     assert not (canonical_root / "concepts/stable-topic.md").exists()
+
+
+def test_repository_indexes_canonical_paths_once_during_exclusive_batch(
+    tmp_path: Path,
+) -> None:
+    canonical_root = tmp_path / "wiki"
+    for index in range(3):
+        source = canonical_root / f"moved/topic-{index}.md"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            "---\n"
+            f"type: Wiki\ncanonical_id: concepts/topic-{index}\ntitle: 주제 {index}\n"
+            "summary: 배치 경로 색인 동작을 검증한다.\n"
+            "---\n\n"
+            f"# 주제 {index}\n\n본문이다.\n",
+            encoding="utf-8",
+        )
+    repository = CountingParseRepository(tmp_path, canonical_root)
+
+    with repository.exclusive():
+        indexed_calls = repository.parse_calls
+        assert indexed_calls == 3
+        for index in range(100):
+            canonical_id = f"personal/new-book/page-{index}"
+            assert repository.get(canonical_id) is None
+            assert repository.snapshot(canonical_id) is None
+        assert repository.parse_calls == indexed_calls
+
+    assert repository.get("concepts/topic-1") is not None
+    assert repository.parse_calls > indexed_calls
