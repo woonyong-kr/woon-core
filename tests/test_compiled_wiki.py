@@ -319,6 +319,7 @@ def atomic_book_service(
     root_frontmatter["node_kind"] = "entity"
     root_frontmatter["entity_kind"] = "book"
     root_frontmatter["content_kind"] = "book"
+    root_frontmatter["book_toc_only"] = True
     root_frontmatter["navigation_groups"] = [{"label": "1부", "children": [leaf_id]}]
     record = VerifiedBookPage(
         page_id=root_id,
@@ -705,6 +706,7 @@ def rights_restore_scope_fixture(
         body="",
         frontmatter={
             **copy.deepcopy(pages_by_id[chapter_id]["frontmatter"]),
+            "book_toc_only": True,
             "navigation_groups": [
                 {"label": "첫 주제", "children": [f"{chapter_id}/1-1"]}
             ],
@@ -1651,14 +1653,13 @@ def test_atomic_verified_book_update_promotes_retires_compiles_and_reindexes_onc
     sources = yaml.safe_load(
         (tmp_path / "catalog/llm-wiki/sources.yaml").read_text(encoding="utf-8")
     )["sources"]
-    promoted_source = next(
-        item for item in sources if item["source_id"] == by_id[root_id]["render"]["source_id"]
-    )
     retired_source = next(item for item in sources if item["locator"] == f"{wrapper_id}.md")
-    assert promoted_source["locator"] == record.source_locator
+    assert by_id[root_id]["render"] == {"kind": "toc-only"}
+    assert by_id[root_id]["frontmatter"]["content_state"] == "toc-only"
+    assert all(item["locator"] != record.source_locator for item in sources)
     assert retired_source["locator"] == f"{wrapper_id}.md"
     assert retired_source["lifecycle"] == "archived"
-    assert retired_source["superseded_by"] == promoted_source["source_id"]
+    assert retired_source["superseded_by"] in by_id[root_id]["source_ids"]
     assert compiler.audit().complete
 
 
@@ -1713,6 +1714,77 @@ def test_verified_book_promotion_rejects_empty_leaf_body(tmp_path: Path) -> None
 
     with pytest.raises(WoonError, match="body must be a non-empty string"):
         service.promote_verified_book_pages((record,))
+
+
+def test_verified_book_promotion_accepts_explicit_toc_only_without_empty_source(
+    tmp_path: Path,
+) -> None:
+    write_page(tmp_path, "seed.md", "시드", "컴파일러 catalog를 초기화한다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    before_sources, before_claims, _, _, _ = compiler._load_inputs()
+    record = VerifiedBookPage(
+        page_id="books/example",
+        title="예제 책",
+        body="",
+        statement="원문 목차에 존재하는 책이다.",
+        current_use="책의 목차를 탐색한다.",
+        source_locator="source://book/example#toc",
+        source_sha256="d" * 64,
+        frontmatter={
+            **verified_book_frontmatter("books/example", "예제 책"),
+            "book_toc_only": True,
+        },
+    )
+
+    compiler.promote_verified_book_pages((record,))
+
+    sources, claims, pages, _, _ = compiler._load_inputs()
+    page = pages[record.page_id]
+    assert sources == before_sources
+    assert claims == before_claims
+    assert page["render"] == {"kind": "toc-only"}
+    assert page["source_ids"] == []
+    assert page["claim_ids"] == []
+    assert page["frontmatter"]["content_state"] == "toc-only"
+    assert "book_toc_only" not in page["frontmatter"]
+
+
+@pytest.mark.parametrize(
+    ("body", "children", "message"),
+    [
+        ("임의 설명이다.\n", [], "must not contain authored prose"),
+        ("", ["books/example"], "must not link to itself"),
+    ],
+)
+def test_verified_book_promotion_rejects_invalid_explicit_toc_only(
+    tmp_path: Path,
+    body: str,
+    children: list[str],
+    message: str,
+) -> None:
+    write_page(tmp_path, "seed.md", "시드", "컴파일러 catalog를 초기화한다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    frontmatter = {
+        **verified_book_frontmatter("books/example", "예제 책"),
+        "book_toc_only": True,
+    }
+    if children:
+        frontmatter["navigation_groups"] = [{"label": "목차", "children": children}]
+    record = VerifiedBookPage(
+        page_id="books/example",
+        title="예제 책",
+        body=body,
+        statement="TOC-only 무결성을 검증한다.",
+        current_use="책의 목차를 탐색한다.",
+        source_locator="source://book/example#toc",
+        source_sha256="d" * 64,
+        frontmatter=frontmatter,
+    )
+
+    with pytest.raises(WoonError, match=message):
+        compiler.promote_verified_book_pages((record,))
 
 
 def test_atomic_verified_book_update_replaces_coverage_manifest_in_same_transaction(

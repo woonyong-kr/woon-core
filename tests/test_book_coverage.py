@@ -424,6 +424,95 @@ def test_book_coverage_v7_accepts_source_language_before_translation(
     assert report.covered_leaf_count == 1
 
 
+def test_book_coverage_accepts_explicit_toc_only_non_leaf(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    target, manifest = _verified_fixture(vault)
+    leaf_id = "books/kotlin/chapter-01"
+    (vault / "wiki/books/kotlin/chapter-01.md").write_text(
+        "---\n"
+        f"title: {leaf_id}\n"
+        f"canonical_id: {leaf_id}\n"
+        "node_kind: entity\n"
+        "parent: '[[wiki/books/kotlin|parent]]'\n"
+        "content_state: toc-only\n"
+        "---\n\n"
+        f"# {leaf_id}\n",
+        encoding="utf-8",
+    )
+    nodes = manifest["nodes"]
+    assert isinstance(nodes, list) and isinstance(nodes[0], dict)
+    node = nodes[0]
+    node["state"] = "toc-only"
+    node["leaf"] = False
+    node["has_direct_content"] = False
+    node.pop("coverage")
+    node.pop("runnable")
+    manifest["toc_leaf_count"] = 0
+    manifest["source_elements"] = []
+    manifest["source_element_assignments"] = []
+    target.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = audit_book_coverage(vault)
+
+    assert report.complete
+    assert report.covered_leaf_count == 0
+
+
+@pytest.mark.parametrize(
+    ("node_change", "body", "message"),
+    [
+        ({"leaf": True}, "", "toc-only node must declare leaf=false"),
+        (
+            {"has_direct_content": True},
+            "",
+            "toc-only node must declare has_direct_content=false",
+        ),
+        ({}, "임의 설명이다.\n", "toc-only page contains authored prose"),
+    ],
+)
+def test_book_coverage_rejects_invalid_toc_only_node(
+    tmp_path: Path,
+    node_change: dict[str, object],
+    body: str,
+    message: str,
+) -> None:
+    vault = tmp_path / "vault"
+    target, manifest = _verified_fixture(vault)
+    leaf_id = "books/kotlin/chapter-01"
+    (vault / "wiki/books/kotlin/chapter-01.md").write_text(
+        "---\n"
+        f"title: {leaf_id}\n"
+        f"canonical_id: {leaf_id}\n"
+        "node_kind: entity\n"
+        "parent: '[[wiki/books/kotlin|parent]]'\n"
+        "content_state: toc-only\n"
+        "---\n\n"
+        f"# {leaf_id}\n\n{body}",
+        encoding="utf-8",
+    )
+    nodes = manifest["nodes"]
+    assert isinstance(nodes, list) and isinstance(nodes[0], dict)
+    node = nodes[0]
+    node.update(
+        {
+            "state": "toc-only",
+            "leaf": False,
+            "has_direct_content": False,
+            **node_change,
+        }
+    )
+    node.pop("coverage")
+    node.pop("runnable")
+    manifest["toc_leaf_count"] = 1 if node.get("leaf") is True else 0
+    manifest["source_elements"] = []
+    manifest["source_element_assignments"] = []
+    target.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = audit_book_coverage(vault)
+
+    assert any(message in error for error in report.errors)
+
+
 def test_book_coverage_v7_rejects_remote_runner_for_local_only_source(
     tmp_path: Path,
 ) -> None:

@@ -2291,8 +2291,16 @@ class CompiledWiki:
         """Prevent concept-linking from silently regenerating reader prose."""
 
         for record in records:
+            is_toc_only = _verified_book_toc_only(record.frontmatter)
             is_navigation_map = bool(record.frontmatter.get("navigation_groups"))
-            candidate_body = _curated_body(record.body, allow_empty=is_navigation_map)
+            candidate_body = _curated_body(
+                record.body,
+                allow_empty=is_toc_only or is_navigation_map,
+            )
+            if is_toc_only and candidate_body:
+                raise WoonError(
+                    f"toc-only verified book page must not contain authored prose: {record.page_id}"
+                )
             workflow_violation = book_reader_workflow_prose_violation(candidate_body)
             if workflow_violation is not None:
                 raise WoonError(
@@ -2310,6 +2318,12 @@ class CompiledWiki:
                     f"concept-linked book page must already exist: {record.page_id}"
                 )
             render = page.get("render")
+            if _verified_book_toc_only(record.frontmatter):
+                if not isinstance(render, dict) or render.get("kind") != "toc-only":
+                    raise WoonError(
+                        f"concept-linked toc-only book page must remain toc-only: {record.page_id}"
+                    )
+                continue
             if not isinstance(render, dict) or render.get("kind") != "source-body":
                 raise WoonError(
                     f"concept-linked book page must have a current source body: {record.page_id}"
@@ -2320,11 +2334,15 @@ class CompiledWiki:
                 raise WoonError(
                     f"concept-linked book page source does not exist: {record.page_id}"
                 )
+            is_toc_only = _verified_book_toc_only(record.frontmatter)
             is_navigation_map = bool(record.frontmatter.get("navigation_groups"))
-            candidate_body = _curated_body(record.body, allow_empty=is_navigation_map)
+            candidate_body = _curated_body(
+                record.body,
+                allow_empty=is_toc_only or is_navigation_map,
+            )
             current_body = _curated_body(
                 str(source.get("body", "")),
-                allow_empty=is_navigation_map,
+                allow_empty=is_toc_only or is_navigation_map,
             )
             if _normalize(candidate_body) != _normalize(current_body):
                 raise WoonError(
@@ -2523,6 +2541,7 @@ class CompiledWiki:
             current_manifest,
             update.replacement,
             "book coverage manifest",
+            allow_source_landed_expansion=True,
         )
         try:
             replacement_bytes = (
@@ -2867,13 +2886,47 @@ class CompiledWiki:
                 raise WoonError("verified book frontmatter must be a mapping")
             frontmatter["canonical_id"] = page_id
             frontmatter["title"] = title
+            is_toc_only = _normalize_verified_book_toc_only(frontmatter)
             if frontmatter.get("access", "local-only") not in {"local-only", "private"}:
                 raise WoonError("verified book promotion is private-only")
             if not isinstance(frontmatter.get("parent"), str) and page_id.count("/") > 1:
                 raise WoonError("verified book child page requires a canonical parent")
             navigation_groups = frontmatter.get("navigation_groups")
             is_navigation_map = isinstance(navigation_groups, list) and bool(navigation_groups)
-            body = _curated_body(record.body, allow_empty=is_navigation_map)
+            body = _curated_body(
+                record.body,
+                allow_empty=is_toc_only or is_navigation_map,
+            )
+            if is_toc_only:
+                if body:
+                    raise WoonError(
+                        f"toc-only verified book page must not contain authored prose: {page_id}"
+                    )
+                _validate_toc_only_navigation(page_id, navigation_groups)
+                previous = pages.get(page_id)
+                source_ids = list(previous.get("source_ids", [])) if previous else []
+                claim_ids = list(previous.get("claim_ids", [])) if previous else []
+                frontmatter["source_ids"] = source_ids
+                replacement = {
+                    "page_id": page_id,
+                    "output_path": f"{page_id}.md",
+                    "title": title,
+                    "frontmatter": frontmatter,
+                    "source_ids": source_ids,
+                    "claim_ids": claim_ids,
+                    "render": {"kind": "toc-only"},
+                }
+                replacement_curation = {
+                    "page_id": page_id,
+                    "current_use": current_use,
+                    "basis": "manual-review",
+                    "status": "confirmed",
+                }
+                if previous != replacement or curations.get(page_id) != replacement_curation:
+                    changed.append(page_id)
+                pages[page_id] = replacement
+                curations[page_id] = replacement_curation
+                continue
 
             body_hash = _sha256_text(_normalize(body))
             source_id = f"source://verified-book/{page_id}/{body_hash[:24]}"
@@ -3601,6 +3654,13 @@ class CompiledWiki:
     def _page_sources(
         self, page: dict[str, Any], sources: dict[str, dict[str, Any]]
     ) -> list[dict[str, Any]]:
+        render = page.get("render")
+        if (
+            isinstance(render, dict)
+            and render.get("kind") == "toc-only"
+            and page.get("source_ids") == []
+        ):
+            return []
         identifiers = _string_list(page.get("source_ids"), "page source_ids")
         records: list[dict[str, Any]] = []
         for identifier in identifiers:
@@ -3623,6 +3683,13 @@ class CompiledWiki:
     def _page_claims(
         self, page: dict[str, Any], claims: dict[str, dict[str, Any]]
     ) -> list[dict[str, Any]]:
+        render = page.get("render")
+        if (
+            isinstance(render, dict)
+            and render.get("kind") == "toc-only"
+            and page.get("claim_ids") == []
+        ):
+            return []
         identifiers = _string_list(page.get("claim_ids"), "page claim_ids")
         records: list[dict[str, Any]] = []
         for identifier in identifiers:
@@ -3905,6 +3972,38 @@ def _curated_body(value: str, *, allow_empty: bool = False) -> str:
             "negative dingbat callouts are too low-contrast"
         )
     return body
+
+
+def _verified_book_toc_only(frontmatter: object) -> bool:
+    if not isinstance(frontmatter, dict):
+        return False
+    marker = frontmatter.get("book_toc_only")
+    if marker is not None and marker is not True:
+        raise WoonError("verified book book_toc_only marker must be true when present")
+    return marker is True or frontmatter.get("content_state") == "toc-only"
+
+
+def _normalize_verified_book_toc_only(frontmatter: dict[str, Any]) -> bool:
+    is_toc_only = _verified_book_toc_only(frontmatter)
+    frontmatter.pop("book_toc_only", None)
+    if is_toc_only:
+        frontmatter["content_state"] = "toc-only"
+    return is_toc_only
+
+
+def _validate_toc_only_navigation(page_id: str, navigation_groups: object) -> None:
+    if navigation_groups is None:
+        return
+    if not isinstance(navigation_groups, list):
+        raise WoonError("toc-only verified book navigation_groups must be an array")
+    for group in navigation_groups:
+        children = group.get("children") if isinstance(group, dict) else None
+        if not isinstance(children, list):
+            raise WoonError("toc-only verified book navigation group children must be an array")
+        for child in children:
+            child_id = _relation_target(child) if isinstance(child, str) else None
+            if child_id == page_id:
+                raise WoonError(f"toc-only verified book page must not link to itself: {page_id}")
 
 
 def _retirement_body(value: str) -> str:
@@ -4813,6 +4912,8 @@ def _validate_book_workflow_progression(
     current: dict[str, Any] | None,
     replacement: dict[str, Any],
     label: str,
+    *,
+    allow_source_landed_expansion: bool = False,
 ) -> None:
     """Reject phase rollback and loss of immutable source/translation coverage."""
 
@@ -4862,6 +4963,56 @@ def _validate_book_workflow_progression(
                 f"{label} phase evidence cannot change after {reached_phase} is verified"
             )
 
+    if (
+        allow_source_landed_expansion
+        and current_phase == "source-landed"
+        and phase == "source-landed"
+    ):
+        extensible_fields = {
+            "nodes",
+            "source_structure_elements",
+            "source_structure_assignments",
+            "source_elements",
+            "source_asset_inventory",
+            "source_element_assignments",
+        }
+        refreshable_evidence_fields = {
+            "toc_evidence",
+            "source_structure_inventory_evidence",
+            "source_element_inventory_evidence",
+            "source_asset_inventory_evidence",
+        }
+        count_fields = {"toc_node_count", "toc_leaf_count"}
+        mutable_fields = (
+            extensible_fields | refreshable_evidence_fields | count_fields
+        )
+        for field in set(current) | set(replacement):
+            if field not in mutable_fields and replacement.get(field) != current.get(field):
+                raise WoonError(
+                    f"{label} immutable {field} cannot change during source landing"
+                )
+        for field, identity_field in (
+            ("nodes", "canonical_id"),
+            ("source_structure_elements", "structure_id"),
+            ("source_structure_assignments", "structure_id"),
+            ("source_elements", "element_id"),
+            ("source_asset_inventory", "asset_id"),
+            ("source_element_assignments", "element_id"),
+        ):
+            _validate_ordered_supersequence(
+                current.get(field),
+                replacement.get(field),
+                field=field,
+                identity_field=identity_field,
+                label=label,
+            )
+        _validate_source_asset_inventory_evidence(
+            replacement.get("source_asset_inventory"),
+            replacement.get("source_asset_inventory_evidence"),
+            label,
+        )
+        return
+
     for field in (
         "edition",
         "source_archive",
@@ -4884,6 +5035,95 @@ def _validate_book_workflow_progression(
     ):
         raise WoonError(
             f"{label} translated reader delivery cannot decrease or be regenerated"
+        )
+
+
+def _validate_ordered_supersequence(
+    current: Any,
+    replacement: Any,
+    *,
+    field: str,
+    identity_field: str,
+    label: str,
+) -> None:
+    """Allow insertion while preserving every existing identified object and its order."""
+
+    if not isinstance(current, list) or not isinstance(replacement, list):
+        raise WoonError(f"{label} {field} must remain an array during source landing")
+
+    def indexed(items: list[Any], version: str) -> dict[str, tuple[int, bytes]]:
+        result: dict[str, tuple[int, bytes]] = {}
+        for index, item in enumerate(items):
+            identity = item.get(identity_field) if isinstance(item, dict) else None
+            if not isinstance(identity, str) or not identity:
+                raise WoonError(
+                    f"{label} {field}[{index}] must have a non-empty {identity_field}"
+                )
+            if identity in result:
+                raise WoonError(
+                    f"{label} {field} contains duplicate {identity_field}: {identity}"
+                )
+            try:
+                canonical = json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            except (TypeError, ValueError) as error:
+                raise WoonError(
+                    f"{label} {version} {field}[{index}] must be JSON"
+                ) from error
+            result[identity] = (index, canonical)
+        return result
+
+    current_by_id = indexed(current, "current")
+    replacement_by_id = indexed(replacement, "replacement")
+    previous_index = -1
+    for identity, (_, current_bytes) in current_by_id.items():
+        replacement_item = replacement_by_id.get(identity)
+        if replacement_item is None:
+            raise WoonError(
+                f"{label} {field} cannot delete existing {identity_field}: {identity}"
+            )
+        replacement_index, replacement_bytes = replacement_item
+        if replacement_bytes != current_bytes:
+            raise WoonError(
+                f"{label} {field} cannot change existing {identity_field}: {identity}"
+            )
+        if replacement_index <= previous_index:
+            raise WoonError(
+                f"{label} {field} cannot reorder existing {identity_field}: {identity}"
+            )
+        previous_index = replacement_index
+
+
+def _validate_source_asset_inventory_evidence(
+    inventory: Any,
+    evidence: Any,
+    label: str,
+) -> None:
+    """Keep mutable source-landing asset evidence synchronized with its inventory."""
+
+    if not isinstance(inventory, list) or not isinstance(evidence, dict):
+        raise WoonError(
+            f"{label} source_asset_inventory_evidence must describe the replacement inventory"
+        )
+    if evidence.get("expected_asset_count") != len(inventory):
+        raise WoonError(
+            f"{label} source_asset_inventory_evidence expected_asset_count is stale"
+        )
+    inventory_sha256 = hashlib.sha256(
+        json.dumps(
+            inventory,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    if evidence.get("inventory_sha256") != inventory_sha256:
+        raise WoonError(
+            f"{label} source_asset_inventory_evidence inventory_sha256 is stale"
         )
 
 

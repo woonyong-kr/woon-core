@@ -19,6 +19,7 @@ from woon_core.knowledge.adapters import (
     SQLiteFtsSearchIndex,
 )
 from woon_core.knowledge.compiled_wiki import (
+    BookCoverageManifestUpdate,
     CompiledWiki,
     CompiledWikiSettings,
     CompiledWikiTransaction,
@@ -113,6 +114,113 @@ def _workflow_manifest(phase: str) -> dict[str, object]:
             }
         ],
     }
+
+
+def _source_landed_extension_fixture() -> tuple[dict[str, object], dict[str, object]]:
+    current = _workflow_manifest("source-landed")
+    current.update(
+        {
+            "book_id": "books/example",
+            "edition": {"label": "2nd", "source_sha256": "a" * 64},
+            "source_archive": {
+                "relative_path": "wiki/private/_sources/book.epub",
+                "sha256": "a" * 64,
+                "privacy": "local-only",
+            },
+            "nodes": [
+                {"canonical_id": "books/example/chapter-01", "title": "Chapter 1"},
+                {"canonical_id": "books/example/chapter-03", "title": "Chapter 3"},
+            ],
+            "source_structure_elements": [
+                {"structure_id": "structure:one", "title": "Chapter 1"},
+                {"structure_id": "structure:three", "title": "Chapter 3"},
+            ],
+            "source_structure_assignments": [
+                {
+                    "structure_id": "structure:one",
+                    "canonical_id": "books/example/chapter-01",
+                },
+                {
+                    "structure_id": "structure:three",
+                    "canonical_id": "books/example/chapter-03",
+                },
+            ],
+            "source_elements": [
+                {"element_id": "claim:one", "source_sha256": "1" * 64},
+                {"element_id": "claim:three", "source_sha256": "3" * 64},
+            ],
+            "source_element_assignments": [
+                {
+                    "element_id": "claim:one",
+                    "owner_id": "books/example/chapter-01",
+                    "delivery": "reader-span",
+                },
+                {
+                    "element_id": "claim:three",
+                    "owner_id": "books/example/chapter-03",
+                    "delivery": "reader-span",
+                },
+            ],
+            "source_asset_inventory": [
+                {"asset_id": "asset:one", "source_sha256": "4" * 64},
+                {"asset_id": "asset:three", "source_sha256": "6" * 64},
+            ],
+        }
+    )
+    inventory = current["source_asset_inventory"]
+    assert isinstance(inventory, list)
+    current["source_asset_inventory_evidence"] = {
+        "expected_asset_count": len(inventory),
+        "inventory_sha256": hashlib.sha256(
+            json.dumps(
+                inventory,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+    replacement = copy.deepcopy(current)
+    insertions = {
+        "nodes": {"canonical_id": "books/example/chapter-02", "title": "Chapter 2"},
+        "source_structure_elements": {
+            "structure_id": "structure:two",
+            "title": "Chapter 2",
+        },
+        "source_structure_assignments": {
+            "structure_id": "structure:two",
+            "canonical_id": "books/example/chapter-02",
+        },
+        "source_elements": {"element_id": "claim:two", "source_sha256": "2" * 64},
+        "source_element_assignments": {
+            "element_id": "claim:two",
+            "owner_id": "books/example/chapter-02",
+            "delivery": "reader-span",
+        },
+        "source_asset_inventory": {
+            "asset_id": "asset:two",
+            "source_sha256": "5" * 64,
+        },
+    }
+    for field, insertion in insertions.items():
+        values = replacement[field]
+        assert isinstance(values, list)
+        values.insert(1, insertion)
+    replacement_inventory = replacement["source_asset_inventory"]
+    assert isinstance(replacement_inventory, list)
+    replacement["source_asset_inventory_evidence"] = {
+        "expected_asset_count": len(replacement_inventory),
+        "inventory_sha256": hashlib.sha256(
+            json.dumps(
+                replacement_inventory,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+    return current, replacement
 
 
 def _transaction(count: int = 1) -> CompiledWikiTransaction:
@@ -247,6 +355,123 @@ def test_book_workflow_progression_preserves_source_and_translation() -> None:
             translated,
             changed_delivery,
             "book coverage manifest",
+        )
+
+
+def test_source_landed_replace_accepts_ordered_supersequence(tmp_path: Path) -> None:
+    current, replacement = _source_landed_extension_fixture()
+    vault = tmp_path / "vault"
+    path = vault / "catalog/book-coverage/example.json"
+    path.parent.mkdir(parents=True)
+    current_bytes = (json.dumps(current, sort_keys=True) + "\n").encode()
+    path.write_bytes(current_bytes)
+    compiler = CompiledWiki(_settings(vault))
+
+    target, replacement_bytes = compiler._validated_coverage_manifest_update(
+        BookCoverageManifestUpdate(
+            relative_path="catalog/book-coverage/example.json",
+            expected_sha256=hashlib.sha256(current_bytes).hexdigest(),
+            replacement=replacement,
+        )
+    )
+
+    assert target == path
+    assert json.loads(replacement_bytes) == replacement
+
+
+def test_source_landed_expansion_is_not_enabled_by_default() -> None:
+    current, replacement = _source_landed_extension_fixture()
+
+    with pytest.raises(WoonError, match="immutable source_asset_inventory"):
+        _validate_book_workflow_progression(
+            current,
+            replacement,
+            "scoped book coverage manifest",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "case", "message"),
+    [
+        ("nodes", "delete", "cannot delete"),
+        ("source_structure_elements", "change", "cannot change"),
+        ("source_structure_assignments", "change", "cannot change"),
+        ("source_elements", "reorder", "cannot reorder"),
+        ("source_asset_inventory", "duplicate", "contains duplicate"),
+        ("source_element_assignments", "reown", "cannot change"),
+    ],
+)
+def test_source_landed_replace_rejects_non_monotonic_inventory_changes(
+    field: str,
+    case: str,
+    message: str,
+) -> None:
+    current, replacement = _source_landed_extension_fixture()
+    values = replacement[field]
+    assert isinstance(values, list)
+    if case == "delete":
+        del values[0]
+    elif case == "change":
+        item = values[0]
+        assert isinstance(item, dict)
+        item["title"] = "Changed"
+    elif case == "reorder":
+        values[0], values[2] = values[2], values[0]
+    elif case == "duplicate":
+        values.append(copy.deepcopy(values[0]))
+    else:
+        item = values[0]
+        assert isinstance(item, dict)
+        item["owner_id"] = "books/example/chapter-02"
+
+    with pytest.raises(WoonError, match=message):
+        _validate_book_workflow_progression(
+            current,
+            replacement,
+            "book coverage manifest",
+            allow_source_landed_expansion=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("book_id", "immutable book_id"),
+        ("edition", "immutable edition"),
+        ("source_archive", "immutable source_archive"),
+        ("phase_evidence", "phase evidence cannot change"),
+        ("unexpected", "immutable unexpected"),
+    ],
+)
+def test_source_landed_replace_preserves_pinned_source_fields(
+    field: str,
+    message: str,
+) -> None:
+    current, replacement = _source_landed_extension_fixture()
+    replacement[field] = {"changed": True}
+
+    with pytest.raises(WoonError, match=message):
+        _validate_book_workflow_progression(
+            current,
+            replacement,
+            "book coverage manifest",
+            allow_source_landed_expansion=True,
+        )
+
+
+@pytest.mark.parametrize("field", ["expected_asset_count", "inventory_sha256"])
+def test_source_landed_replace_rejects_stale_asset_evidence(field: str) -> None:
+    current, replacement = _source_landed_extension_fixture()
+    evidence = replacement["source_asset_inventory_evidence"]
+    assert isinstance(evidence, dict)
+    evidence[field] = 0 if field == "expected_asset_count" else "0" * 64
+
+    with pytest.raises(WoonError, match=f"{field} is stale"):
+        _validate_book_workflow_progression(
+            current,
+            replacement,
+            "book coverage manifest",
+            allow_source_landed_expansion=True,
         )
 
 

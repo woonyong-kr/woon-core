@@ -500,6 +500,7 @@ def _audit_book_coverage(
                         f"{label}: direct source content requires source_prose_verified=true"
                     )
             actual_runnable_count: int | None = None
+            reader_body = ""
             actual = pages.get(canonical_id)
             if actual is None:
                 errors.append(f"{label}: canonical page does not exist: {canonical_id}")
@@ -530,6 +531,22 @@ def _audit_book_coverage(
                             "workflow or completion metadata"
                         )
                         break
+            if state == "toc-only":
+                if node.get("leaf") is not False:
+                    errors.append(f"{label}: a toc-only node must declare leaf=false")
+                if has_direct_content is not False:
+                    errors.append(
+                        f"{label}: a toc-only node must declare has_direct_content=false"
+                    )
+                if actual is not None:
+                    _, metadata, _ = actual
+                    if metadata.get("content_state") != "toc-only":
+                        errors.append(
+                            f"{label}: toc-only page must declare content_state=toc-only"
+                        )
+                    if reader_body.strip():
+                        errors.append(f"{label}: toc-only page contains authored prose")
+                continue
             if not leaf:
                 if has_direct_content is not True:
                     continue
