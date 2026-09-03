@@ -1016,18 +1016,18 @@ class CompiledWiki:
                     for other_id, other_page in pages.items()
                     if other_id not in retiring
                 }
-                for source_id in _string_list(retired_page.get("source_ids"), "page source_ids"):
+                for source_id in _book_rights_scan_source_ids(retired_page):
                     used_elsewhere = any(
-                        source_id in _string_list(other_page.get("source_ids"), "page source_ids")
+                        source_id in _book_rights_scan_source_ids(other_page)
                         for other_page in remaining_pages.values()
                     )
                     if not used_elsewhere and sources[source_id].get("lifecycle") == "compiled":
                         sources[source_id].update(
                             {"lifecycle": "archived", "superseded_by": successor_source_id}
                         )
-                for claim_id in _string_list(retired_page.get("claim_ids"), "page claim_ids"):
+                for claim_id in _book_rights_scan_claim_ids(retired_page):
                     used_elsewhere = any(
-                        claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
+                        claim_id in _book_rights_scan_claim_ids(other_page)
                         for other_page in remaining_pages.values()
                     )
                     if not used_elsewhere and claims[claim_id].get("status") == "accepted":
@@ -2823,18 +2823,18 @@ class CompiledWiki:
                     for other_id, other_page in pages.items()
                     if other_id not in retiring
                 }
-                for source_id in _string_list(retired_page.get("source_ids"), "page source_ids"):
+                for source_id in _book_rights_scan_source_ids(retired_page):
                     used_elsewhere = any(
-                        source_id in _string_list(other_page.get("source_ids"), "page source_ids")
+                        source_id in _book_rights_scan_source_ids(other_page)
                         for other_page in remaining_pages.values()
                     )
                     if not used_elsewhere and sources[source_id].get("lifecycle") == "compiled":
                         sources[source_id].update(
                             {"lifecycle": "archived", "superseded_by": successor_source_id}
                         )
-                for claim_id in _string_list(retired_page.get("claim_ids"), "page claim_ids"):
+                for claim_id in _book_rights_scan_claim_ids(retired_page):
                     used_elsewhere = any(
-                        claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
+                        claim_id in _book_rights_scan_claim_ids(other_page)
                         for other_page in remaining_pages.values()
                     )
                     if not used_elsewhere and claims[claim_id].get("status") == "accepted":
@@ -3039,7 +3039,7 @@ class CompiledWiki:
     ) -> None:
         used_elsewhere = any(
             other_page_id != page_id
-            and prior_source_id in _string_list(other_page.get("source_ids"), "page source_ids")
+            and prior_source_id in _book_rights_scan_source_ids(other_page)
             for other_page_id, other_page in pages.items()
         )
         if not used_elsewhere:
@@ -3065,7 +3065,7 @@ class CompiledWiki:
             )
             used_elsewhere = any(
                 other_page_id != page_id
-                and prior_claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
+                and prior_claim_id in _book_rights_scan_claim_ids(other_page)
                 for other_page_id, other_page in pages.items()
             )
             if not is_prior_curated_claim or used_elsewhere:
@@ -3085,7 +3085,7 @@ class CompiledWiki:
         for prior_claim_id in claim_ids:
             used_elsewhere = any(
                 other_page_id != page_id
-                and prior_claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
+                and prior_claim_id in _book_rights_scan_claim_ids(other_page)
                 for other_page_id, other_page in pages.items()
             )
             if not used_elsewhere:
@@ -3106,12 +3106,12 @@ class CompiledWiki:
         referenced_sources = {
             source_id
             for page in pages.values()
-            for source_id in _string_list(page.get("source_ids"), "page source_ids")
+            for source_id in _book_rights_scan_source_ids(page)
         }
         referenced_claims = {
             claim_id
             for page in pages.values()
-            for claim_id in _string_list(page.get("claim_ids"), "page claim_ids")
+            for claim_id in _book_rights_scan_claim_ids(page)
         }
         active_sources_by_locator: dict[str, set[str]] = {}
         for source_id in referenced_sources:
@@ -4174,13 +4174,13 @@ def _supersede_replaced_conversation_revision(
         source_id
         for other_page_id, other_page in pages.items()
         if other_page_id != page_id
-        for source_id in _string_list(other_page.get("source_ids"), "page source_ids")
+        for source_id in _book_rights_scan_source_ids(other_page)
     }
     other_claim_ids = {
         claim_id
         for other_page_id, other_page in pages.items()
         if other_page_id != page_id
-        for claim_id in _string_list(other_page.get("claim_ids"), "page claim_ids")
+        for claim_id in _book_rights_scan_claim_ids(other_page)
     }
     for source_id in _string_list(page.get("source_ids"), "page source_ids"):
         if (

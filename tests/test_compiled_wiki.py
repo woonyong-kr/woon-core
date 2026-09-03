@@ -1838,6 +1838,51 @@ def test_atomic_verified_book_update_promotes_retires_compiles_and_reindexes_onc
     assert compiler.audit().complete
 
 
+def test_verified_book_source_supersession_allows_only_explicit_source_free_toc_pages() -> None:
+    prior_source_id = "source://verified-book/books/example/chapter-01/prior"
+    successor_source_id = "source://verified-book/books/example/chapter-01/successor"
+    sources = {
+        prior_source_id: {"lifecycle": "compiled"},
+        successor_source_id: {"lifecycle": "compiled"},
+    }
+    valid_pages = {
+        "books/example/chapter-01": {
+            "source_ids": [prior_source_id],
+            "claim_ids": ["claim://prior"],
+            "render": {"kind": "source-body", "source_id": prior_source_id},
+        },
+        "books/unrelated-map": {
+            "source_ids": [],
+            "claim_ids": [],
+            "render": {"kind": "toc-only"},
+        },
+    }
+
+    CompiledWiki._supersede_unshared_curated_source(
+        prior_source_id,
+        successor_source_id,
+        "books/example/chapter-01",
+        valid_pages,
+        sources,
+    )
+
+    assert sources[prior_source_id] == {
+        "lifecycle": "archived",
+        "superseded_by": successor_source_id,
+    }
+
+    invalid_pages = copy.deepcopy(valid_pages)
+    invalid_pages["books/unrelated-map"]["render"] = {"kind": "source-body"}
+    with pytest.raises(WoonError, match="page source_ids must be a non-empty string list"):
+        CompiledWiki._supersede_unshared_curated_source(
+            prior_source_id,
+            successor_source_id,
+            "books/example/chapter-01",
+            invalid_pages,
+            sources,
+        )
+
+
 def test_atomic_verified_book_update_accepts_empty_authored_book_map_body(
     tmp_path: Path,
 ) -> None:
