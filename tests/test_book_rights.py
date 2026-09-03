@@ -470,7 +470,10 @@ def test_book_rights_restore_rolls_back_intake_and_coverage_on_writer_failure(
         def validate_verified_book_retirement_content(self, *args: object) -> None:
             return None
 
-        def validate_book_workflow_pages(self, *args: object) -> None:
+        def validate_book_workflow_pages(
+            self, *args: object, **kwargs: object
+        ) -> None:
+            del args, kwargs
             return None
 
         def validate_book_coverage_manifest_update(

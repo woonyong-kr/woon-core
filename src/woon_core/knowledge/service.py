@@ -801,6 +801,11 @@ class KnowledgeService:
         self._compiled_wiki.validate_book_workflow_pages(
             pages,
             workflow_phase,
+            allow_legacy_toc_normalization=(
+                coverage_manifest is not None
+                and coverage_manifest.mode == "replace"
+                and not allow_blocked_restore
+            ),
         )
         if coverage_manifest is not None:
             book_id = coverage_manifest.replacement.get("book_id")

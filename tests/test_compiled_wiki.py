@@ -771,6 +771,146 @@ def test_book_rights_restore_requires_exact_carry_forward_and_allows_one_scope(
     )
 
 
+def legacy_rights_toc_records(
+    compiler: CompiledWiki,
+) -> tuple[VerifiedBookPage, VerifiedBookPage]:
+    sources, claims, pages, curations, _ = compiler._load_inputs()
+    page_ids = ("books/example", "books/example/chapter-01")
+    for page_id in page_ids:
+        page = pages[page_id]
+        rights_source_id = next(
+            source_id
+            for source_id in page["source_ids"]
+            if source_id.startswith("source://book-rights/")
+        )
+        rights_claim_id = next(
+            claim_id
+            for claim_id in page["claim_ids"]
+            if claim_id.startswith("claim://book-rights/")
+        )
+        sources[rights_source_id]["original_sha256"] = "a" * 64
+        sources[rights_source_id]["purpose"] = "권리 제한 목차 shell을 검증한다."
+        page["source_ids"] = [rights_source_id]
+        page["claim_ids"] = [rights_claim_id]
+        page["frontmatter"]["source_ids"] = [rights_source_id]
+        page["render"] = {"kind": "source-body", "source_id": rights_source_id}
+    compiler._write_inputs(sources, claims, pages, curations)
+    compiler.compile(force=True)
+
+    def record(page_id: str) -> VerifiedBookPage:
+        page = pages[page_id]
+        source_id = page["render"]["source_id"]
+        output = compiler._settings.output_root / page["output_path"]
+        return VerifiedBookPage(
+            page_id=page_id,
+            title=page["title"],
+            body=sources[source_id]["body"],
+            statement="현재 권리 페이지를 그대로 유지한다.",
+            current_use="현재 권리 페이지를 그대로 유지한다.",
+            source_locator="source://book/example#current",
+            source_sha256="a" * 64,
+            frontmatter=copy.deepcopy(page["frontmatter"]),
+            expected_revision=hashlib.sha256(output.read_bytes()).hexdigest(),
+        )
+
+    return record(page_ids[0]), record(page_ids[1])
+
+
+def test_normal_full_replacement_allows_only_legacy_rights_toc_normalization(
+    tmp_path: Path,
+) -> None:
+    compiler, _, _, _ = rights_restore_scope_fixture(tmp_path)
+    root, chapter = legacy_rights_toc_records(compiler)
+    normalized_root = replace(
+        root,
+        body="",
+        frontmatter={
+            **copy.deepcopy(root.frontmatter),
+            "book_toc_only": True,
+            "content_state": "toc-only",
+        },
+    )
+
+    with pytest.raises(WoonError, match="carry-forward changed its body"):
+        compiler.validate_book_workflow_pages(
+            (normalized_root, chapter),
+            "source-landed",
+        )
+
+    compiler.validate_book_workflow_pages(
+        (normalized_root, chapter),
+        "source-landed",
+        allow_legacy_toc_normalization=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("parent", "changed its body"),
+        ("source", "changed its body"),
+        ("revision", "changed after review"),
+    ],
+)
+def test_legacy_rights_toc_normalization_rejects_identity_or_revision_changes(
+    tmp_path: Path,
+    change: str,
+    message: str,
+) -> None:
+    compiler, _, _, _ = rights_restore_scope_fixture(tmp_path)
+    root, chapter = legacy_rights_toc_records(compiler)
+    frontmatter = {
+        **copy.deepcopy(root.frontmatter),
+        "book_toc_only": True,
+        "content_state": "toc-only",
+    }
+    expected_revision = root.expected_revision
+    source_sha256 = root.source_sha256
+    if change == "parent":
+        frontmatter["parent"] = "[[wiki/books/other|다른 책]]"
+    elif change == "source":
+        source_sha256 = "b" * 64
+    else:
+        expected_revision = "f" * 64
+    candidate = replace(
+        root,
+        body="",
+        frontmatter=frontmatter,
+        source_sha256=source_sha256,
+        expected_revision=expected_revision,
+    )
+
+    with pytest.raises(WoonError, match=message):
+        compiler.validate_book_workflow_pages(
+            (candidate, chapter),
+            "source-landed",
+            allow_legacy_toc_normalization=True,
+        )
+
+
+def test_legacy_rights_toc_normalization_rejects_new_descendants(
+    tmp_path: Path,
+) -> None:
+    compiler, _, _, leaf = rights_restore_scope_fixture(tmp_path)
+    root, chapter = legacy_rights_toc_records(compiler)
+    normalized_root = replace(
+        root,
+        body="",
+        frontmatter={
+            **copy.deepcopy(root.frontmatter),
+            "book_toc_only": True,
+            "content_state": "toc-only",
+        },
+    )
+
+    with pytest.raises(WoonError, match="carry-forward changed its body"):
+        compiler.validate_book_workflow_pages(
+            (normalized_root, chapter, leaf),
+            "source-landed",
+            allow_legacy_toc_normalization=True,
+        )
+
+
 def test_book_dry_run_uses_resolved_temporary_vault_and_removes_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -2287,6 +2287,8 @@ class CompiledWiki:
         self,
         records: tuple[VerifiedBookPage, ...],
         workflow_phase: str,
+        *,
+        allow_legacy_toc_normalization: bool = False,
     ) -> None:
         """Prevent concept-linking from silently regenerating reader prose."""
 
@@ -2308,7 +2310,12 @@ class CompiledWiki:
                     f"{record.page_id}: {workflow_violation}"
                 )
         sources, _, pages, _, _ = self._load_inputs()
-        self._validate_book_rights_restore_records(records, sources, pages)
+        self._validate_book_rights_restore_records(
+            records,
+            sources,
+            pages,
+            allow_legacy_toc_normalization=allow_legacy_toc_normalization,
+        )
         if workflow_phase != "concept-linked":
             return
         for record in records:
@@ -2357,6 +2364,7 @@ class CompiledWiki:
         pages: dict[str, dict[str, Any]],
         *,
         expected_book_id: str | None = None,
+        allow_legacy_toc_normalization: bool = False,
     ) -> set[str]:
         """Validate a one-scope rights restore and return exact carry-forward pages.
 
@@ -2450,14 +2458,26 @@ class CompiledWiki:
                     raise WoonError(
                         f"book rights carry-forward changed its title: {page_id}"
                     )
-                if record.body != current_body:
-                    raise WoonError(
-                        f"book rights carry-forward changed its body: {page_id}"
+                legacy_toc_normalization = (
+                    allow_legacy_toc_normalization
+                    and _is_legacy_rights_toc_normalization(
+                        record=record,
+                        current_page=page,
+                        current_body=current_body,
+                        sources=sources,
+                        records_by_id=records_by_id,
+                        pages=pages,
                     )
-                if record.frontmatter != page.get("frontmatter"):
-                    raise WoonError(
-                        f"book rights carry-forward changed its frontmatter: {page_id}"
-                    )
+                )
+                if not legacy_toc_normalization:
+                    if record.body != current_body:
+                        raise WoonError(
+                            f"book rights carry-forward changed its body: {page_id}"
+                        )
+                    if record.frontmatter != page.get("frontmatter"):
+                        raise WoonError(
+                            f"book rights carry-forward changed its frontmatter: {page_id}"
+                        )
                 output_path = _inside(
                     self._settings.output_root,
                     _required_string(page, "output_path"),
@@ -3989,6 +4009,81 @@ def _normalize_verified_book_toc_only(frontmatter: dict[str, Any]) -> bool:
     if is_toc_only:
         frontmatter["content_state"] = "toc-only"
     return is_toc_only
+
+
+def _is_legacy_rights_toc_normalization(
+    *,
+    record: VerifiedBookPage,
+    current_page: dict[str, Any],
+    current_body: str,
+    sources: dict[str, dict[str, Any]],
+    records_by_id: dict[str, VerifiedBookPage],
+    pages: dict[str, dict[str, Any]],
+) -> bool:
+    """Accept only removal of a content-free legacy rights TOC placeholder.
+
+    Normal book replacement may encounter a rights-demotion page whose authored
+    body contains only a temporary table of contents.  Converting that shell to
+    the explicit ``toc-only`` render is safe only when its identity, provenance,
+    topology, and every unrelated metadata field remain unchanged.
+    """
+
+    if record.body:
+        return False
+    if record.frontmatter.get("book_toc_only") is not True:
+        return False
+    if record.frontmatter.get("content_state") != "toc-only":
+        return False
+    if record.frontmatter.get("navigation_groups"):
+        return False
+    direct_content = record.frontmatter.get("has_direct_content")
+    if direct_content is not None and direct_content is not False:
+        return False
+    if any(
+        candidate_id not in pages and candidate_id.startswith(f"{record.page_id}/")
+        for candidate_id in records_by_id
+    ):
+        return False
+
+    current_frontmatter = current_page.get("frontmatter")
+    if not isinstance(current_frontmatter, dict):
+        return False
+    candidate_frontmatter = copy.deepcopy(record.frontmatter)
+    previous_frontmatter = copy.deepcopy(current_frontmatter)
+    for key, expected in (
+        ("book_toc_only", True),
+        ("content_state", "toc-only"),
+    ):
+        previous = previous_frontmatter.pop(key, None)
+        if previous is not None and previous != expected:
+            return False
+        if candidate_frontmatter.pop(key, None) != expected:
+            return False
+    if candidate_frontmatter != previous_frontmatter:
+        return False
+
+    page_source_ids = _string_list(current_page.get("source_ids"), "page source_ids")
+    frontmatter_source_ids = _string_list(
+        record.frontmatter.get("source_ids"), "verified book source_ids"
+    )
+    if page_source_ids != frontmatter_source_ids:
+        return False
+    render = current_page.get("render")
+    was_toc_only = isinstance(render, dict) and render.get("kind") == "toc-only"
+    rights_sources = [
+        sources[source_id]
+        for source_id in page_source_ids
+        if source_id.startswith("source://book-rights/") and source_id in sources
+    ]
+    if not was_toc_only and not rights_sources:
+        return False
+    if any(source.get("kind") != "book-rights-decision" for source in rights_sources):
+        return False
+    if any(source.get("original_sha256") != record.source_sha256 for source in rights_sources):
+        return False
+    return not any(
+        source_id.startswith("source://verified-book/") for source_id in page_source_ids
+    )
 
 
 def _validate_toc_only_navigation(page_id: str, navigation_groups: object) -> None:
