@@ -1824,6 +1824,10 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
         "retirement_body_sha256",
         "coverage_manifest",
     }
+    if isinstance(payload, dict) and "staged_assets" in payload:
+        required_fields.add("staged_assets")
+    if isinstance(payload, dict) and "retirement_image_replacements" in payload:
+        required_fields.add("retirement_image_replacements")
     require_current_book_contract(payload, "book-promote-retire")
     if not isinstance(payload, dict) or set(payload) != required_fields:
         raise WoonError("book-promote-retire input fields are invalid")
@@ -1869,6 +1873,10 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
     if coverage_manifest is None:
         raise WoonError("book-promote-retire requires an atomic coverage_manifest replacement")
     require_book_workflow_manifest(payload, "book-promote-retire")
+    staged_assets = _parse_staged_book_assets(payload.get("staged_assets"), input_path)
+    retirement_image_replacements = _parse_retirement_image_replacements(
+        payload.get("retirement_image_replacements")
+    )
     _, service = build_knowledge_service(vault)
     if apply:
         report = service.apply_verified_book_update(
@@ -1877,6 +1885,8 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
             expected_revisions,
             body_sha256,
             coverage_manifest,
+            staged_assets,
+            retirement_image_replacements=retirement_image_replacements,
         )
         print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
     else:
@@ -1886,8 +1896,45 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
             expected_revisions,
             body_sha256,
             coverage_manifest,
+            staged_assets,
+            retirement_image_replacements=retirement_image_replacements,
         )
         print(json.dumps(asdict(preflight_report), ensure_ascii=False, indent=2), file=output)
+
+
+def _parse_retirement_image_replacements(raw: object) -> dict[str, dict[str, str]]:
+    """Parse explicit old-to-new Markdown image targets for wrapper retirement."""
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise WoonError("book-promote-retire retirement_image_replacements must be an object")
+    parsed: dict[str, dict[str, str]] = {}
+    for page_id, replacements in raw.items():
+        if (
+            not isinstance(page_id, str)
+            or not page_id.strip()
+            or not isinstance(replacements, dict)
+        ):
+            raise WoonError(
+                "book-promote-retire retirement_image_replacements fields are invalid"
+            )
+        page_replacements: dict[str, str] = {}
+        for old_target, new_target in replacements.items():
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (old_target, new_target)
+            ):
+                raise WoonError(
+                    "book-promote-retire retirement image targets must be non-empty strings"
+                )
+            page_replacements[old_target] = new_target
+        if not page_replacements:
+            raise WoonError(
+                "book-promote-retire retirement image replacement page must not be empty"
+            )
+        parsed[page_id.strip()] = page_replacements
+    return parsed
 
 
 def _run_book_rights_demotion(arguments: list[str], output: TextIO) -> None:

@@ -17,6 +17,9 @@ LEGACY_BOOK_CONTRACT_SHA256_V7 = (
 PRE_IN_PAGE_H2_BOOK_CONTRACT_SHA256_V7 = (
     "de6157ed7d201def786ff722ea7bed0c39620c64ee0040b417eb4de31cce6656"
 )
+PRE_ORDERED_READER_SECTIONS_BOOK_CONTRACT_SHA256_V7 = (
+    "719f313ea783890d257b91f6acb296acc729e4ddd1ec2c83241a784dff77616c"
+)
 BOOK_WORKFLOW_PHASES = (
     "source-landed",
     "translated",
@@ -40,6 +43,9 @@ BOOK_CONTRACT: dict[str, Any] = {
             "metadata-only": "copyright-bibliography-index-only",
         },
         "in_page_heading": "exactly-one-H2-source-title-in-source-order",
+        "mixed_depth_reader": (
+            "explicit-ordered-source-body-and-navigation-group-sections-on-book-chapters"
+        ),
         "inventory": "source_elements",
         "inventory_evidence": "source_element_inventory_evidence",
         "assignment": "source_element_assignments",
@@ -223,6 +229,7 @@ def require_current_book_contract(payload: object, operation: str) -> None:
         BOOK_CONTRACT_SHA256,
         LEGACY_BOOK_CONTRACT_SHA256_V7,
         PRE_IN_PAGE_H2_BOOK_CONTRACT_SHA256_V7,
+        PRE_ORDERED_READER_SECTIONS_BOOK_CONTRACT_SHA256_V7,
     }
     if contract.get("sha256") not in compatible_hashes:
         raise WoonError(

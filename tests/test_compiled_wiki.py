@@ -32,6 +32,7 @@ from woon_core.knowledge.compiled_wiki import (
     _contains_mermaid_color_directive,
     _navigation_only_body,
     _normalize_compiled_display_body,
+    _relocate_retirement_image_targets,
     _retirement_body,
     _validate_claim_record,
     _validate_source,
@@ -768,6 +769,25 @@ def test_book_rights_restore_requires_exact_carry_forward_and_allows_one_scope(
     compiler.validate_book_workflow_pages(
         (root, chapter, leaf),
         "source-landed",
+    )
+
+
+def test_book_rights_workflow_allows_only_explicit_retirement_survivor_change(
+    tmp_path: Path,
+) -> None:
+    compiler, root, chapter, leaf = rights_restore_scope_fixture(tmp_path)
+    changed_root = replace(root, body="기존 절을 합친 새 책 본문이다.\n")
+
+    with pytest.raises(WoonError, match="carry-forward changed its body"):
+        compiler.validate_book_workflow_pages(
+            (changed_root, chapter, leaf),
+            "source-landed",
+        )
+
+    compiler.validate_book_workflow_pages(
+        (changed_root, chapter, leaf),
+        "source-landed",
+        replacement_survivor_ids={changed_root.page_id},
     )
 
 
@@ -2079,9 +2099,11 @@ def test_verified_book_preflight_runs_cloned_writer_and_cleans_temporary_vault(
         coverage_manifest: BookCoverageManifestUpdate,
         *,
         rights_restore_book_id: str | None = None,
+        retirement_image_replacements: dict[str, dict[str, str]] | None = None,
     ) -> VerifiedBookUpdateReport:
         del pages, replacements, retirement_body_sha256, coverage_manifest
         assert rights_restore_book_id is None
+        assert retirement_image_replacements is None
         assert self.vault != compiler.vault
         dry_vaults.append(self.vault)
         (self.vault / "dry-run-writer-ran").write_text("yes", encoding="utf-8")
@@ -2868,6 +2890,30 @@ def test_retirement_body_excludes_previous_next_navigation() -> None:
     )
 
     assert _retirement_body(body) == "절이 설명하는 고유한 독자 내용을 보존한다.\n"
+
+
+def test_retirement_image_relocation_changes_only_one_exact_markdown_target() -> None:
+    old = "wiki/private/_sources/knowledge/local-only/book/images/figure.png"
+    new = "wiki/private/_sources/knowledge/local-only/book/images/figure-v2.png"
+    body = f"그림 앞의 설명이다.\n\n![그림 1]({old})\n\n그림 뒤의 설명이다.\n"
+
+    relocated = _relocate_retirement_image_targets(body, {old: new})
+
+    assert relocated == body.replace(old, new)
+    assert relocated.replace(new, old) == body
+
+
+def test_retirement_image_relocation_rejects_non_image_or_duplicate_targets() -> None:
+    old = "wiki/private/_sources/knowledge/local-only/book/images/figure.png"
+    new = "wiki/private/_sources/knowledge/local-only/book/images/figure-v2.png"
+
+    with pytest.raises(WoonError, match="must occur exactly once"):
+        _relocate_retirement_image_targets(f"본문의 경로는 {old}다.\n", {old: new})
+    with pytest.raises(WoonError, match="must occur exactly once"):
+        _relocate_retirement_image_targets(
+            f"![첫 그림]({old})\n![둘째 그림]({old})\n",
+            {old: new},
+        )
 
 
 def test_navigation_only_body_accepts_exact_legacy_linear_book_heading_only() -> None:

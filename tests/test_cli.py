@@ -1293,8 +1293,9 @@ def test_knowledge_book_promote_retire_rejects_legacy_payload_without_contract(
         run(["knowledge", "book-promote-retire", "--input", str(payload)], StringIO())
 
 
+@pytest.mark.parametrize("apply", (False, True))
 def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, apply: bool
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -1303,10 +1304,15 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
     coverage_bytes = b'{"old": true}\n'
     coverage_path.write_bytes(coverage_bytes)
     input_path = tmp_path / "atomic-book-update.json"
+    staged_bytes = b"verified figure bytes"
+    staged_path = tmp_path / "staged-source-assets/figure.png"
+    staged_path.parent.mkdir()
+    staged_path.write_bytes(staged_bytes)
+    staged_sha256 = hashlib.sha256(staged_bytes).hexdigest()
     input_path.write_text(
         json.dumps(
             {
-                "apply": True,
+                "apply": apply,
                 **book_promotion_contract_fields(),
                 "pages": [
                     {
@@ -1324,6 +1330,26 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
                 "retire_replacements": {"books/kotlin/part-01": "books/kotlin"},
                 "retirement_expected_revisions": {"books/kotlin/part-01": "part-revision"},
                 "retirement_body_sha256": {"books/kotlin/part-01": "b" * 64},
+                "retirement_image_replacements": {
+                    "books/kotlin/part-01": {
+                        "wiki/private/_sources/knowledge/local-only/kotlin/images/old.png": (
+                            "wiki/private/_sources/knowledge/local-only/kotlin/images/figure.png"
+                        )
+                    }
+                },
+                "staged_assets": [
+                    {
+                        "staging_relative_path": "staged-source-assets/figure.png",
+                        "archive_relative_path": (
+                            "wiki/private/_sources/knowledge/local-only/"
+                            "kotlin/images/figure.png"
+                        ),
+                        "sha256": staged_sha256,
+                        "size": len(staged_bytes),
+                        "provenance": "embedded-original-byte-identical",
+                        "source_entry_locator": "source://kotlin#images/figure.png",
+                    }
+                ],
                 "coverage_manifest": {
                     "mode": "replace",
                     "relative_path": "catalog/book-coverage/kotlin.json",
@@ -1348,18 +1374,22 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
             dict[str, str],
             dict[str, str],
             BookCoverageManifestUpdate | None,
+            tuple[StagedBookAsset, ...],
+            dict[str, dict[str, str]],
         ]
     ] = []
 
     class FakeService:
-        def apply_verified_book_update(
+        def _capture(
             self,
             pages: tuple[VerifiedBookPage, ...],
             replacements: dict[str, str],
             expected_revisions: dict[str, str],
             body_sha256: dict[str, str],
             coverage_manifest: BookCoverageManifestUpdate | None,
-        ) -> VerifiedBookUpdateReport:
+            staged_assets: tuple[StagedBookAsset, ...],
+            retirement_image_replacements: dict[str, dict[str, str]],
+        ) -> None:
             calls.append(
                 (
                     pages,
@@ -1367,7 +1397,30 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
                     expected_revisions,
                     body_sha256,
                     coverage_manifest,
+                    staged_assets,
+                    retirement_image_replacements,
                 )
+            )
+
+        def apply_verified_book_update(
+            self,
+            pages: tuple[VerifiedBookPage, ...],
+            replacements: dict[str, str],
+            expected_revisions: dict[str, str],
+            body_sha256: dict[str, str],
+            coverage_manifest: BookCoverageManifestUpdate | None,
+            staged_assets: tuple[StagedBookAsset, ...],
+            *,
+            retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+        ) -> VerifiedBookUpdateReport:
+            self._capture(
+                pages,
+                replacements,
+                expected_revisions,
+                body_sha256,
+                coverage_manifest,
+                staged_assets,
+                retirement_image_replacements or {},
             )
             return VerifiedBookUpdateReport(
                 curated=1,
@@ -1377,6 +1430,36 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
                 page_ids=("books/kotlin",),
                 retired_page_ids=("books/kotlin/part-01",),
                 replacement_ids=("books/kotlin",),
+            )
+
+        def preflight_verified_book_update(
+            self,
+            pages: tuple[VerifiedBookPage, ...],
+            replacements: dict[str, str],
+            expected_revisions: dict[str, str],
+            body_sha256: dict[str, str],
+            coverage_manifest: BookCoverageManifestUpdate,
+            staged_assets: tuple[StagedBookAsset, ...],
+            *,
+            retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+        ) -> VerifiedBookPreflightReport:
+            self._capture(
+                pages,
+                replacements,
+                expected_revisions,
+                body_sha256,
+                coverage_manifest,
+                staged_assets,
+                retirement_image_replacements or {},
+            )
+            return VerifiedBookPreflightReport(
+                ready=True,
+                page_count=len(pages),
+                retirement_count=len(replacements),
+                coverage_mode=coverage_manifest.mode,
+                coverage_path=coverage_manifest.relative_path,
+                base_manifest_preserved=False,
+                staged_asset_count=len(staged_assets),
             )
 
     monkeypatch.setattr(
@@ -1414,7 +1497,21 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
             "new": True,
         },
     )
-    assert '"retired": 1' in output.getvalue()
+    assert len(calls[0][5]) == 1
+    assert calls[0][5][0].staging_path == staged_path
+    assert calls[0][5][0].sha256 == staged_sha256
+    assert calls[0][6] == {
+        "books/kotlin/part-01": {
+            "wiki/private/_sources/knowledge/local-only/kotlin/images/old.png": (
+                "wiki/private/_sources/knowledge/local-only/kotlin/images/figure.png"
+            )
+        }
+    }
+    if apply:
+        assert '"retired": 1' in output.getvalue()
+    else:
+        assert '"ready": true' in output.getvalue()
+        assert '"staged_asset_count": 1' in output.getvalue()
 
 
 def test_knowledge_book_rights_restore_uses_one_atomic_private_service_call(

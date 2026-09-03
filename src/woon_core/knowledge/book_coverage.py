@@ -17,6 +17,8 @@ from woon_core.knowledge.book_contract import (
     book_workflow_phase_index,
 )
 from woon_core.knowledge.wiki_tree import (
+    BOOK_READER_NAVIGATION_END,
+    BOOK_READER_NAVIGATION_START,
     CHILDREN_END,
     CHILDREN_START,
     split_markdown,
@@ -1292,24 +1294,97 @@ def _audit_source_structure_contract(
         if isinstance(element, dict)
         and (structure_id := _text(element.get("structure_id"))) in owner_by_structure
     ]
-    source_node_order: list[str] = []
-    seen_source_owners: set[str] = set()
+    source_owner_runs: list[str] = []
     for owner_id in source_owner_order:
-        if source_node_order and source_node_order[-1] == owner_id:
+        if source_owner_runs and source_owner_runs[-1] == owner_id:
             continue
-        if owner_id in seen_source_owners:
+        source_owner_runs.append(owner_id)
+    repeated_owners = {
+        owner_id for owner_id in source_owner_runs if source_owner_runs.count(owner_id) > 1
+    }
+    if repeated_owners:
+        if len(repeated_owners) != 1:
             errors.append(
-                f"{prefix}: source structures for one canonical node must be contiguous: "
-                f"{owner_id}"
+                f"{prefix}: source structures for canonical nodes must be contiguous unless "
+                "one book chapter declares exact ordered_reader_sections"
             )
-            continue
-        seen_source_owners.add(owner_id)
-        source_node_order.append(owner_id)
+        else:
+            repeated_owner = next(iter(repeated_owners))
+            page = pages.get(repeated_owner)
+            expected_runs = (
+                _ordered_reader_owner_runs(page[1], repeated_owner) if page is not None else None
+            )
+            if expected_runs != source_owner_runs:
+                errors.append(
+                    f"{prefix}: source structures for one canonical node must be contiguous "
+                    "or match ordered_reader_sections exactly: " + repeated_owner
+                )
+    source_node_order = list(dict.fromkeys(source_owner_runs))
     if source_node_order != node_order:
         errors.append(
             f"{prefix}: manifest node order does not match source structure order: "
             f"expected={source_node_order!r} actual={node_order!r}"
         )
+
+
+def _ordered_reader_owner_runs(metadata: dict[str, Any], owner_id: str) -> list[str] | None:
+    """Expand a fail-closed mixed-depth chapter order into source owner runs."""
+
+    ordered = metadata.get("ordered_reader_sections")
+    groups = metadata.get("navigation_groups")
+    if not isinstance(ordered, list) or not ordered or not isinstance(groups, list) or not groups:
+        return None
+    group_children: dict[str, list[str]] = {}
+    group_order: list[str] = []
+    for group in groups:
+        if not isinstance(group, dict) or set(group) != {"label", "children"}:
+            return None
+        label = group.get("label")
+        children = group.get("children")
+        if (
+            not isinstance(label, str)
+            or not label.strip()
+            or label in group_children
+            or not isinstance(children, list)
+            or not children
+            or not all(isinstance(child, str) and child.strip() for child in children)
+        ):
+            return None
+        group_order.append(label.strip())
+        group_children[label.strip()] = [child.strip() for child in children]
+    runs: list[str] = []
+    ordered_groups: list[str] = []
+    kinds: set[str] = set()
+    for item in ordered:
+        if not isinstance(item, dict) or set(item) != {"kind", "label"}:
+            return None
+        kind = item.get("kind")
+        label = item.get("label")
+        if kind not in {"source-body", "navigation-group"}:
+            return None
+        if not isinstance(label, str) or not label.strip():
+            return None
+        kinds.add(kind)
+        if kind == "source-body":
+            runs.append(owner_id)
+            continue
+        normalized_label = label.strip()
+        children = group_children.get(normalized_label)
+        if children is None:
+            return None
+        ordered_groups.append(normalized_label)
+        runs.extend(children)
+    if kinds != {"source-body", "navigation-group"} or ordered_groups != group_order:
+        return None
+    return list(dict.fromkeys(runs)) if len(runs) == len(set(runs)) else _collapse_runs(runs)
+
+
+def _collapse_runs(values: list[str]) -> list[str]:
+    collapsed: list[str] = []
+    for value in values:
+        if not collapsed or collapsed[-1] != value:
+            collapsed.append(value)
+    return collapsed
 
 
 def _source_structure_id(kind: str, title: str, locator: str, source_sha256: str) -> str:
@@ -2316,7 +2391,20 @@ def _audit_book_map_ui(
         groups = metadata.get("navigation_groups")
         if not isinstance(groups, list) or not groups:
             continue
+        ordered = metadata.get("ordered_reader_sections")
         reader_body = _reader_body(body).strip()
+        if isinstance(ordered, list) and ordered:
+            _audit_ordered_book_reader_ui(
+                canonical_id,
+                path,
+                body,
+                reader_body,
+                groups,
+                ordered,
+                pages,
+                errors,
+            )
+            continue
         if reader_body:
             errors.append(f"{path.name}: UI map contains authored prose: {canonical_id}")
         managed_block = _managed_book_map_block(canonical_id, path, body, errors)
@@ -2391,6 +2479,144 @@ def _audit_book_map_ui(
                 f"{canonical_id}: UI managed direct links are stale: "
                 f"expected={expected_children!r}, actual={actual_children!r}"
             )
+
+
+def _audit_ordered_book_reader_ui(
+    canonical_id: str,
+    path: Path,
+    body: str,
+    reader_body: str,
+    groups: list[object],
+    ordered: list[object],
+    pages: dict[str, tuple[Path, dict[str, Any], str]],
+    errors: list[str],
+) -> None:
+    """Verify one mixed-depth book chapter against its explicit source order."""
+
+    if body.count(CHILDREN_START) or body.count(CHILDREN_END):
+        errors.append(f"{path.name}: ordered book reader must not contain a legacy map block")
+    start_count = body.count(BOOK_READER_NAVIGATION_START)
+    end_count = body.count(BOOK_READER_NAVIGATION_END)
+    if start_count == 0 or start_count != end_count:
+        errors.append(
+            f"{path.name}: ordered book reader navigation blocks are missing or unbalanced: "
+            f"{canonical_id}"
+        )
+        return
+    group_by_label: dict[str, list[str]] = {}
+    seen_children: set[str] = set()
+    for group in groups:
+        if not isinstance(group, dict):
+            errors.append(f"{canonical_id}: ordered reader navigation group is invalid")
+            return
+        label = group.get("label")
+        children = group.get("children")
+        if (
+            not isinstance(label, str)
+            or not label.strip()
+            or not isinstance(children, list)
+            or not children
+            or not all(isinstance(child, str) and child.strip() for child in children)
+        ):
+            errors.append(f"{canonical_id}: ordered reader navigation group is invalid")
+            return
+        group_by_label[label.strip()] = [child.strip() for child in children]
+        for child in children:
+            child_id = child.strip()
+            if child_id in seen_children:
+                errors.append(f"{canonical_id}: ordered reader repeats direct child: {child_id}")
+            seen_children.add(child_id)
+            actual = pages.get(child_id)
+            if actual is None:
+                errors.append(
+                    f"{canonical_id}: ordered reader child page does not exist: {child_id}"
+                )
+                continue
+            _, child_metadata, _ = actual
+            if _canonical_parent(child_metadata.get("parent")) != canonical_id:
+                errors.append(f"{canonical_id}: ordered reader child is not direct: {child_id}")
+            if _text(child_metadata.get("title")) == label.strip():
+                errors.append(
+                    f"{canonical_id}: ordered reader duplicate-title wrapper is forbidden: "
+                    f"{child_id}"
+                )
+            child_groups = child_metadata.get("navigation_groups")
+            if isinstance(child_groups, list) and child_groups:
+                errors.append(
+                    f"{canonical_id}: ordered reader terminal child owns descendants: {child_id}"
+                )
+
+    expected_labels: list[str] = []
+    expected_navigation_labels: list[str] = []
+    expected_children: list[str] = []
+    source_labels: list[str] = []
+    for item in ordered:
+        if not isinstance(item, dict) or set(item) != {"kind", "label"}:
+            errors.append(f"{canonical_id}: ordered reader section entry is invalid")
+            return
+        kind = item.get("kind")
+        label = item.get("label")
+        if kind not in {"source-body", "navigation-group"} or not isinstance(label, str):
+            errors.append(f"{canonical_id}: ordered reader section entry is invalid")
+            return
+        normalized_label = label.strip()
+        expected_labels.append(normalized_label)
+        if kind == "source-body":
+            source_labels.append(normalized_label)
+        else:
+            children = group_by_label.get(normalized_label)
+            if children is None:
+                errors.append(
+                    f"{canonical_id}: ordered reader references unknown navigation group: "
+                    f"{normalized_label}"
+                )
+                return
+            expected_navigation_labels.append(normalized_label)
+            expected_children.extend(children)
+
+    if expected_navigation_labels != list(group_by_label):
+        errors.append(
+            f"{canonical_id}: ordered navigation-group entries must match navigation_groups "
+            "exactly and in source order"
+        )
+
+    label_positions: list[int] = []
+    for label in expected_labels:
+        matches = list(re.finditer(rf"(?m)^## {re.escape(label)}\s*$", body))
+        if len(matches) != 1:
+            errors.append(f"{canonical_id}: ordered reader H2 must occur exactly once: {label}")
+            continue
+        label_positions.append(matches[0].start())
+    if label_positions != sorted(label_positions):
+        errors.append(f"{canonical_id}: ordered reader H2 projection is stale")
+    for label in source_labels:
+        if len(re.findall(rf"(?m)^## {re.escape(label)}\s*$", reader_body)) != 1:
+            errors.append(
+                f"{canonical_id}: ordered source-body H2 is missing from authored prose: {label}"
+            )
+
+    pattern = re.compile(
+        rf"(?ms){re.escape(BOOK_READER_NAVIGATION_START)}\n(?P<body>.*?)"
+        rf"{re.escape(BOOK_READER_NAVIGATION_END)}"
+    )
+    managed = "\n".join(match.group("body") for match in pattern.finditer(body))
+    actual_navigation_labels = [
+        match.group("label").strip() for match in _MANAGED_MAP_H2.finditer(managed)
+    ]
+    if actual_navigation_labels != expected_navigation_labels:
+        errors.append(
+            f"{canonical_id}: ordered reader navigation headings are stale: "
+            f"expected={expected_navigation_labels!r}, actual={actual_navigation_labels!r}"
+        )
+    actual_children = [
+        _normalized_wikilink_target(match.group("target"))
+        for match in _MANAGED_MAP_LINK.finditer(managed)
+    ]
+    if actual_children != expected_children:
+        errors.append(
+            f"{canonical_id}: ordered reader direct links are stale: "
+            f"expected={expected_children!r}, actual={actual_children!r}"
+        )
 
 
 def _managed_book_map_block(

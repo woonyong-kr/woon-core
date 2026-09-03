@@ -11,11 +11,15 @@ from woon_core.knowledge.book_contract import (
     BOOK_CONTRACT_SHA256,
     LEGACY_BOOK_CONTRACT_SHA256_V7,
     PRE_IN_PAGE_H2_BOOK_CONTRACT_SHA256_V7,
+    PRE_ORDERED_READER_SECTIONS_BOOK_CONTRACT_SHA256_V7,
     book_promotion_contract_fields,
     require_current_book_contract,
 )
 from woon_core.knowledge.book_coverage import (
+    _audit_ordered_book_reader_ui,
+    _audit_source_structure_contract,
     _audit_static_harness_fidelity,
+    _ordered_reader_owner_runs,
     audit_book_coverage,
     audit_book_coverage_scope,
 )
@@ -36,6 +40,12 @@ def test_book_contract_v7_keeps_legacy_payload_read_compatibility() -> None:
     pre_in_page_h2 = json.loads(json.dumps(current))
     pre_in_page_h2["book_contract"]["sha256"] = PRE_IN_PAGE_H2_BOOK_CONTRACT_SHA256_V7
     require_current_book_contract(pre_in_page_h2, "book-promote")
+
+    pre_ordered_reader = json.loads(json.dumps(current))
+    pre_ordered_reader["book_contract"]["sha256"] = (
+        PRE_ORDERED_READER_SECTIONS_BOOK_CONTRACT_SHA256_V7
+    )
+    require_current_book_contract(pre_ordered_reader, "book-promote")
 
 
 def _source_element(
@@ -1105,6 +1115,203 @@ def test_book_coverage_accepts_ordered_source_sections_as_in_page_h2(
     report = audit_book_coverage(vault)
 
     assert report.complete
+
+
+def test_ordered_reader_owner_runs_allow_one_chapter_owner_to_resume() -> None:
+    owner = "books/llm/chapter-03"
+    metadata = {
+        "navigation_groups": [
+            {
+                "label": "3.3 깊은 절",
+                "children": [f"{owner}/3-3-1", f"{owner}/3-3-2"],
+            }
+        ],
+        "ordered_reader_sections": [
+            {"kind": "source-body", "label": "3.1 직접 절"},
+            {"kind": "source-body", "label": "3.2 직접 절"},
+            {"kind": "navigation-group", "label": "3.3 깊은 절"},
+            {"kind": "source-body", "label": "3.7 요약"},
+        ],
+    }
+
+    assert _ordered_reader_owner_runs(metadata, owner) == [
+        owner,
+        f"{owner}/3-3-1",
+        f"{owner}/3-3-2",
+        owner,
+    ]
+
+    invalid = json.loads(json.dumps(metadata))
+    invalid["ordered_reader_sections"][2]["label"] = "3.4 다른 절"
+    assert _ordered_reader_owner_runs(invalid, owner) is None
+
+
+def test_source_structure_allows_exact_ordered_chapter_owner_resume(tmp_path: Path) -> None:
+    owner = "books/llm/chapter-03"
+    child = f"{owner}/3-3-1"
+    structures = [
+        _source_structure("chapter", "3장", "pages 1-20"),
+        _source_structure("section", "3.1 직접 절", "pages 1-3"),
+        _source_structure("subsection", "3.3.1 깊은 절", "pages 4-17"),
+        _source_structure("section", "3.7 요약", "pages 18-20"),
+    ]
+    manifest = {
+        "source_structure_inventory_evidence": {
+            "locator": "evidence/chapter-03-structure.json",
+            "sha256": "9" * 64,
+            "verified_on": "2026-09-04",
+        },
+        "source_structure_elements": structures,
+        "source_structure_assignments": [
+            {
+                "structure_id": structures[0]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": owner,
+            },
+            {
+                "structure_id": structures[1]["structure_id"],
+                "disposition": "in-page-h2",
+                "owner_id": owner,
+                "heading": "## 3.1 직접 절",
+                "source_order": 1,
+            },
+            {
+                "structure_id": structures[2]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": child,
+            },
+            {
+                "structure_id": structures[3]["structure_id"],
+                "disposition": "in-page-h2",
+                "owner_id": owner,
+                "heading": "## 3.7 요약",
+                "source_order": 2,
+            },
+        ],
+    }
+    owner_metadata = {
+        "title": "3장",
+        "navigation_groups": [{"label": "3.3 깊은 절", "children": [child]}],
+        "ordered_reader_sections": [
+            {"kind": "source-body", "label": "3.1 직접 절"},
+            {"kind": "navigation-group", "label": "3.3 깊은 절"},
+            {"kind": "source-body", "label": "3.7 요약"},
+        ],
+    }
+    pages = {
+        owner: (
+            tmp_path / "chapter-03.md",
+            owner_metadata,
+            "# 3장\n\n## 3.1 직접 절\n\n본문\n\n## 3.7 요약\n\n요약\n",
+        ),
+        child: (tmp_path / "3-3-1.md", {"title": "3.3.1 깊은 절"}, "# 깊은 절\n"),
+    }
+    errors: list[str] = []
+
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        {owner, child},
+        {owner, child},
+        [owner, child],
+        pages,
+        errors,
+    )
+
+    assert errors == []
+
+    owner_metadata["ordered_reader_sections"] = [
+        {"kind": "source-body", "label": "3.1 직접 절"},
+        {"kind": "source-body", "label": "3.7 요약"},
+        {"kind": "navigation-group", "label": "3.3 깊은 절"},
+    ]
+    stale_errors: list[str] = []
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        {owner, child},
+        {owner, child},
+        [owner, child],
+        pages,
+        stale_errors,
+    )
+    assert any("must be contiguous or match" in error for error in stale_errors)
+
+
+def test_ordered_book_reader_ui_validates_interleaved_headings_and_links(
+    tmp_path: Path,
+) -> None:
+    canonical_id = "books/llm/chapter-03"
+    groups: list[object] = [
+        {
+            "label": "3.3 깊은 절",
+            "children": [f"{canonical_id}/3-3-1", f"{canonical_id}/3-3-2"],
+        }
+    ]
+    ordered: list[object] = [
+        {"kind": "source-body", "label": "3.1 직접 절"},
+        {"kind": "source-body", "label": "3.2 직접 절"},
+        {"kind": "navigation-group", "label": "3.3 깊은 절"},
+        {"kind": "source-body", "label": "3.7 요약"},
+    ]
+    body = (
+        "# 3장\n\n"
+        "## 3.1 직접 절\n\n첫째\n\n"
+        "## 3.2 직접 절\n\n둘째\n\n"
+        "<!-- woon-book-reader-navigation:start -->\n"
+        "## 3.3 깊은 절\n"
+        f"- [[wiki/{canonical_id}/3-3-1|3.3.1 첫째]]\n"
+        f"- [[wiki/{canonical_id}/3-3-2|3.3.2 둘째]]\n"
+        "<!-- woon-book-reader-navigation:end -->\n\n"
+        "## 3.7 요약\n\n요약"
+    )
+    reader_body = "## 3.1 직접 절\n\n첫째\n\n## 3.2 직접 절\n\n둘째\n\n## 3.7 요약\n\n요약"
+    pages = {
+        f"{canonical_id}/3-3-1": (
+            tmp_path / "3-3-1.md",
+            {
+                "title": "3.3.1 첫째",
+                "parent": f"[[wiki/{canonical_id}|3장]]",
+            },
+            "",
+        ),
+        f"{canonical_id}/3-3-2": (
+            tmp_path / "3-3-2.md",
+            {
+                "title": "3.3.2 둘째",
+                "parent": f"[[wiki/{canonical_id}|3장]]",
+            },
+            "",
+        ),
+    }
+    errors: list[str] = []
+
+    _audit_ordered_book_reader_ui(
+        canonical_id,
+        tmp_path / "chapter-03.md",
+        body,
+        reader_body,
+        groups,
+        ordered,
+        pages,
+        errors,
+    )
+
+    assert errors == []
+
+    stale_errors: list[str] = []
+    _audit_ordered_book_reader_ui(
+        canonical_id,
+        tmp_path / "chapter-03.md",
+        body.replace("## 3.3 깊은 절", "## 3.4 잘못된 절"),
+        reader_body,
+        groups,
+        ordered,
+        pages,
+        stale_errors,
+    )
+    assert any("ordered reader H2 must occur exactly once" in error for error in stale_errors)
+    assert any("navigation headings are stale" in error for error in stale_errors)
 
 
 @pytest.mark.parametrize(

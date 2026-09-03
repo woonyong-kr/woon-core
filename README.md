@@ -75,6 +75,15 @@ schema v2로 검증된 경우에만 `replace`를 사용한다. 한 장만 검증
 승격하지 않는다. `book-promote-retire`에서 `apply: false`는 revision·hash·scope 경계를
 검사하는 read-only preflight이고, 동일 payload를 `apply: true`로 바꿔야 실제 writer가
 compiler·tree·scope fragment·검색 index를 하나의 rollback 경계에서 갱신한다.
+`book-promote`와 `book-promote-retire`는 같은 optional `staged_assets` 계약을 사용한다.
+이미 존재하는 archive 경로는 staged SHA-256과 현재 bytes가 동일할 때만 idempotent하게
+재사용하며, 서로 다른 bytes로의 암묵적 덮어쓰기는 거부한다. 새 asset을 설치한 뒤 후속
+검증이 실패하면 transaction snapshot에서 원래 asset 상태까지 복원한다.
+퇴역 page의 기존 도판을 새 archive 경로로 옮겨야 할 때만
+`retirement_image_replacements`에 page별 `old_target: new_target`을 명시한다. 이 예외는
+현재·대체 coverage inventory와 실제 archive SHA-256이 모두 일치하고, 기존 본문에서
+정확히 한 번 나타나는 Markdown image target만 바뀔 때 허용된다. 일반 본문 차이는 계속
+거부한다.
 
 ```json
 {

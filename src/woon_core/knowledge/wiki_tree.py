@@ -27,6 +27,8 @@ OVERVIEW_START = "<!-- woon-wiki-overview:start -->"
 OVERVIEW_END = "<!-- woon-wiki-overview:end -->"
 CHILDREN_START = "<!-- woon-wiki-children:start -->"
 CHILDREN_END = "<!-- woon-wiki-children:end -->"
+BOOK_READER_NAVIGATION_START = "<!-- woon-book-reader-navigation:start -->"
+BOOK_READER_NAVIGATION_END = "<!-- woon-book-reader-navigation:end -->"
 LATEST_START = "<!-- woon-wiki-latest:start -->"
 LATEST_END = "<!-- woon-wiki-latest:end -->"
 TIMELINE_START = "<!-- woon-wiki-timeline:start -->"
@@ -68,6 +70,12 @@ class WikiNavigationGroup:
 
 
 @dataclass(frozen=True, slots=True)
+class WikiOrderedReaderSection:
+    kind: str
+    label: str
+
+
+@dataclass(frozen=True, slots=True)
 class WikiTreeNode:
     path: Path
     relative_path: str
@@ -84,6 +92,7 @@ class WikiTreeNode:
     sequence: float | None
     knowledge_state: str
     navigation_groups: tuple[WikiNavigationGroup, ...]
+    ordered_reader_sections: tuple[WikiOrderedReaderSection, ...]
     lifecycle_status: str
     started_on: date | None
     ended_on: date | None
@@ -253,6 +262,9 @@ def load_wiki_tree(
         keywords = _string_list(metadata.get("keywords"), "keywords", relative, issues)
         aliases = _string_list(metadata.get("aliases", []), "aliases", relative, issues)
         navigation_groups = _navigation_groups(metadata.get("navigation_groups"), relative, issues)
+        ordered_reader_sections = _ordered_reader_sections(
+            metadata.get("ordered_reader_sections"), relative, issues
+        )
         state = _required_text(metadata, "knowledge_state", relative, issues)
         updated = _date_value(metadata.get("updated"), "updated", relative, issues)
         if node_kind and node_kind not in NODE_KINDS:
@@ -341,6 +353,7 @@ def load_wiki_tree(
                 sequence=sequence,
                 knowledge_state=state,
                 navigation_groups=navigation_groups,
+                ordered_reader_sections=ordered_reader_sections,
                 lifecycle_status=lifecycle_status,
                 started_on=started_on,
                 ended_on=ended_on,
@@ -396,7 +409,11 @@ def render_wiki_tree_view(
     # without helping a reader understand the subject, so every Wiki page now
     # keeps only its authored semantic summary and navigation in the body.
     updated = _normalize_reader_headings(
-        _normalize_h1_spacing(_strip_marker_block(text, OVERVIEW_START, OVERVIEW_END))
+        _normalize_h1_spacing(
+            _strip_ordered_book_navigation(
+                _strip_marker_block(text, OVERVIEW_START, OVERVIEW_END)
+            )
+        )
     )
     # Latest indexes are projections. Remove every stale variant first and
     # rebuild only the heading that still has rows in the current graph.
@@ -423,6 +440,12 @@ def render_wiki_tree_view(
         and not (book_map_kind is None and node.node_kind == "entity" and direct_already_authored)
     )
     if show_tree:
+        if book_map_kind is not None and node.ordered_reader_sections:
+            updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
+            updated = _render_ordered_book_reader_sections(updated, node, direct, texts)
+            updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
+            updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
+            return _normalize_h1_spacing(updated).rstrip() + "\n"
         child_rows = [
             CHILDREN_START,
             *_render_navigation_children(
@@ -534,7 +557,8 @@ def render_wiki_tree_view(
 def strip_generated_wiki_views(text: str) -> str:
     """Remove derived view blocks before computing a compiler projection."""
 
-    updated = _strip_section(text, "하위 키워드", CHILDREN_START, CHILDREN_END)
+    updated = _strip_ordered_book_navigation(text)
+    updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
     updated = _strip_section(updated, "원자료", SOURCE_INDEX_START, SOURCE_INDEX_END)
     updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
     updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
@@ -680,6 +704,40 @@ def _navigation_groups(
     return tuple(groups)
 
 
+def _ordered_reader_sections(
+    value: object, relative: str, issues: list[str]
+) -> tuple[WikiOrderedReaderSection, ...]:
+    """Parse the explicit source order for a mixed-depth book chapter."""
+
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not value:
+        issues.append(f"{relative}: ordered_reader_sections must be a non-empty list")
+        return ()
+    sections: list[WikiOrderedReaderSection] = []
+    identities: set[tuple[str, str]] = set()
+    for index, item in enumerate(value, start=1):
+        location = f"{relative}: ordered_reader_sections[{index}]"
+        if not isinstance(item, dict) or set(item) != {"kind", "label"}:
+            issues.append(f"{location} must contain exactly kind and label")
+            continue
+        kind = item.get("kind")
+        label = item.get("label")
+        if kind not in {"source-body", "navigation-group"}:
+            issues.append(f"{location}.kind must be source-body or navigation-group")
+            continue
+        if not isinstance(label, str) or not label.strip():
+            issues.append(f"{location}.label must be a non-empty string")
+            continue
+        identity = (kind, label.strip().casefold())
+        if identity in identities:
+            issues.append(f"{relative}: ordered_reader_sections must not repeat entries")
+            continue
+        identities.add(identity)
+        sections.append(WikiOrderedReaderSection(kind=kind, label=label.strip()))
+    return tuple(sections)
+
+
 def _date_value(value: object, key: str, relative: str, issues: list[str]) -> date:
     if isinstance(value, date):
         return value
@@ -792,9 +850,17 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
 
     for node in nodes:
         book_map_kind = _book_navigation_kind(node, nodes)
+        if node.ordered_reader_sections:
+            issues.extend(
+                _ordered_reader_section_issues(
+                    node,
+                    texts[node.relative_path],
+                    book_map_kind=book_map_kind,
+                )
+            )
         if book_map_kind is not None and node.navigation_groups:
             authored_map_body = _book_map_authored_body(texts[node.relative_path])
-            if authored_map_body:
+            if authored_map_body and not node.ordered_reader_sections:
                 issues.append(
                     f"{node.relative_path}: book map authored body must be empty; "
                     "keep source explanation and runnable examples on leaf pages"
@@ -814,8 +880,10 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
 
         if re.fullmatch(r".+/chapter-\d{2}", node.canonical_id):
             direct = children.get(node.relative_path, ())
-            authored = _strip_section(
-                texts[node.relative_path], "하위 키워드", CHILDREN_START, CHILDREN_END
+            authored = _strip_ordered_book_navigation(
+                _strip_section(
+                    texts[node.relative_path], "하위 키워드", CHILDREN_START, CHILDREN_END
+                )
             )
             duplicated = tuple(
                 child.canonical_id
@@ -869,6 +937,60 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
                 issues.append(
                     f"{child.relative_path}: direct children of people must be person entities"
                 )
+    return issues
+
+
+def _ordered_reader_section_issues(
+    node: WikiTreeNode,
+    text: str,
+    *,
+    book_map_kind: str | None,
+) -> list[str]:
+    """Validate the opt-in mixed-depth chapter projection without fallback."""
+
+    issues: list[str] = []
+    if book_map_kind != "chapter-root":
+        return [
+            f"{node.relative_path}: ordered_reader_sections are allowed only on a book chapter"
+        ]
+    if not node.navigation_groups:
+        return [
+            f"{node.relative_path}: ordered_reader_sections require navigation_groups"
+        ]
+    kinds = {section.kind for section in node.ordered_reader_sections}
+    if kinds != {"source-body", "navigation-group"}:
+        issues.append(
+            f"{node.relative_path}: ordered_reader_sections require both source-body and "
+            "navigation-group entries"
+        )
+    navigation_labels = [group.label for group in node.navigation_groups]
+    ordered_navigation = [
+        section.label
+        for section in node.ordered_reader_sections
+        if section.kind == "navigation-group"
+    ]
+    if ordered_navigation != navigation_labels:
+        issues.append(
+            f"{node.relative_path}: ordered navigation-group entries must match "
+            "navigation_groups exactly and in source order"
+        )
+    source_labels = [
+        section.label for section in node.ordered_reader_sections if section.kind == "source-body"
+    ]
+    authored = strip_generated_wiki_views(text)
+    positions: list[int] = []
+    for label in source_labels:
+        matches = list(re.finditer(rf"(?m)^## {re.escape(label)}\s*$", authored))
+        if len(matches) != 1:
+            issues.append(
+                f"{node.relative_path}: ordered source-body H2 must occur exactly once: {label}"
+            )
+            continue
+        positions.append(matches[0].start())
+    if positions != sorted(positions):
+        issues.append(
+            f"{node.relative_path}: ordered source-body H2 order differs from reader body"
+        )
     return issues
 
 
@@ -1425,6 +1547,89 @@ def _render_navigation_children(
     return tuple(rows)
 
 
+def _render_ordered_book_reader_sections(
+    text: str,
+    parent: WikiTreeNode,
+    direct: tuple[WikiTreeNode, ...],
+    texts: dict[str, str],
+) -> str:
+    """Interleave generated deep links between exact authored source sections."""
+
+    direct_by_id = {child.canonical_id: child for child in direct}
+    direct_labels = dict(
+        zip(
+            (child.canonical_id for child in direct),
+            _distinct_keyword_labels(direct),
+            strict=True,
+        )
+    )
+    groups = {group.label: group for group in parent.navigation_groups}
+    insertions: list[tuple[int, str]] = []
+    sections = parent.ordered_reader_sections
+    index = 0
+    while index < len(sections):
+        section = sections[index]
+        if section.kind == "source-body":
+            index += 1
+            continue
+        run: list[WikiOrderedReaderSection] = []
+        while index < len(sections) and sections[index].kind == "navigation-group":
+            run.append(sections[index])
+            index += 1
+        next_source = next(
+            (item for item in sections[index:] if item.kind == "source-body"),
+            None,
+        )
+        offset = (
+            _exact_h2_offset(text, next_source.label)
+            if next_source is not None
+            else _before_source_index_offset(text)
+        )
+        rows: list[str] = [BOOK_READER_NAVIGATION_START]
+        for item in run:
+            group = groups[item.label]
+            rows.extend(
+                _render_explicit_navigation_group(
+                    parent,
+                    group,
+                    direct_by_id,
+                    direct_labels,
+                    texts,
+                    include_sequence=False,
+                    topic_headings=True,
+                )
+            )
+        rows.append(BOOK_READER_NAVIGATION_END)
+        insertions.append((offset, "\n".join(rows)))
+
+    updated = text
+    for offset, block in reversed(insertions):
+        before = updated[:offset].rstrip()
+        after = updated[offset:].lstrip("\n")
+        updated = f"{before}\n\n{block}\n\n{after}"
+    return updated
+
+
+def _exact_h2_offset(text: str, label: str) -> int:
+    matches = list(re.finditer(rf"(?m)^## {re.escape(label)}\s*$", text))
+    if len(matches) != 1:
+        raise WoonError("ordered book reader source-body heading must occur exactly once: " + label)
+    return matches[0].start()
+
+
+def _before_source_index_offset(text: str) -> int:
+    match = re.search(r"(?m)^## 원자료\s*$", text)
+    return match.start() if match is not None else len(text)
+
+
+def _strip_ordered_book_navigation(text: str) -> str:
+    pattern = re.compile(
+        rf"(?ms)\n*{re.escape(BOOK_READER_NAVIGATION_START)}\n.*?"
+        rf"{re.escape(BOOK_READER_NAVIGATION_END)}\n*"
+    )
+    return pattern.sub("\n\n", text)
+
+
 def _render_explicit_navigation_groups(
     parent: WikiTreeNode,
     direct: tuple[WikiTreeNode, ...],
@@ -1450,37 +1655,56 @@ def _render_explicit_navigation_groups(
     )
     rows: list[str] = []
     for group in parent.navigation_groups:
-        rows.append(f"## {group.label}" if topic_headings else f"- {group.label}")
-        for child_id in group.child_ids:
-            child = direct_by_id[child_id]
-            if (
-                topic_headings
-                and len(group.child_ids) > 1
-                and child.title.strip() == group.label.strip()
-            ):
-                # A source section introduction is still a canonical page, but
-                # its title is already represented by the H2 topic keyword.
-                # Repeating the same title as a link makes a book map look like
-                # an accidental extra depth level.
+        rows.extend(
+            _render_explicit_navigation_group(
+                parent,
+                group,
+                direct_by_id,
+                direct_labels,
+                texts,
+                include_sequence=include_sequence,
+                topic_headings=topic_headings,
+            )
+        )
+    return tuple(rows)
+
+
+def _render_explicit_navigation_group(
+    parent: WikiTreeNode,
+    group: WikiNavigationGroup,
+    direct_by_id: dict[str, WikiTreeNode],
+    direct_labels: dict[str, str],
+    texts: dict[str, str],
+    *,
+    include_sequence: bool,
+    topic_headings: bool,
+) -> tuple[str, ...]:
+    """Render one navigation group while preserving the established projection."""
+
+    rows = [f"## {group.label}" if topic_headings else f"- {group.label}"]
+    for child_id in group.child_ids:
+        child = direct_by_id[child_id]
+        if (
+            topic_headings
+            and len(group.child_ids) > 1
+            and child.title.strip() == group.label.strip()
+        ):
+            # A source section introduction is still a canonical page, but
+            # its title is already represented by the H2 topic keyword.
+            # Repeating the same title as a link makes a book map look like
+            # an accidental extra depth level.
+            continue
+        if parent.canonical_id == "resources/README" and child.node_kind == "topic":
+            resource_rows = _resource_link_rows(texts[child.relative_path])
+            if len(resource_rows) <= FLATTEN_GROUP_MAX_CHILDREN:
+                rows.extend(row if topic_headings else f"  {row}" for row in resource_rows)
                 continue
-            if parent.canonical_id == "resources/README" and child.node_kind == "topic":
-                resource_rows = _resource_link_rows(texts[child.relative_path])
-                if len(resource_rows) <= FLATTEN_GROUP_MAX_CHILDREN:
-                    rows.extend(row if topic_headings else f"  {row}" for row in resource_rows)
-                else:
-                    link = _render_keyword_link(
-                        child,
-                        include_sequence=include_sequence,
-                        label=child.title if topic_headings else direct_labels[child_id],
-                    )
-                    rows.append(link if topic_headings else f"  {link}")
-            else:
-                link = _render_keyword_link(
-                    child,
-                    include_sequence=include_sequence,
-                    label=child.title if topic_headings else direct_labels[child_id],
-                )
-                rows.append(link if topic_headings else f"  {link}")
+        link = _render_keyword_link(
+            child,
+            include_sequence=include_sequence,
+            label=child.title if topic_headings else direct_labels[child_id],
+        )
+        rows.append(link if topic_headings else f"  {link}")
     return tuple(rows)
 
 

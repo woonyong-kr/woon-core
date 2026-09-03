@@ -854,6 +854,7 @@ class CompiledWiki:
         coverage_manifest: BookCoverageManifestUpdate | None = None,
         *,
         rights_restore_book_id: str | None = None,
+        retirement_image_replacements: dict[str, dict[str, str]] | None = None,
     ) -> VerifiedBookUpdateReport:
         """Promote pages and retire obsolete wrappers in one compiler transaction.
 
@@ -936,6 +937,8 @@ class CompiledWiki:
             retirement_body_sha256,
             sources,
             pages,
+            coverage_manifest=coverage_manifest,
+            retirement_image_replacements=retirement_image_replacements,
         )
 
         # Validate against the current topology before promotion rewrites a
@@ -1149,6 +1152,7 @@ class CompiledWiki:
         staged_assets: tuple[StagedBookAsset, ...] = (),
         *,
         rights_restore_book_id: str | None = None,
+        retirement_image_replacements: dict[str, dict[str, str]] | None = None,
     ) -> VerifiedBookUpdateReport:
         """Execute the exact writer and post-write audits in an isolated Vault clone."""
 
@@ -1177,6 +1181,9 @@ class CompiledWiki:
                     asset_relative = item.get("archive_relative_path")
                     if isinstance(asset_relative, str):
                         self._copy_dry_run_source_file(asset_relative, dry_vault)
+            for page_replacements in (retirement_image_replacements or {}).values():
+                for current_relative in page_replacements:
+                    self._copy_dry_run_source_file(current_relative, dry_vault)
 
             dry_settings = CompiledWikiSettings(
                 vault=dry_vault,
@@ -1205,6 +1212,7 @@ class CompiledWiki:
                 retirement_body_sha256,
                 coverage_manifest,
                 rights_restore_book_id=rights_restore_book_id,
+                retirement_image_replacements=retirement_image_replacements,
             )
 
     def _copy_dry_run_source_file(self, relative: str, dry_vault: Path) -> None:
@@ -1289,6 +1297,9 @@ class CompiledWiki:
         records: tuple[VerifiedBookPage, ...],
         replacements: dict[str, str],
         retirement_body_sha256: dict[str, str],
+        coverage_manifest: BookCoverageManifestUpdate | None = None,
+        *,
+        retirement_image_replacements: dict[str, dict[str, str]] | None = None,
     ) -> None:
         """Fail a preflight if retiring reader prose is not copied exactly.
 
@@ -1305,6 +1316,9 @@ class CompiledWiki:
             retirement_body_sha256,
             sources,
             pages,
+            coverage_manifest=coverage_manifest,
+            retirement_image_replacements=retirement_image_replacements,
+            validate_image_assets=False,
         )
 
     def preflight_book_rights_demotion(
@@ -1917,10 +1931,23 @@ class CompiledWiki:
         retirement_body_sha256: dict[str, str],
         sources: dict[str, dict[str, Any]],
         pages: dict[str, dict[str, Any]],
+        *,
+        coverage_manifest: BookCoverageManifestUpdate | None,
+        retirement_image_replacements: dict[str, dict[str, str]] | None,
+        validate_image_assets: bool = True,
     ) -> None:
         """Validate optimistic body hashes and exact prose relocation."""
 
         promoted_by_id = {record.page_id: record for record in records}
+        image_replacements = retirement_image_replacements or {}
+        unknown_image_replacement_pages = set(image_replacements).difference(replacements)
+        if unknown_image_replacement_pages:
+            raise WoonError(
+                "retirement image replacement page is not retired: "
+                f"{sorted(unknown_image_replacement_pages)[0]}"
+            )
+        if image_replacements and validate_image_assets:
+            self._validate_retirement_image_assets(image_replacements, coverage_manifest)
         for page_id in sorted(replacements):
             page = pages.get(page_id)
             if page is None:
@@ -1941,11 +1968,82 @@ class CompiledWiki:
                     f"{replacement_id}"
                 )
             replacement_body = _normalize(replacement.body)
-            if normalized_body not in replacement_body:
+            relocated_body = _relocate_retirement_image_targets(
+                normalized_body,
+                image_replacements.get(page_id, {}),
+            )
+            if relocated_body not in replacement_body:
                 raise WoonError(
                     "verified book retirement reader content is not preserved in "
                     f"replacement: {page_id}"
                 )
+
+    def _validate_retirement_image_assets(
+        self,
+        replacements: dict[str, dict[str, str]],
+        coverage_manifest: BookCoverageManifestUpdate | None,
+    ) -> None:
+        """Pin every retired image target to old and replacement archive bytes."""
+
+        if coverage_manifest is None:
+            raise WoonError("retirement image replacements require a coverage manifest")
+        if coverage_manifest.mode == "merge-scope":
+            current_relative = coverage_manifest.base_relative_path
+        else:
+            current_relative = coverage_manifest.relative_path
+        if not isinstance(current_relative, str):
+            raise WoonError("retirement image replacements require current coverage inventory")
+        current_path = _inside(
+            self._settings.vault,
+            current_relative,
+            "retirement image current coverage manifest",
+        )
+        try:
+            current_manifest = json.loads(current_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise WoonError("retirement image current coverage manifest is unreadable") from error
+        current_assets = _asset_inventory_by_path(current_manifest)
+        replacement_assets = _asset_inventory_by_path(coverage_manifest.replacement)
+        for page_id, page_replacements in replacements.items():
+            for old_target, new_target in page_replacements.items():
+                if old_target == new_target:
+                    raise WoonError(
+                        f"retirement image replacement must change its target: {page_id}"
+                    )
+                old_item = current_assets.get(old_target)
+                new_item = replacement_assets.get(new_target)
+                if old_item is None or new_item is None:
+                    raise WoonError(
+                        "retirement image replacement is absent from coverage inventories: "
+                        f"{page_id}"
+                    )
+                old_sha256 = old_item.get("archive_sha256")
+                new_sha256 = new_item.get("archive_sha256")
+                if (
+                    re.fullmatch(r"[0-9a-f]{64}", str(old_sha256)) is None
+                    or re.fullmatch(r"[0-9a-f]{64}", str(new_sha256)) is None
+                ):
+                    raise WoonError("retirement image replacement asset hash is invalid")
+                old_path = self._book_asset_destination(old_target)
+                if (
+                    old_path.is_symlink()
+                    or not old_path.is_file()
+                    or _sha256_bytes(old_path.read_bytes()) != old_sha256
+                ):
+                    raise WoonError(
+                        "retirement image current archive hash does not match: "
+                        f"{old_target}"
+                    )
+                new_path = self._book_asset_destination(new_target)
+                if (
+                    new_path.is_symlink()
+                    or not new_path.is_file()
+                    or _sha256_bytes(new_path.read_bytes()) != new_sha256
+                ):
+                    raise WoonError(
+                        "retirement image replacement archive hash does not match: "
+                        f"{new_target}"
+                    )
 
     def validate_book_coverage_manifest_update(self, update: BookCoverageManifestUpdate) -> Path:
         """Validate one coverage replacement and return its canonical local path."""
@@ -2289,6 +2387,7 @@ class CompiledWiki:
         workflow_phase: str,
         *,
         allow_legacy_toc_normalization: bool = False,
+        replacement_survivor_ids: set[str] | None = None,
     ) -> None:
         """Prevent concept-linking from silently regenerating reader prose."""
 
@@ -2315,6 +2414,7 @@ class CompiledWiki:
             sources,
             pages,
             allow_legacy_toc_normalization=allow_legacy_toc_normalization,
+            replacement_survivor_ids=replacement_survivor_ids,
         )
         if workflow_phase != "concept-linked":
             return
@@ -2365,6 +2465,7 @@ class CompiledWiki:
         *,
         expected_book_id: str | None = None,
         allow_legacy_toc_normalization: bool = False,
+        replacement_survivor_ids: set[str] | None = None,
     ) -> set[str]:
         """Validate a one-scope rights restore and return exact carry-forward pages.
 
@@ -2408,6 +2509,7 @@ class CompiledWiki:
                 )
 
         carry_forward_ids: set[str] = set()
+        explicit_survivors = replacement_survivor_ids or set()
         for book_id in sorted(touched_books):
             live_ids = rights_pages_by_book[book_id]
             omitted = live_ids.difference(records_by_id)
@@ -2431,6 +2533,7 @@ class CompiledWiki:
                 }
                 if ancestors:
                     changed_scope_ids.add(max(ancestors, key=len))
+            changed_scope_ids.update(explicit_survivors.intersection(live_ids))
 
             book_carry_forward = live_ids.difference(changed_scope_ids)
             for page_id in sorted(book_carry_forward):
@@ -4136,6 +4239,83 @@ def _retirement_body(value: str) -> str:
         authored,
     )
     return _normalize(authored)
+
+
+def _asset_inventory_by_path(manifest: object) -> dict[str, dict[str, Any]]:
+    """Return a strict archive-path index from one coverage manifest."""
+
+    if not isinstance(manifest, dict):
+        raise WoonError("retirement image coverage manifest must be an object")
+    inventory = manifest.get("source_asset_inventory")
+    if not isinstance(inventory, list):
+        raise WoonError("retirement image coverage inventory must be an array")
+    indexed: dict[str, dict[str, Any]] = {}
+    for item in inventory:
+        if not isinstance(item, dict):
+            raise WoonError("retirement image coverage inventory item must be an object")
+        relative = item.get("archive_relative_path")
+        if not isinstance(relative, str) or not relative.strip():
+            raise WoonError("retirement image coverage archive path must be a string")
+        relative_path = Path(relative)
+        if (
+            relative_path.is_absolute()
+            or "\\" in relative
+            or ".." in relative_path.parts
+            or relative_path.as_posix() != relative
+            or relative_path.parts[:5]
+            != ("wiki", "private", "_sources", "knowledge", "local-only")
+        ):
+            raise WoonError(
+                f"retirement image coverage archive path is invalid: {relative}"
+            )
+        if relative in indexed:
+            raise WoonError(
+                f"retirement image coverage archive path is duplicated: {relative}"
+            )
+        indexed[relative] = item
+    return indexed
+
+
+def _relocate_retirement_image_targets(body: str, replacements: dict[str, str]) -> str:
+    """Relocate only explicit Markdown image targets, preserving all other text."""
+
+    relocated = body
+    for old_target, new_target in replacements.items():
+        if not isinstance(old_target, str) or not isinstance(new_target, str):
+            raise WoonError("retirement image targets must be strings")
+        old_path = Path(old_target)
+        new_path = Path(new_target)
+        for label, value, path in (
+            ("current", old_target, old_path),
+            ("replacement", new_target, new_path),
+        ):
+            if (
+                not value
+                or path.is_absolute()
+                or "\\" in value
+                or ".." in path.parts
+                or path.as_posix() != value
+                or path.parts[:5]
+                != ("wiki", "private", "_sources", "knowledge", "local-only")
+            ):
+                raise WoonError(
+                    f"retirement image {label} target is invalid: {value}"
+                )
+        if old_target == new_target:
+            raise WoonError("retirement image replacement must change its target")
+        pattern = re.compile(rf"(!\[[^\]\n]*\]\(){re.escape(old_target)}(\))")
+        matches = pattern.findall(relocated)
+        if len(matches) != 1:
+            raise WoonError(
+                "retirement image current target must occur exactly once in reader body: "
+                f"{old_target}"
+            )
+        if re.search(rf"!\[[^\]\n]*\]\({re.escape(new_target)}\)", relocated):
+            raise WoonError(
+                f"retirement image replacement target already exists in reader body: {new_target}"
+            )
+        relocated = pattern.sub(rf"\g<1>{new_target}\g<2>", relocated, count=1)
+    return relocated
 
 
 def _navigation_only_body(value: str) -> bool:

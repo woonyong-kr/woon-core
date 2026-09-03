@@ -9,6 +9,7 @@ from woon_core.knowledge.wiki_tree import (
     is_wiki_source_archive,
     prepare_wiki_tree_refresh,
     preserve_generated_wiki_views,
+    strip_generated_wiki_views,
 )
 
 
@@ -914,6 +915,144 @@ def test_nested_book_navigation_map_renders_h2_topics_with_direct_links(
         "- [[wiki/books/software/llm/chapter-03/3-3/3-3-2|3.3.2 부분 단어 토큰화]]"
     ) in nested
     assert "- 3.3.1 단어 단위 토큰화" not in nested
+
+
+def test_book_chapter_interleaves_source_body_and_deep_navigation_in_source_order(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai.md",
+        title="AI",
+        canonical_id="books/ai",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("AI",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai/llm.md",
+        title="LLM 책",
+        canonical_id="books/llm",
+        node_kind="entity",
+        parent="[[wiki/books/ai|AI]]",
+        keywords=("LLM 책",),
+        view_mode="linear",
+        extra=(
+            "entity_kind: book\n"
+            "navigation_groups:\n"
+            "- label: 본문\n"
+            "  children:\n"
+            "  - books/llm/chapter-03\n"
+        ),
+    )
+    chapter_path = "wiki/books/ai/llm/chapter-03.md"
+    original_body = (
+        "## 3.1 직접 절\n\n첫 번째 원문이다.\n\n"
+        "## 3.2 직접 절\n\n두 번째 원문이다.\n\n"
+        "## 3.7 요약\n\n원문 요약이다."
+    )
+    _write_page(
+        tmp_path,
+        chapter_path,
+        title="3장",
+        canonical_id="books/llm/chapter-03",
+        node_kind="topic",
+        parent="[[wiki/books/ai/llm|LLM 책]]",
+        keywords=("3장",),
+        view_mode="linear",
+        body=original_body,
+        extra=(
+            "navigation_groups:\n"
+            "- label: 3.3 깊은 절\n"
+            "  children:\n"
+            "  - books/llm/chapter-03/3-3-1\n"
+            "  - books/llm/chapter-03/3-3-2\n"
+            "ordered_reader_sections:\n"
+            "- kind: source-body\n"
+            "  label: 3.1 직접 절\n"
+            "- kind: source-body\n"
+            "  label: 3.2 직접 절\n"
+            "- kind: navigation-group\n"
+            "  label: 3.3 깊은 절\n"
+            "- kind: source-body\n"
+            "  label: 3.7 요약\n"
+        ),
+    )
+    for suffix, title in (("3-3-1", "3.3.1 첫째"), ("3-3-2", "3.3.2 둘째")):
+        _write_page(
+            tmp_path,
+            f"wiki/books/ai/llm/chapter-03/{suffix}.md",
+            title=title,
+            canonical_id=f"books/llm/chapter-03/{suffix}",
+            node_kind="detail",
+            parent="[[wiki/books/ai/llm/chapter-03|3장]]",
+            keywords=(title,),
+            view_mode="article",
+            body=f"{title}의 원문이다.",
+        )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / chapter_path].decode("utf-8")
+    labels = ("## 3.1 직접 절", "## 3.2 직접 절", "## 3.3 깊은 절", "## 3.7 요약")
+    assert [rendered.index(label) for label in labels] == sorted(
+        rendered.index(label) for label in labels
+    )
+    assert rendered.count("<!-- woon-book-reader-navigation:start -->") == 1
+    assert "- [[wiki/books/ai/llm/chapter-03/3-3-1|3.3.1 첫째]]" in rendered
+    assert strip_generated_wiki_views(rendered).rstrip().endswith(original_body)
+
+    apply_wiki_tree_refresh(tmp_path, report)
+    replay = prepare_wiki_tree_refresh(tmp_path)
+    assert replay.issues == ()
+    assert replay.changed_count == 0
+
+
+def test_ordered_reader_sections_fail_closed_outside_book_chapter(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+        extra=(
+            "ordered_reader_sections:\n"
+            "- kind: source-body\n"
+            "  label: 직접 절\n"
+            "- kind: navigation-group\n"
+            "  label: 연결\n"
+        ),
+        body="## 직접 절\n\n본문",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert (
+        "wiki/README.md: ordered_reader_sections are allowed only on a book chapter"
+        in report.issues
+    )
 
 
 def test_book_map_with_children_requires_source_owned_navigation_groups(

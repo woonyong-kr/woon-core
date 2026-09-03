@@ -309,6 +309,8 @@ class KnowledgeService:
         retirement_body_sha256: dict[str, str],
         coverage_manifest: BookCoverageManifestUpdate | None = None,
         staged_assets: tuple[StagedBookAsset, ...] = (),
+        *,
+        retirement_image_replacements: dict[str, dict[str, str]] | None = None,
     ) -> VerifiedBookUpdateReport:
         """Atomically promote pages, retire wrappers, and rebuild search once.
 
@@ -327,6 +329,7 @@ class KnowledgeService:
                 retirement_expected_revisions,
                 retirement_body_sha256,
                 coverage_manifest,
+                retirement_image_replacements=retirement_image_replacements,
             )
             if staged_assets and coverage_manifest is None:
                 raise WoonError("staged book assets require a coverage manifest")
@@ -349,6 +352,7 @@ class KnowledgeService:
                     replacements,
                     retirement_body_sha256,
                     coverage_manifest,
+                    retirement_image_replacements=retirement_image_replacements,
                 )
                 self._reindex_unlocked()
             except BaseException as update_error:
@@ -377,6 +381,8 @@ class KnowledgeService:
         retirement_body_sha256: dict[str, str],
         coverage_manifest: BookCoverageManifestUpdate,
         staged_assets: tuple[StagedBookAsset, ...] = (),
+        *,
+        retirement_image_replacements: dict[str, dict[str, str]] | None = None,
     ) -> VerifiedBookPreflightReport:
         """Validate revisions and coverage hashes without mutating the Vault."""
 
@@ -390,6 +396,7 @@ class KnowledgeService:
                 retirement_expected_revisions,
                 retirement_body_sha256,
                 coverage_manifest,
+                retirement_image_replacements=retirement_image_replacements,
             )
             asset_counts = compiler.validate_staged_book_assets(staged_assets, coverage_manifest)
             compiler.dry_run_verified_book_update(
@@ -398,6 +405,7 @@ class KnowledgeService:
                 retirement_body_sha256,
                 coverage_manifest,
                 staged_assets,
+                retirement_image_replacements=retirement_image_replacements,
             )
         if coverage_path is None:  # pragma: no cover - public preflight requires coverage
             raise WoonError("verified book preflight requires a coverage manifest")
@@ -743,6 +751,7 @@ class KnowledgeService:
         coverage_manifest: BookCoverageManifestUpdate | None,
         *,
         allow_blocked_restore: bool = False,
+        retirement_image_replacements: dict[str, dict[str, str]] | None = None,
     ) -> Path | None:
         """Validate one request while the repository lock is held."""
 
@@ -792,6 +801,8 @@ class KnowledgeService:
             pages,
             replacements,
             retirement_body_sha256,
+            coverage_manifest,
+            retirement_image_replacements=retirement_image_replacements,
         )
         workflow_phase = "source-landed"
         if coverage_manifest is not None:
@@ -806,6 +817,7 @@ class KnowledgeService:
                 and coverage_manifest.mode == "replace"
                 and not allow_blocked_restore
             ),
+            replacement_survivor_ids=set(replacements.values()),
         )
         if coverage_manifest is not None:
             book_id = coverage_manifest.replacement.get("book_id")
