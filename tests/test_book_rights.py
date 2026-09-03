@@ -200,6 +200,7 @@ def test_load_book_rights_restoration_rejects_stale_contract() -> None:
 
 def test_book_rights_restore_supersedes_blocked_decision_records() -> None:
     page_id = f"{BOOK_ID}/chapter-01"
+    toc_page_id = f"{BOOK_ID}/appendix-a"
     rights_source = f"source://book-rights/{BOOK_ID}/notice/page"
     rights_claim = f"claim://book-rights/{BOOK_ID}/notice/page"
     current_source = "source://book/example/current"
@@ -225,7 +226,12 @@ def test_book_rights_restore_supersedes_blocked_decision_records() -> None:
             "source_ids": [rights_source, current_source],
             "claim_ids": [rights_claim, current_claim],
             "render": {"kind": "source-body", "source_id": current_source},
-        }
+        },
+        toc_page_id: {
+            "source_ids": [],
+            "claim_ids": [],
+            "render": {"kind": "toc-only"},
+        },
     }
     record = VerifiedBookPage(
         page_id=page_id,
@@ -256,6 +262,26 @@ def test_book_rights_restore_supersedes_blocked_decision_records() -> None:
         "status": "superseded",
         "superseded_by": current_claim,
     }
+
+
+def test_book_rights_restore_rejects_source_free_non_toc_page() -> None:
+    page_id = f"{BOOK_ID}/chapter-01"
+    pages = {
+        page_id: {
+            "source_ids": [],
+            "claim_ids": [],
+            "render": {"kind": "source-body", "source_id": "source://missing"},
+        }
+    }
+
+    with pytest.raises(WoonError, match="page source_ids must be a non-empty string list"):
+        CompiledWiki._retire_book_rights_decisions(
+            BOOK_ID,
+            (),
+            {},
+            {},
+            pages,
+        )
 
 
 def test_load_book_rights_demotion_rejects_archive_escape(tmp_path: Path) -> None:

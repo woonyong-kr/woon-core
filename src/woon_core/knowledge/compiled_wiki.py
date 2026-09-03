@@ -1241,7 +1241,7 @@ class CompiledWiki:
             if page_id == book_id or page_id.startswith(book_id + "/")
             if any(
                 source_id.startswith(source_prefix)
-                for source_id in _string_list(page.get("source_ids"), "page source_ids")
+                for source_id in _book_rights_scan_source_ids(page)
             )
         }
         omitted = live_rights_pages.difference(promoted_ids)
@@ -1726,13 +1726,13 @@ class CompiledWiki:
             source_id
             for page_id, page in pages.items()
             if page_id not in target_ids
-            for source_id in _string_list(page.get("source_ids"), "page source_ids")
+            for source_id in _book_rights_scan_source_ids(page)
         }
         outside_claim_ids = {
             claim_id
             for page_id, page in pages.items()
             if page_id not in target_ids
-            for claim_id in _string_list(page.get("claim_ids"), "page claim_ids")
+            for claim_id in _book_rights_scan_claim_ids(page)
         }
         shared_source_ids = actual_sources.intersection(outside_source_ids)
         shared_claim_ids = actual_claims.intersection(outside_claim_ids)
@@ -2381,7 +2381,7 @@ class CompiledWiki:
 
         rights_pages_by_book: dict[str, set[str]] = {}
         for page_id, page in pages.items():
-            for source_id in _string_list(page.get("source_ids"), "page source_ids"):
+            for source_id in _book_rights_scan_source_ids(page):
                 if not source_id.startswith("source://book-rights/"):
                     continue
                 tail = source_id.removeprefix("source://book-rights/")
@@ -4001,6 +4001,31 @@ def _verified_book_toc_only(frontmatter: object) -> bool:
     if marker is not None and marker is not True:
         raise WoonError("verified book book_toc_only marker must be true when present")
     return marker is True or frontmatter.get("content_state") == "toc-only"
+
+
+def _book_rights_scan_source_ids(page: dict[str, Any]) -> tuple[str, ...]:
+    """Return source IDs while allowing only explicit source-free TOC pages."""
+
+    if _is_explicit_source_free_toc_page(page):
+        return ()
+    return tuple(_string_list(page.get("source_ids"), "page source_ids"))
+
+
+def _book_rights_scan_claim_ids(page: dict[str, Any]) -> tuple[str, ...]:
+    """Return claim IDs for a rights scan with the same TOC-only boundary."""
+
+    if _is_explicit_source_free_toc_page(page) and page.get("claim_ids") == []:
+        return ()
+    return tuple(_string_list(page.get("claim_ids"), "page claim_ids"))
+
+
+def _is_explicit_source_free_toc_page(page: dict[str, Any]) -> bool:
+    render = page.get("render")
+    return (
+        isinstance(render, dict)
+        and render.get("kind") == "toc-only"
+        and page.get("source_ids") == []
+    )
 
 
 def _normalize_verified_book_toc_only(frontmatter: dict[str, Any]) -> bool:

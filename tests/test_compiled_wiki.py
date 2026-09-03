@@ -911,6 +911,41 @@ def test_legacy_rights_toc_normalization_rejects_new_descendants(
         )
 
 
+def test_book_rights_scan_skips_only_explicit_source_free_toc_pages(
+    tmp_path: Path,
+) -> None:
+    compiler, _, _, _ = rights_restore_scope_fixture(tmp_path)
+    root, chapter = legacy_rights_toc_records(compiler)
+    sources, _, pages, _, _ = compiler._load_inputs()
+    toc_page_id = "books/example/appendix-a"
+    pages[toc_page_id] = {
+        "page_id": toc_page_id,
+        "output_path": f"{toc_page_id}.md",
+        "title": "부록 A",
+        "frontmatter": {"content_state": "toc-only"},
+        "source_ids": [],
+        "claim_ids": [],
+        "render": {"kind": "toc-only"},
+    }
+
+    compiler._validate_book_rights_restore_records(
+        (root, chapter),
+        sources,
+        pages,
+    )
+
+    pages[toc_page_id]["render"] = {
+        "kind": "source-body",
+        "source_id": "source://missing",
+    }
+    with pytest.raises(WoonError, match="page source_ids must be a non-empty string list"):
+        compiler._validate_book_rights_restore_records(
+            (root, chapter),
+            sources,
+            pages,
+        )
+
+
 def test_book_dry_run_uses_resolved_temporary_vault_and_removes_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
