@@ -431,6 +431,7 @@ def _audit_book_coverage(
             prefix,
             manifest,
             node_ids,
+            leaf_ids,
             node_order,
             pages,
             errors,
@@ -1078,6 +1079,7 @@ def _audit_source_structure_contract(
     prefix: str,
     manifest: dict[str, Any],
     node_ids: set[str],
+    leaf_ids: set[str],
     node_order: list[str],
     pages: dict[str, tuple[Path, dict[str, Any], str]],
     errors: list[str],
@@ -1152,7 +1154,9 @@ def _audit_source_structure_contract(
 
     assignment_counts: dict[str, int] = {}
     canonical_nodes: set[str] = set()
-    canonical_by_structure: dict[str, str] = {}
+    owned_nodes: set[str] = set()
+    owner_by_structure: dict[str, str] = {}
+    in_page_headings: dict[str, list[tuple[int, int, str]]] = {}
     for index, assignment in enumerate(raw_assignments):
         label = f"{prefix}: source_structure_assignments[{index}]"
         if not isinstance(assignment, dict):
@@ -1176,7 +1180,7 @@ def _audit_source_structure_contract(
                 errors,
             )
             canonical_id = _text(assignment.get("canonical_id"))
-            canonical_by_structure[structure_id] = canonical_id
+            owner_by_structure[structure_id] = canonical_id
             if canonical_id not in node_ids:
                 errors.append(
                     f"{label}: canonical source structure node is missing: {canonical_id}"
@@ -1184,11 +1188,65 @@ def _audit_source_structure_contract(
             if canonical_id in canonical_nodes:
                 errors.append(f"{label}: multiple structures reuse canonical node: {canonical_id}")
             canonical_nodes.add(canonical_id)
+            owned_nodes.add(canonical_id)
             page = pages.get(canonical_id)
             if page is not None and _text(page[1].get("title")) != _text(element.get("title")):
                 errors.append(
                     f"{label}: canonical node title does not match source structure title"
                 )
+        elif disposition == "in-page-h2":
+            _audit_exact_fields(
+                label,
+                assignment,
+                {"structure_id", "disposition", "owner_id", "heading", "source_order"},
+                errors,
+            )
+            owner_id = _text(assignment.get("owner_id"))
+            raw_heading = assignment.get("heading")
+            heading = raw_heading if isinstance(raw_heading, str) else ""
+            heading_source_order = assignment.get("source_order")
+            expected_heading = f"## {_text(element.get('title'))}"
+            owner_by_structure[structure_id] = owner_id
+            owned_nodes.add(owner_id)
+            if _text(element.get("kind")) != "section":
+                errors.append(f"{label}: in-page-h2 is allowed only for source sections")
+            if owner_id not in node_ids:
+                errors.append(f"{label}: in-page-h2 owner is not a manifest node: {owner_id}")
+            elif owner_id not in leaf_ids:
+                errors.append(f"{label}: in-page-h2 owner must be a source-body leaf: {owner_id}")
+            if heading != expected_heading:
+                errors.append(
+                    f"{label}.heading must exactly match the source title: {expected_heading}"
+                )
+            owner_headings = in_page_headings.setdefault(owner_id, [])
+            expected_source_order = len(owner_headings) + 1
+            if (
+                not isinstance(heading_source_order, int)
+                or isinstance(heading_source_order, bool)
+                or heading_source_order != expected_source_order
+            ):
+                errors.append(
+                    f"{label}.source_order must be the consecutive in-page source order; "
+                    f"expected={expected_source_order} actual={heading_source_order}"
+                )
+            page = pages.get(owner_id)
+            reader_body = _reader_body(page[2]) if page is not None else ""
+            occurrences = reader_body.splitlines().count(heading) if heading else 0
+            if occurrences != 1:
+                errors.append(
+                    f"{label}: in-page H2 must occur exactly once in the source-body page; "
+                    f"actual={occurrences}"
+                )
+            position = reader_body.find(f"{heading}\n") if heading else -1
+            if position < 0 and reader_body.endswith(heading):
+                position = len(reader_body) - len(heading)
+            owner_headings.append(
+                (
+                    heading_source_order if isinstance(heading_source_order, int) else -1,
+                    position,
+                    heading,
+                )
+            )
         elif disposition == "metadata-only":
             _audit_exact_fields(
                 label,
@@ -1204,26 +1262,53 @@ def _audit_source_structure_contract(
             if not _text(assignment.get("metadata_field")) or not _text(assignment.get("reason")):
                 errors.append(f"{label}: metadata_field and reason are required")
         else:
-            errors.append(f"{label}.disposition must be canonical-node or metadata-only")
+            errors.append(
+                f"{label}.disposition must be canonical-node, in-page-h2, or metadata-only"
+            )
 
     for structure_id in sorted(elements.keys() - assignment_counts.keys()):
         errors.append(f"{prefix}: source structure has no disposition: {structure_id}")
-    extra_nodes = node_ids - canonical_nodes
+    for owner_id, headings in in_page_headings.items():
+        if owner_id not in canonical_nodes:
+            errors.append(
+                f"{prefix}: in-page-h2 owner must also own one canonical source structure: "
+                f"{owner_id}"
+            )
+        positions = [position for _, position, _ in headings]
+        if any(position < 0 for position in positions) or positions != sorted(positions):
+            errors.append(
+                f"{prefix}: in-page H2 order differs from source structure order: {owner_id}"
+            )
+
+    extra_nodes = node_ids - owned_nodes
     if extra_nodes:
         errors.append(
             f"{prefix}: manifest nodes lack exact source structure ownership: "
             f"{sorted(extra_nodes)!r}"
         )
-    source_order = [
-        canonical_by_structure[structure_id]
+    source_owner_order = [
+        owner_by_structure[structure_id]
         for element in raw_elements
         if isinstance(element, dict)
-        and (structure_id := _text(element.get("structure_id"))) in canonical_by_structure
+        and (structure_id := _text(element.get("structure_id"))) in owner_by_structure
     ]
-    if source_order != node_order:
+    source_node_order: list[str] = []
+    seen_source_owners: set[str] = set()
+    for owner_id in source_owner_order:
+        if source_node_order and source_node_order[-1] == owner_id:
+            continue
+        if owner_id in seen_source_owners:
+            errors.append(
+                f"{prefix}: source structures for one canonical node must be contiguous: "
+                f"{owner_id}"
+            )
+            continue
+        seen_source_owners.add(owner_id)
+        source_node_order.append(owner_id)
+    if source_node_order != node_order:
         errors.append(
             f"{prefix}: manifest node order does not match source structure order: "
-            f"expected={source_order!r} actual={node_order!r}"
+            f"expected={source_node_order!r} actual={node_order!r}"
         )
 
 

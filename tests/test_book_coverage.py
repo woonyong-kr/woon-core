@@ -10,6 +10,7 @@ import pytest
 from woon_core.knowledge.book_contract import (
     BOOK_CONTRACT_SHA256,
     LEGACY_BOOK_CONTRACT_SHA256_V7,
+    PRE_IN_PAGE_H2_BOOK_CONTRACT_SHA256_V7,
     book_promotion_contract_fields,
     require_current_book_contract,
 )
@@ -31,6 +32,10 @@ def test_book_contract_v7_keeps_legacy_payload_read_compatibility() -> None:
     legacy = json.loads(json.dumps(current))
     legacy["book_contract"]["sha256"] = LEGACY_BOOK_CONTRACT_SHA256_V7
     require_current_book_contract(legacy, "book-promote")
+
+    pre_in_page_h2 = json.loads(json.dumps(current))
+    pre_in_page_h2["book_contract"]["sha256"] = PRE_IN_PAGE_H2_BOOK_CONTRACT_SHA256_V7
+    require_current_book_contract(pre_in_page_h2, "book-promote")
 
 
 def _source_element(
@@ -183,6 +188,28 @@ def _structure_contract(
         "source_structure_elements": elements,
         "source_structure_assignments": assignments,
         "retired_source_section_wrappers": [],
+    }
+
+
+def _source_structure(kind: str, title: str, locator: str) -> dict[str, object]:
+    source_sha256 = hashlib.sha256(locator.encode("utf-8")).hexdigest()
+    identity = json.dumps(
+        {
+            "kind": kind,
+            "source_locator": locator,
+            "source_sha256": source_sha256,
+            "title": title,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return {
+        "structure_id": f"structure:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}",
+        "kind": kind,
+        "title": title,
+        "source_locator": locator,
+        "source_sha256": source_sha256,
     }
 
 
@@ -1039,6 +1066,122 @@ def test_book_coverage_rejects_unassigned_front_or_back_matter(tmp_path: Path) -
 
     assert report.complete is False
     assert any("source structure has no disposition" in error for error in report.source.errors)
+
+
+def test_book_coverage_accepts_ordered_source_sections_as_in_page_h2(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    target, manifest = _verified_fixture(vault)
+    leaf_id = "books/kotlin/chapter-01"
+    leaf_path = vault / "wiki/books/kotlin/chapter-01.md"
+    leaf_path.write_text(
+        leaf_path.read_text(encoding="utf-8")
+        + "\n## 1.1 첫 번째 절\n\n첫 번째 절의 원문 본문이다.\n"
+        + "\n## 1.2 두 번째 절\n\n두 번째 절의 원문 본문이다.\n",
+        encoding="utf-8",
+    )
+    structures = manifest["source_structure_elements"]
+    assignments = manifest["source_structure_assignments"]
+    assert isinstance(structures, list) and isinstance(assignments, list)
+    for source_order, title in enumerate(("1.1 첫 번째 절", "1.2 두 번째 절"), start=1):
+        structure = _source_structure(
+            "section",
+            title,
+            f"pdf pages {source_order + 1}-{source_order + 2} section {source_order}",
+        )
+        structures.append(structure)
+        assignments.append(
+            {
+                "structure_id": structure["structure_id"],
+                "disposition": "in-page-h2",
+                "owner_id": leaf_id,
+                "heading": f"## {title}",
+                "source_order": source_order,
+            }
+        )
+    target.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = audit_book_coverage(vault)
+
+    assert report.complete
+
+
+@pytest.mark.parametrize(
+    ("headings", "expected_error"),
+    [
+        (
+            "\n## 1.1 첫 번째 절\n\n본문\n\n## 1.1 첫 번째 절\n\n중복\n",
+            "in-page H2 must occur exactly once",
+        ),
+        (
+            "\n## 1.2 두 번째 절\n\n본문\n\n## 1.1 첫 번째 절\n\n본문\n",
+            "in-page H2 order differs from source structure order",
+        ),
+    ],
+)
+def test_book_coverage_rejects_duplicate_or_reordered_in_page_h2(
+    tmp_path: Path,
+    headings: str,
+    expected_error: str,
+) -> None:
+    vault = tmp_path / "vault"
+    target, manifest = _verified_fixture(vault)
+    leaf_id = "books/kotlin/chapter-01"
+    leaf_path = vault / "wiki/books/kotlin/chapter-01.md"
+    leaf_path.write_text(leaf_path.read_text(encoding="utf-8") + headings, encoding="utf-8")
+    structures = manifest["source_structure_elements"]
+    assignments = manifest["source_structure_assignments"]
+    assert isinstance(structures, list) and isinstance(assignments, list)
+    for source_order, title in enumerate(("1.1 첫 번째 절", "1.2 두 번째 절"), start=1):
+        structure = _source_structure(
+            "section",
+            title,
+            f"pdf pages {source_order + 1}-{source_order + 2} section {source_order}",
+        )
+        structures.append(structure)
+        assignments.append(
+            {
+                "structure_id": structure["structure_id"],
+                "disposition": "in-page-h2",
+                "owner_id": leaf_id,
+                "heading": f"## {title}",
+                "source_order": source_order,
+            }
+        )
+    target.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = audit_book_coverage(vault)
+
+    assert report.complete is False
+    assert any(expected_error in error for error in report.source.errors)
+
+
+def test_book_coverage_keeps_canonical_node_reuse_forbidden(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    target, manifest = _verified_fixture(vault)
+    leaf_id = "books/kotlin/chapter-01"
+    structure = _source_structure("section", "1.1 첫 번째 절", "pdf pages 2-3 section 1")
+    structures = manifest["source_structure_elements"]
+    assignments = manifest["source_structure_assignments"]
+    assert isinstance(structures, list) and isinstance(assignments, list)
+    structures.append(structure)
+    assignments.append(
+        {
+            "structure_id": structure["structure_id"],
+            "disposition": "canonical-node",
+            "canonical_id": leaf_id,
+        }
+    )
+    target.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = audit_book_coverage(vault)
+
+    assert report.complete is False
+    assert any(
+        "multiple structures reuse canonical node" in error
+        for error in report.source.errors
+    )
 
 
 def test_book_coverage_rejects_node_order_that_differs_from_source_order(
