@@ -1840,6 +1840,51 @@ def test_scoped_book_preflight_is_read_only_and_preserves_full_manifest(
     assert index.generation() == generation_before
 
 
+def test_verified_book_preflight_runs_cloned_writer_and_cleans_temporary_vault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler, service, index, record, _, _ = atomic_book_service(tmp_path)
+    update, coverage_path, _ = atomic_book_coverage_update(tmp_path)
+    input_before = compiler.snapshot_inputs(extra_paths=(coverage_path,))
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+    dry_vaults: list[Path] = []
+
+    def fake_apply(
+        self: CompiledWiki,
+        pages: tuple[VerifiedBookPage, ...],
+        replacements: dict[str, str],
+        retirement_body_sha256: dict[str, str],
+        coverage_manifest: BookCoverageManifestUpdate,
+        *,
+        rights_restore_book_id: str | None = None,
+    ) -> VerifiedBookUpdateReport:
+        del pages, replacements, retirement_body_sha256, coverage_manifest
+        assert rights_restore_book_id is None
+        assert self.vault != compiler.vault
+        dry_vaults.append(self.vault)
+        (self.vault / "dry-run-writer-ran").write_text("yes", encoding="utf-8")
+        return VerifiedBookUpdateReport(0, 0, 0, 0, (), (), ())
+
+    monkeypatch.setattr(CompiledWiki, "apply_verified_book_update", fake_apply)
+
+    report = service.preflight_verified_book_update(
+        (record,),
+        {},
+        {},
+        {},
+        update,
+    )
+
+    assert report.ready is True
+    assert len(dry_vaults) == 1
+    assert not dry_vaults[0].exists()
+    assert compiler.snapshot_inputs(extra_paths=(coverage_path,)) == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert index.generation() == generation_before
+
+
 def test_scoped_book_preflight_rejects_unpreserved_wrapper_reader_body(
     tmp_path: Path,
 ) -> None:
@@ -1869,11 +1914,11 @@ def test_scoped_book_preflight_rejects_unpreserved_wrapper_reader_body(
     assert index.generation() == generation_before
 
 
-def test_scoped_book_preflight_accepts_exact_wrapper_reader_body_in_first_leaf(
+def test_scoped_book_preflight_rejects_candidate_the_writer_cannot_refresh(
     tmp_path: Path,
 ) -> None:
     reader_body = "1부가 이 책의 가상화 흐름을 소개한다.\n"
-    _, service, index, _, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+    compiler, service, index, _, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
         tmp_path,
         wrapper_body=reader_body,
     )
@@ -1884,17 +1929,21 @@ def test_scoped_book_preflight_accepts_exact_wrapper_reader_body_in_first_leaf(
         service,
         f"실제 장 내용이다.\n\n{reader_body}",
     )
+    input_before = compiler.snapshot_inputs(extra_paths=(target,))
+    output_before = compiler.snapshot_outputs()
     generation_before = index.generation()
 
-    report = service.preflight_verified_book_update(
-        (leaf_record,),
-        {"books/atomic-book/part-01": leaf_id},
-        {"books/atomic-book/part-01": wrapper_revision},
-        {"books/atomic-book/part-01": wrapper_body_sha256},
-        update,
-    )
+    with pytest.raises(WoonError, match="navigation_groups omit direct children"):
+        service.preflight_verified_book_update(
+            (leaf_record,),
+            {"books/atomic-book/part-01": leaf_id},
+            {"books/atomic-book/part-01": wrapper_revision},
+            {"books/atomic-book/part-01": wrapper_body_sha256},
+            update,
+        )
 
-    assert report.ready is True
+    assert compiler.snapshot_inputs(extra_paths=(target,)) == input_before
+    assert compiler.snapshot_outputs() == output_before
     assert not target.exists()
     assert base_path.read_bytes() == base_bytes
     assert index.generation() == generation_before

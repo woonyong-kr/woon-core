@@ -392,6 +392,13 @@ class KnowledgeService:
                 coverage_manifest,
             )
             asset_counts = compiler.validate_staged_book_assets(staged_assets, coverage_manifest)
+            compiler.dry_run_verified_book_update(
+                pages,
+                replacements,
+                retirement_body_sha256,
+                coverage_manifest,
+                staged_assets,
+            )
         if coverage_path is None:  # pragma: no cover - public preflight requires coverage
             raise WoonError("verified book preflight requires a coverage manifest")
         return VerifiedBookPreflightReport(
