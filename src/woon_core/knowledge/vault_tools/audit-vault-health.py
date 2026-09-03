@@ -90,7 +90,134 @@ TRANSIENT_FILE_SUFFIXES = ("~", ".tmp", ".bak")
 SOURCE_LIFECYCLES = {"captured", "compiled", "archived"}
 SOURCE_KINDS = {"web", "book", "lecture", "transcript", "clipping"}
 TEMPLATE_TYPES = {"Wiki", "키워드", "Source", "Creative", "Daily", "Operations"}
-OBSIDIAN_GRAPH_FILTER = "path:wiki tag:#graph/overview -path:wiki/private/_sources"
+OBSIDIAN_GRAPH_FILTER = "path:wiki tag:#graph/overview -path:wiki/private"
+OBSIDIAN_GRAPH_OVERVIEW_SCALE = 0.4
+OBSIDIAN_GRAPH_COLOR_GROUPS = (
+    (
+        "schedule",
+        "path:wiki tag:#graph/overview -path:wiki/private [type:calendar-event]",
+        12215116,
+    ),
+    (
+        "schedule",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "[entity_kind:/^(event|schedule)$/]",
+        12215116,
+    ),
+    (
+        "schedule",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] [facets:/^(일정|캘린더)$/]",
+        12215116,
+    ),
+    (
+        "person",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "[entity_kind:person]",
+        11624045,
+    ),
+    (
+        "person",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] [facets:인물]",
+        11624045,
+    ),
+    (
+        "project",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] [entity_kind:project]",
+        5071478,
+    ),
+    (
+        "project",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
+        "[facets:프로젝트]",
+        5071478,
+    ),
+    (
+        "book",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
+        "-[facets:프로젝트] [entity_kind:book]",
+        9138114,
+    ),
+    (
+        "book",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
+        "-[facets:프로젝트] -[entity_kind:book] [facets:책]",
+        9138114,
+    ),
+    (
+        "resource",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
+        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
+        "[entity_kind:resource]",
+        5214109,
+    ),
+    (
+        "resource",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
+        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
+        "-[entity_kind:resource] [facets:리소스]",
+        5214109,
+    ),
+    (
+        "interview",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
+        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
+        "-[entity_kind:resource] -[facets:리소스] "
+        "[entity_kind:/^interview-topic(?:-index)?$/]",
+        12558176,
+    ),
+    (
+        "concept",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
+        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
+        "-[entity_kind:resource] -[facets:리소스] "
+        "-[entity_kind:/^interview-topic(?:-index)?$/] "
+        "[node_kind:/^(topic|detail)$/]",
+        4676924,
+    ),
+    (
+        "hub",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
+        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
+        "-[entity_kind:resource] -[facets:리소스] "
+        "-[entity_kind:/^interview-topic(?:-index)?$/] "
+        "-[node_kind:/^(topic|detail)$/] [node_kind:/^(root|hub)$/]",
+        5471101,
+    ),
+    (
+        "entity",
+        "path:wiki tag:#graph/overview -path:wiki/private -[type:calendar-event] "
+        "-[entity_kind:/^(event|schedule)$/] -[facets:/^(일정|캘린더)$/] "
+        "-[entity_kind:person] -[facets:인물] -[entity_kind:project] "
+        "-[facets:프로젝트] -[entity_kind:book] -[facets:책] "
+        "-[entity_kind:resource] -[facets:리소스] "
+        "-[entity_kind:/^interview-topic(?:-index)?$/] "
+        "-[node_kind:/^(topic|detail)$/] -[node_kind:/^(root|hub)$/] "
+        "[node_kind:entity]",
+        8095636,
+    ),
+)
 GLOBAL_GRAPH_ROOT = "wiki/README.md"
 OBSIDIAN_FRONT_MATTER_TITLE_PLUGIN = "obsidian-front-matter-title-plugin"
 OBSIDIAN_EXPLORER_SNIPPET = "focus-workspace"
@@ -1665,6 +1792,48 @@ def source_catalog_boundary_issues(vault: Path) -> list[str]:
     return issues
 
 
+def obsidian_graph_config_issues(graph_config: object) -> list[str]:
+    issues: list[str] = []
+    if not isinstance(graph_config, dict):
+        return ["graph.json must contain an object"]
+    if graph_config.get("search") != OBSIDIAN_GRAPH_FILTER:
+        issues.append(f"search must be {OBSIDIAN_GRAPH_FILTER!r}")
+    if graph_config.get("showAttachments") is not False:
+        issues.append("attachments must be hidden")
+    if graph_config.get("hideUnresolved") is not True:
+        issues.append("unresolved nodes must be hidden")
+    if graph_config.get("showTags") is not False:
+        issues.append("tags must be hidden")
+    if graph_config.get("showOrphans") is not False:
+        issues.append("orphan nodes must be hidden")
+    if graph_config.get("scale") != OBSIDIAN_GRAPH_OVERVIEW_SCALE:
+        issues.append(f"overview scale must be {OBSIDIAN_GRAPH_OVERVIEW_SCALE}")
+
+    expected_groups = [
+        {"query": query, "color": {"a": 1, "rgb": rgb}}
+        for _kind, query, rgb in OBSIDIAN_GRAPH_COLOR_GROUPS
+    ]
+    color_groups = graph_config.get("colorGroups")
+    if color_groups != expected_groups:
+        issues.append("colorGroups must match the exclusive semantic priority policy")
+    if isinstance(color_groups, list):
+        for group in color_groups:
+            query = group.get("query", "") if isinstance(group, dict) else ""
+            if " OR " in query:
+                issues.append(f"color group must not use boolean OR: {query}")
+            if "path:wiki" not in query or "tag:#graph/overview" not in query:
+                issues.append(f"color group is outside graph overview scope: {query}")
+            if "-path:wiki/private" not in query:
+                issues.append(f"color group must exclude private notes: {query}")
+
+    semantic_colors: dict[int, str] = {}
+    for kind, _query, rgb in OBSIDIAN_GRAPH_COLOR_GROUPS:
+        previous = semantic_colors.setdefault(rgb, kind)
+        if previous != kind:
+            issues.append(f"semantic color is reused by {previous!r} and {kind!r}")
+    return issues
+
+
 def main() -> int:
     files = [path for path in iter_markdown() if not is_calendar_projection_markdown(path)]
     index = target_index(files)
@@ -1844,53 +2013,9 @@ def main() -> int:
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         issues["obsidian_graph_policy_violations"].append(str(exc))
     else:
-        if graph_config.get("search") != OBSIDIAN_GRAPH_FILTER:
-            issues["obsidian_graph_policy_violations"].append(
-                f"search must be {OBSIDIAN_GRAPH_FILTER!r}"
-            )
-        if graph_config.get("showAttachments") is not False:
-            issues["obsidian_graph_policy_violations"].append("attachments must be hidden")
-        if graph_config.get("hideUnresolved") is not True:
-            issues["obsidian_graph_policy_violations"].append("unresolved nodes must be hidden")
-        if graph_config.get("showTags") is not False:
-            issues["obsidian_graph_policy_violations"].append("tags must be hidden")
-        if graph_config.get("showOrphans") is not False:
-            issues["obsidian_graph_policy_violations"].append("orphan nodes must be hidden")
-
-        excluded_group_roots = (
-            "path:inbox",
-            "path:sources",
-            "path:projects/writing",
-            "path:brain/wiki",
-            "path:projects",
-            "path:content",
-            "path:users",
-            "path:assets",
+        issues["obsidian_graph_policy_violations"].extend(
+            obsidian_graph_config_issues(graph_config)
         )
-        allowed_group_roots = ("path:wiki",)
-        colors: dict[int, str] = {}
-        for group in graph_config.get("colorGroups", []):
-            query = group.get("query", "") if isinstance(group, dict) else ""
-            if any(root in query for root in excluded_group_roots):
-                issues["obsidian_graph_policy_violations"].append(
-                    f"excluded color group remains: {query}"
-                )
-            if not any(root in query for root in allowed_group_roots):
-                issues["obsidian_graph_policy_violations"].append(
-                    f"color group is outside graph scope: {query}"
-                )
-            color = group.get("color") if isinstance(group, dict) else None
-            rgb = color.get("rgb") if isinstance(color, dict) else None
-            if not isinstance(rgb, int):
-                issues["obsidian_graph_policy_violations"].append(
-                    f"color group has no RGB color: {query}"
-                )
-            elif rgb in colors:
-                issues["obsidian_graph_policy_violations"].append(
-                    f"color is reused by {colors[rgb]!r} and {query!r}"
-                )
-            else:
-                colors[rgb] = query
 
     explorer_css_path = VAULT / ".obsidian" / "snippets" / f"{OBSIDIAN_EXPLORER_SNIPPET}.css"
     try:
@@ -2425,9 +2550,9 @@ def main() -> int:
             continue
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
         content_hashes.setdefault(digest, []).append(r)
-    for paths in content_hashes.values():
-        if len(paths) > 1:
-            issues["duplicate_content"].append(str(sorted(paths)))
+    for duplicate_paths in content_hashes.values():
+        if len(duplicate_paths) > 1:
+            issues["duplicate_content"].append(str(sorted(duplicate_paths)))
 
     issues["global_graph_root_violations"].extend(
         global_graph_root_issues(files, texts, metadata, index)

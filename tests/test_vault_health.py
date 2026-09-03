@@ -516,6 +516,51 @@ class RetiredExternalVideoBoundaryTests(unittest.TestCase):
             self.assertIn("retired", issues[0])
 
 
+class ObsidianGraphColorPolicyTests(unittest.TestCase):
+    def _valid_config(self) -> dict[str, object]:
+        return {
+            "search": AUDIT.OBSIDIAN_GRAPH_FILTER,
+            "showAttachments": False,
+            "hideUnresolved": True,
+            "showTags": False,
+            "showOrphans": False,
+            "scale": AUDIT.OBSIDIAN_GRAPH_OVERVIEW_SCALE,
+            "colorGroups": [
+                {"query": query, "color": {"a": 1, "rgb": rgb}}
+                for _kind, query, rgb in AUDIT.OBSIDIAN_GRAPH_COLOR_GROUPS
+            ],
+        }
+
+    def test_accepts_exclusive_semantic_color_priority(self) -> None:
+        config = self._valid_config()
+
+        self.assertEqual(AUDIT.obsidian_graph_config_issues(config), [])
+        color_groups = config["colorGroups"]
+        self.assertIsInstance(color_groups, list)
+        self.assertFalse(
+            any(
+                " OR " in str(group["query"])
+                for group in color_groups
+                if isinstance(group, dict)
+            )
+        )
+
+    def test_rejects_empty_filter_and_boolean_or_group(self) -> None:
+        config = self._valid_config()
+        config["search"] = ""
+        config["colorGroups"] = [
+            {
+                "query": "path:wiki ([node_kind:topic] OR [node_kind:detail])",
+                "color": {"a": 1, "rgb": 4676924},
+            }
+        ]
+
+        issues = AUDIT.obsidian_graph_config_issues(config)
+
+        self.assertTrue(any("search must be" in issue for issue in issues))
+        self.assertTrue(any("must not use boolean OR" in issue for issue in issues))
+
+
 class GlobalGraphRootTests(unittest.TestCase):
     def test_requires_project_cards_to_connect_through_the_single_wiki_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
