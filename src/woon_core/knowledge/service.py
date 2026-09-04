@@ -906,6 +906,7 @@ class KnowledgeService:
                 and (not allow_blocked_restore or workflow_phase == "toc-indexed")
             ),
             replacement_survivor_ids=set(replacements.values()),
+            retired_page_ids=set(replacements),
         )
         if coverage_manifest is not None:
             book_id = coverage_manifest.replacement.get("book_id")

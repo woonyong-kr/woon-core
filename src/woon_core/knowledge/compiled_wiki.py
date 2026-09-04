@@ -76,6 +76,9 @@ MERMAID_THEME_COLOR_RE = re.compile(
 )
 MARKDOWN_ASSET_RE = re.compile(r"!\[[^\]]*\]\((?P<path>[^)]+)\)")
 OBSIDIAN_ASSET_RE = re.compile(r"!\[\[(?P<path>[^\]|#]+)")
+MARKDOWN_FENCE_BLOCK_RE = re.compile(
+    r"(?ms)^```(?P<language>[A-Za-z0-9_+-]+)[ \t]*\n(?P<body>.*?)^```[ \t]*$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1030,6 +1033,7 @@ class CompiledWiki:
                     claims,
                     pages,
                     restored_page_ids={record.page_id for record in active_records},
+                    retired_page_ids=retiring,
                     allow_source_free_toc_only=allow_rights_toc_normalization,
                 )
             unknown = retiring.difference(pages)
@@ -1283,6 +1287,7 @@ class CompiledWiki:
         pages: dict[str, dict[str, Any]],
         *,
         restored_page_ids: set[str] | None = None,
+        retired_page_ids: set[str] | None = None,
         allow_source_free_toc_only: bool = False,
     ) -> None:
         """Remove obsolete blocked-rights decisions from restored current pages."""
@@ -1299,7 +1304,19 @@ class CompiledWiki:
                 for source_id in _book_rights_scan_source_ids(page)
             )
         }
-        omitted = live_rights_pages.difference(promoted_ids)
+        retired_ids = retired_page_ids or set()
+        unknown_retired = retired_ids.difference(pages)
+        if unknown_retired:
+            raise WoonError(
+                f"book rights restore retired page is not current: {sorted(unknown_retired)[0]}"
+            )
+        promoted_retired = retired_ids.intersection(promoted_ids)
+        if promoted_retired:
+            raise WoonError(
+                "book rights restore cannot both promote and retire a page: "
+                f"{sorted(promoted_retired)[0]}"
+            )
+        omitted = live_rights_pages.difference(promoted_ids).difference(retired_ids)
         if omitted:
             raise WoonError(
                 "book rights restore must replace every surviving rights page: "
@@ -2007,11 +2024,26 @@ class CompiledWiki:
             )
         if image_replacements and validate_image_assets:
             self._validate_retirement_image_assets(image_replacements, coverage_manifest)
+        current_relocation_bodies: dict[str, str] = {}
+        for page_id in retirement_content_relocations or {}:
+            page = pages.get(page_id)
+            if page is None:
+                raise WoonError(f"compiled Wiki page spec not found: {page_id}")
+            if _is_explicit_source_free_toc_page(page):
+                current_relocation_bodies[page_id] = self._source_free_toc_leaf_retirement_body(
+                    page_id,
+                    page,
+                    pages,
+                )
+            else:
+                source_id = _current_source_id(page, self._page_sources(page, sources))
+                current_relocation_bodies[page_id] = str(sources[source_id].get("body", ""))
         relocated_pages = self._validate_retirement_content_relocations(
             records,
             replacements,
             coverage_manifest,
             retirement_content_relocations or {},
+            current_reader_bodies=current_relocation_bodies,
         )
         for page_id in sorted(replacements):
             page = pages.get(page_id)
@@ -2058,6 +2090,8 @@ class CompiledWiki:
         replacements: dict[str, str],
         coverage_manifest: BookCoverageManifestUpdate | None,
         relocations: dict[str, tuple[str, ...]],
+        *,
+        current_reader_bodies: dict[str, str],
     ) -> set[str]:
         """Verify one-to-many chapter splits through immutable source assignments."""
 
@@ -2105,6 +2139,7 @@ class CompiledWiki:
 
         current_assignments = _assignment_map(current.get("source_element_assignments"))
         replacement_assignments = _assignment_map(replacement.get("source_element_assignments"))
+        promoted_bodies = {record.page_id: record.body for record in records}
         if set(current_assignments) != set(replacement_assignments):
             raise WoonError(
                 "retirement content relocation must preserve every source element assignment"
@@ -2123,11 +2158,30 @@ class CompiledWiki:
             updated_without_owner = dict(updated_assignment)
             current_without_owner.pop("owner_id", None)
             updated_without_owner.pop("owner_id", None)
-            if current_without_owner != updated_without_owner:
+            updated_owner = str(updated_assignment.get("owner_id", "")).strip()
+            if (
+                current_without_owner != updated_without_owner
+                and not _relocated_code_delivery_matches(
+                    current_without_owner,
+                    updated_without_owner,
+                    current_reader_bodies.get(retired_id, ""),
+                    promoted_bodies.get(updated_owner, ""),
+                )
+            ):
                 raise WoonError(
                     f"retirement content relocation changed source delivery evidence: {element_id}"
                 )
-            updated_owner = str(updated_assignment.get("owner_id", "")).strip()
+            if (
+                current_without_owner == updated_without_owner
+                and not _relocated_code_fingerprint_matches(
+                    updated_without_owner,
+                    current_reader_bodies.get(retired_id, ""),
+                    promoted_bodies.get(updated_owner, ""),
+                )
+            ):
+                raise WoonError(
+                    f"retirement content relocation changed source code delivery: {element_id}"
+                )
             if updated_owner not in relocations[retired_id]:
                 raise WoonError(
                     "retirement content relocation assigned a source element outside its "
@@ -2616,6 +2670,7 @@ class CompiledWiki:
         *,
         allow_legacy_toc_normalization: bool = False,
         replacement_survivor_ids: set[str] | None = None,
+        retired_page_ids: set[str] | None = None,
     ) -> None:
         """Prevent concept-linking from silently regenerating reader prose."""
 
@@ -2643,6 +2698,7 @@ class CompiledWiki:
             pages,
             allow_legacy_toc_normalization=allow_legacy_toc_normalization,
             replacement_survivor_ids=replacement_survivor_ids,
+            retired_page_ids=retired_page_ids,
         )
         if workflow_phase != "concept-linked":
             return
@@ -2690,6 +2746,7 @@ class CompiledWiki:
         expected_book_id: str | None = None,
         allow_legacy_toc_normalization: bool = False,
         replacement_survivor_ids: set[str] | None = None,
+        retired_page_ids: set[str] | None = None,
     ) -> set[str]:
         """Validate a one-scope rights restore and return exact carry-forward pages.
 
@@ -2703,6 +2760,18 @@ class CompiledWiki:
         records_by_id = {record.page_id: record for record in records}
         if len(records_by_id) != len(records):
             raise WoonError("verified book promotion contains a duplicate page_id")
+        retired_ids = retired_page_ids or set()
+        unknown_retired = retired_ids.difference(pages)
+        if unknown_retired:
+            raise WoonError(
+                f"book rights restore retired page is not current: {sorted(unknown_retired)[0]}"
+            )
+        promoted_retired = retired_ids.intersection(records_by_id)
+        if promoted_retired:
+            raise WoonError(
+                "book rights restore cannot both promote and retire a page: "
+                f"{sorted(promoted_retired)[0]}"
+            )
 
         rights_pages_by_book: dict[str, set[str]] = {}
         for page_id, page in pages.items():
@@ -2734,7 +2803,7 @@ class CompiledWiki:
         explicit_survivors = replacement_survivor_ids or set()
         for book_id in sorted(touched_books):
             live_ids = rights_pages_by_book[book_id]
-            omitted = live_ids.difference(records_by_id)
+            omitted = live_ids.difference(records_by_id).difference(retired_ids)
             if omitted:
                 raise WoonError(
                     "book rights restore must replace every surviving rights page: "
@@ -2753,7 +2822,7 @@ class CompiledWiki:
                     changed_scope_ids.add(max(ancestors, key=len))
             changed_scope_ids.update(explicit_survivors.intersection(live_ids))
 
-            book_carry_forward = live_ids.difference(changed_scope_ids)
+            book_carry_forward = live_ids.difference(changed_scope_ids).difference(retired_ids)
             normalized_toc_ids: set[str] = set()
             for page_id in sorted(book_carry_forward):
                 record = records_by_id[page_id]
@@ -5659,6 +5728,86 @@ def _write_yaml(path: Path, value: dict[str, Any]) -> None:
 
 def _sha256_text(value: str) -> str:
     return _sha256_bytes(value.encode("utf-8"))
+
+
+def _relocated_code_delivery_matches(
+    current: dict[str, Any],
+    updated: dict[str, Any],
+    current_reader_body: str,
+    updated_reader_body: str,
+) -> bool:
+    """Allow only a page-local code index change with an exact block fingerprint."""
+
+    delivery = str(current.get("delivery", "")).strip()
+    if delivery != str(updated.get("delivery", "")).strip():
+        return False
+    if delivery == "run-block":
+        index_field = "run_block_index"
+    elif delivery == "static-exception":
+        index_field = "static_block_index"
+    else:
+        return False
+    current_without_index = dict(current)
+    updated_without_index = dict(updated)
+    current_without_index.pop(index_field, None)
+    updated_without_index.pop(index_field, None)
+    if current_without_index != updated_without_index:
+        return False
+    return _relocated_code_fingerprint_matches(
+        updated,
+        current_reader_body,
+        updated_reader_body,
+        current_index=current.get(index_field),
+    )
+
+
+def _relocated_code_fingerprint_matches(
+    assignment: dict[str, Any],
+    current_reader_body: str,
+    updated_reader_body: str,
+    *,
+    current_index: object | None = None,
+) -> bool:
+    """Pin relocated executable/static code to the exact pre-split fence body."""
+
+    delivery = str(assignment.get("delivery", "")).strip()
+    if delivery == "run-block":
+        language_field = "run_language"
+        index_field = "run_block_index"
+    elif delivery == "static-exception":
+        language_field = "static_language"
+        index_field = "static_block_index"
+    else:
+        return True
+    language = str(assignment.get(language_field, "")).strip()
+    old_index = assignment.get(index_field) if current_index is None else current_index
+    new_index = assignment.get(index_field)
+    if (
+        not language
+        or not isinstance(old_index, int)
+        or isinstance(old_index, bool)
+        or old_index < 1
+        or not isinstance(new_index, int)
+        or isinstance(new_index, bool)
+        or new_index < 1
+    ):
+        return False
+    old_fence = _markdown_fence_body(current_reader_body, language, old_index)
+    new_fence = _markdown_fence_body(updated_reader_body, language, new_index)
+    return (
+        old_fence is not None
+        and new_fence is not None
+        and _sha256_text(old_fence) == _sha256_text(new_fence)
+    )
+
+
+def _markdown_fence_body(body: str, language: str, block_index: int) -> str | None:
+    matches = [
+        match.group("body")
+        for match in MARKDOWN_FENCE_BLOCK_RE.finditer(body)
+        if match.group("language") == language
+    ]
+    return matches[block_index - 1] if len(matches) >= block_index else None
 
 
 def _sha256_bytes(value: bytes) -> str:

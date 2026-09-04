@@ -869,6 +869,35 @@ def test_book_rights_workflow_allows_only_explicit_retirement_survivor_change(
     )
 
 
+def test_book_rights_workflow_excludes_only_declared_retired_page_from_survivors(
+    tmp_path: Path,
+) -> None:
+    compiler, root, chapter, leaf = rights_restore_scope_fixture(tmp_path)
+
+    compiler.validate_book_workflow_pages(
+        (root, leaf),
+        "source-landed",
+        retired_page_ids={chapter.page_id},
+    )
+
+    with pytest.raises(WoonError, match="must replace every surviving rights page"):
+        compiler.validate_book_workflow_pages(
+            (root, leaf),
+            "source-landed",
+        )
+
+
+def test_book_rights_workflow_rejects_promoted_page_declared_as_retired(tmp_path: Path) -> None:
+    compiler, root, chapter, leaf = rights_restore_scope_fixture(tmp_path)
+
+    with pytest.raises(WoonError, match="cannot both promote and retire"):
+        compiler.validate_book_workflow_pages(
+            (root, chapter, leaf),
+            "source-landed",
+            retired_page_ids={chapter.page_id},
+        )
+
+
 def legacy_rights_toc_records(
     compiler: CompiledWiki,
 ) -> tuple[VerifiedBookPage, VerifiedBookPage]:
@@ -930,9 +959,7 @@ def test_normal_full_replacement_allows_only_legacy_rights_toc_normalization(
                 {"kind": "toc-heading", "label": "A.1 첫째 절"},
                 {"kind": "navigation-group", "label": "A.2 둘째 절"},
             ],
-            "navigation_groups": [
-                {"label": "A.2 둘째 절", "children": [chapter.page_id]}
-            ],
+            "navigation_groups": [{"label": "A.2 둘째 절", "children": [chapter.page_id]}],
         },
     )
 
@@ -982,9 +1009,7 @@ def test_toc_indexed_rights_restore_allows_only_legacy_appendix_toc_normalizatio
             **copy.deepcopy(root.frontmatter),
             "book_toc_only": True,
             "content_state": "toc-only",
-            "ordered_reader_sections": [
-                {"kind": "toc-heading", "label": "A.1 첫째 절"}
-            ],
+            "ordered_reader_sections": [{"kind": "toc-heading", "label": "A.1 첫째 절"}],
         },
     )
     appendix_pages = {appendix_id: current_page}
@@ -2765,8 +2790,8 @@ def test_atomic_verified_book_update_restores_inputs_outputs_and_index_on_failur
 def test_atomic_materialized_scope_update_restores_consumed_scope_on_index_failure(
     tmp_path: Path,
 ) -> None:
-    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = (
-        atomic_book_service(tmp_path)
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
     )
     update, base_path, scope_path, base_bytes, scope_bytes = (
         atomic_book_materialized_coverage_update(tmp_path)
@@ -2891,9 +2916,7 @@ def test_source_landed_progression_allows_declared_retirement_relocation() -> No
             }
         ],
         "source_elements": [{"element_id": "claim:1"}],
-        "source_element_assignments": [
-            {"element_id": "claim:1", "owner_id": retired_id}
-        ],
+        "source_element_assignments": [{"element_id": "claim:1", "owner_id": retired_id}],
         "source_asset_inventory": [],
         "source_structure_inventory_evidence": {"sha256": "c" * 64},
         "source_element_inventory_evidence": {"sha256": "d" * 64},
@@ -3214,6 +3237,7 @@ def test_retirement_content_relocation_accepts_exact_one_to_many_source_split(
         {"books/atomic-book/chapter-01": first_id},
         split_update,
         {"books/atomic-book/chapter-01": (first_id, second_id)},
+        current_reader_bodies={"books/atomic-book/chapter-01": "실제 장 내용이다.\n"},
     )
 
     assert relocated == {"books/atomic-book/chapter-01"}
@@ -3225,6 +3249,79 @@ def test_retirement_content_relocation_accepts_exact_one_to_many_source_split(
             {"books/atomic-book/chapter-01": first_id},
             split_update,
             {"books/atomic-book/chapter-01": (first_id, second_id)},
+            current_reader_bodies={"books/atomic-book/chapter-01": "실제 장 내용이다.\n"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("delivery", "language_field", "index_field", "language"),
+    (
+        ("run-block", "run_language", "run_block_index", "run-python"),
+        ("static-exception", "static_language", "static_block_index", "python"),
+    ),
+)
+def test_retirement_content_relocation_reindexes_exact_code_fence_only(
+    tmp_path: Path,
+    delivery: str,
+    language_field: str,
+    index_field: str,
+    language: str,
+) -> None:
+    compiler, _, _, root_record, _, _ = atomic_book_service(tmp_path)
+    update, path, _ = atomic_book_coverage_update(tmp_path)
+    current = json.loads(path.read_text(encoding="utf-8"))
+    element_id = "code:" + "b" * 64
+    current["source_elements"][0]["element_id"] = element_id
+    current["source_elements"][0]["kind"] = "code"
+    current["source_elements"][0]["semantic_unit"] = "code-block"
+    current["source_element_assignments"][0] = {
+        "element_id": element_id,
+        "owner_id": "books/atomic-book/chapter-01",
+        "delivery": delivery,
+        language_field: language,
+        index_field: 2,
+        "verification_evidence": "evidence/code-run.json",
+        "verification_sha256": "c" * 64,
+    }
+    current_bytes = (json.dumps(current, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    path.write_bytes(current_bytes)
+
+    successor_id = "books/atomic-book/chapter-01/1-1"
+    replacement = copy.deepcopy(current)
+    replacement["source_element_assignments"][0]["owner_id"] = successor_id
+    replacement["source_element_assignments"][0][index_field] = 1
+    split_update = replace(
+        update,
+        expected_sha256=hashlib.sha256(current_bytes).hexdigest(),
+        replacement=replacement,
+    )
+    moved_fence = f"```{language}\nprint('moved')\n```\n"
+    old_body = f"```{language}\nprint('first')\n```\n\n{moved_fence}"
+    records = (
+        replace(
+            root_record,
+            page_id=successor_id,
+            body=moved_fence,
+            expected_revision=None,
+        ),
+    )
+
+    assert compiler._validate_retirement_content_relocations(
+        records,
+        {"books/atomic-book/chapter-01": successor_id},
+        split_update,
+        {"books/atomic-book/chapter-01": (successor_id,)},
+        current_reader_bodies={"books/atomic-book/chapter-01": old_body},
+    ) == {"books/atomic-book/chapter-01"}
+
+    replacement["source_element_assignments"][0][index_field] = 2
+    with pytest.raises(WoonError, match="changed source code delivery"):
+        compiler._validate_retirement_content_relocations(
+            records,
+            {"books/atomic-book/chapter-01": successor_id},
+            split_update,
+            {"books/atomic-book/chapter-01": (successor_id,)},
+            current_reader_bodies={"books/atomic-book/chapter-01": old_body},
         )
 
 
