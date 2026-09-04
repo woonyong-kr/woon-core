@@ -56,6 +56,7 @@ from woon_core.knowledge.woon_wiki import (
     compiled_wiki_contract,
     preserve_managed_context,
 )
+from woon_core.knowledge.yaml_cache import load_yaml_file, load_yaml_text
 
 FRONTMATTER = re.compile(r"\A---\n(?P<yaml>[\s\S]*?)\n---\n?(?P<body>[\s\S]*)\Z")
 H1 = re.compile(r"\A(?:\n)*#\s+(?P<title>.+?)\s*\n(?:\n)?")
@@ -5557,7 +5558,7 @@ def _parse_markdown(text: str, relative: Path) -> tuple[dict[str, Any], str, str
     if match is None:
         raise WoonError(f"{relative.as_posix()}: Wiki source is missing YAML frontmatter")
     try:
-        frontmatter = yaml.safe_load(match.group("yaml")) or {}
+        frontmatter = load_yaml_text(match.group("yaml")) or {}
     except yaml.YAMLError as error:
         raise WoonError(f"{relative.as_posix()}: invalid YAML frontmatter") from error
     if not isinstance(frontmatter, dict):
@@ -5575,7 +5576,7 @@ def _load_yaml_list(path: Path, key: str) -> list[dict[str, Any]]:
     if not path.is_file():
         raise WoonError(f"compiled Wiki {key} catalog is missing: {path}")
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raw = load_yaml_file(path) or {}
     except (OSError, yaml.YAMLError) as error:
         raise WoonError(f"load compiled Wiki {key}: {error}") from error
     if not isinstance(raw, dict) or raw.get("version") != SCHEMA_VERSION:

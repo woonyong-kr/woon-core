@@ -24,6 +24,7 @@ from woon_core.knowledge.woon_wiki import (
     resolve_wiki_path,
     transition_knowledge_state,
 )
+from woon_core.knowledge.yaml_cache import _parse_yaml_text
 
 
 def _metadata(text: str) -> dict[str, object]:
@@ -902,19 +903,20 @@ summary: 먼저 들어온 항목을 먼저 처리한다.
 
 근거로 다시 만든 설명
 '''
-    original_safe_load = yaml.safe_load
-    safe_load_calls = 0
+    _parse_yaml_text.cache_clear()
+    original_load = yaml.load
+    load_calls = 0
 
-    def counted_safe_load(stream: object) -> object:
-        nonlocal safe_load_calls
-        safe_load_calls += 1
-        return original_safe_load(stream)
+    def counted_load(stream: object, *args: object, **kwargs: object) -> object:
+        nonlocal load_calls
+        load_calls += 1
+        return original_load(stream, *args, **kwargs)
 
-    monkeypatch.setattr(yaml, "safe_load", counted_safe_load)
+    monkeypatch.setattr(yaml, "load", counted_load)
 
     preserve_managed_context(existing, rendered)
 
-    assert safe_load_calls == 2
+    assert load_calls == 2
 
 
 def test_compiler_context_keeps_existing_fail_closed_errors() -> None:

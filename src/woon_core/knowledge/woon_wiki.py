@@ -29,6 +29,7 @@ from woon_core.knowledge.wiki_tree import (
     split_markdown,
     strip_generated_wiki_views,
 )
+from woon_core.knowledge.yaml_cache import load_yaml_text
 
 WIKI_ROOT = "wiki"
 WIKI_PERSONAL_ROOT = "wiki/personal"
@@ -557,7 +558,7 @@ def _normalize_existing_wiki(
     match = re.match(r"\A---\s*\n(?P<yaml>.*?)\n---\s*\n?", text, flags=re.DOTALL)
     if match is None:
         raise WoonError("Wiki migration requires YAML frontmatter")
-    metadata = yaml.safe_load(match.group("yaml")) or {}
+    metadata = load_yaml_text(match.group("yaml")) or {}
     if not isinstance(metadata, dict):
         raise WoonError("Wiki migration frontmatter must be a mapping")
     existing_parent = metadata.get("parent")
@@ -1524,7 +1525,7 @@ def _frontmatter_mapping(text: str) -> dict[str, object] | None:
     match = re.match(r"\A---\n(?P<yaml>[\s\S]*?)\n---", text)
     if match is None:
         return None
-    data = yaml.safe_load(match.group("yaml")) or {}
+    data = load_yaml_text(match.group("yaml")) or {}
     if not isinstance(data, dict):
         return None
     return data
@@ -1543,7 +1544,7 @@ def _set_frontmatter_object(
     if match is None:
         raise WoonError("Wiki document requires YAML frontmatter")
     if frontmatter is None:
-        data = yaml.safe_load(match.group("yaml")) or {}
+        data = load_yaml_text(match.group("yaml")) or {}
         if not isinstance(data, dict):
             raise WoonError("Wiki frontmatter is malformed")
     else:
@@ -1565,7 +1566,7 @@ def _remove_frontmatter_keys(
     if match is None:
         raise WoonError("Wiki document requires YAML frontmatter")
     if frontmatter is None:
-        data = yaml.safe_load(match.group("yaml")) or {}
+        data = load_yaml_text(match.group("yaml")) or {}
         if not isinstance(data, dict):
             raise WoonError("Wiki frontmatter is malformed")
     else:

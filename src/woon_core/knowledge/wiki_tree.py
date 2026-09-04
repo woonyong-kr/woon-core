@@ -22,6 +22,7 @@ from woon_core.errors import WoonError
 from woon_core.io import atomic_write
 from woon_core.knowledge.identity import is_book_scoped_canonical_id, validate_canonical_id
 from woon_core.knowledge.learning_checkpoint import strip_learning_checkpoint
+from woon_core.knowledge.yaml_cache import load_yaml_text
 
 OVERVIEW_START = "<!-- woon-wiki-overview:start -->"
 OVERVIEW_END = "<!-- woon-wiki-overview:end -->"
@@ -625,7 +626,7 @@ def split_markdown(text: str) -> tuple[dict[str, Any], str]:
     if match is None:
         raise WoonError("Wiki document requires YAML frontmatter")
     try:
-        metadata = yaml.safe_load(match.group("yaml")) or {}
+        metadata = load_yaml_text(match.group("yaml")) or {}
     except yaml.YAMLError as error:
         raise WoonError(f"invalid Wiki frontmatter: {error}") from error
     if not isinstance(metadata, dict):
