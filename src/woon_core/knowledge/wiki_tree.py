@@ -48,6 +48,154 @@ UNGROUPED_NAVIGATION_EXCEPTIONS = {
     "wiki/books/programming-languages.md",
     "wiki/concepts/README.md",
 }
+PUBLIC_WIKI_HUB_PATH = "wiki/Wiki/README.md"
+# The public branch is a fixed vocabulary.  A content topic may grow below an
+# existing leaf after user approval, but a new *hub* would create another
+# navigation level and must therefore be reviewed before it enters this tree.
+PUBLIC_WIKI_HUB_CHILDREN = {
+    "Wiki": frozenset(
+        {
+            "홈",
+            "컴퓨터 과학 기초",
+            "프로그래밍 언어·런타임",
+            "프런트엔드·클라이언트",
+            "백엔드·서비스",
+            "데이터·저장소",
+            "컴퓨터 시스템·네트워크",
+            "품질·보안·신뢰성",
+            "소프트웨어 설계·아키텍처",
+            "플랫폼·전달·운영",
+            "AI·머신러닝",
+            "프로젝트",
+            "책",
+        }
+    ),
+    "컴퓨터 과학 기초": frozenset({"자료구조", "알고리즘", "계산 복잡도"}),
+    "프로그래밍 언어·런타임": frozenset({"언어 공통", "언어", "런타임·빌드"}),
+    "언어 공통": frozenset(
+        {
+            "프로그래밍 기초",
+            "타입 시스템",
+            "함수·호출",
+            "객체지향·함수형 패러다임",
+            "오류 처리",
+            "동시성·비동기 프로그래밍",
+        }
+    ),
+    "언어": frozenset({"Kotlin", "Python", "JavaScript·TypeScript", "Java", "C·C++"}),
+    "Kotlin": frozenset(
+        {
+            "기본 문법·타입",
+            "함수·호출",
+            "클래스·객체·인터페이스",
+            "컬렉션·제네릭스",
+            "Coroutine·Flow·JVM 상호운용",
+        }
+    ),
+    "런타임·빌드": frozenset({"JVM", "Node.js", "네이티브 실행 환경", "패키지·빌드 도구"}),
+    "프런트엔드·클라이언트": frozenset(
+        {
+            "웹 플랫폼",
+            "UI·접근성",
+            "웹 프레임워크",
+            "렌더링·상태",
+            "모바일·데스크톱",
+            "게임·인터랙티브",
+        }
+    ),
+    "웹 플랫폼": frozenset({"HTML·CSS", "DOM·브라우저 API", "브라우저 네트워크", "웹 성능"}),
+    "UI·접근성": frozenset({"컴포넌트 설계", "스타일 시스템", "접근성"}),
+    "웹 프레임워크": frozenset({"React", "Next.js", "Vue"}),
+    "렌더링·상태": frozenset(
+        {"CSR·SSR·SSG·ISR", "React Server Components", "라우팅", "Props·상태 관리"}
+    ),
+    "게임·인터랙티브": frozenset({"Unity", "실시간 상호작용", "입력·렌더링"}),
+    "백엔드·서비스": frozenset(
+        {
+            "웹 애플리케이션",
+            "서버 프레임워크",
+            "API 설계",
+            "인증·인가",
+            "실시간 통신",
+            "비동기·서비스 통합",
+        }
+    ),
+    "웹 애플리케이션": frozenset({"서버·요청 처리", "설정·환경", "백그라운드 작업"}),
+    "서버 프레임워크": frozenset({"Spring Boot", "FastAPI", "NestJS"}),
+    "API 설계": frozenset({"REST", "GraphQL", "gRPC", "API 오류 설계"}),
+    "인증·인가": frozenset({"Session·Cookie", "JWT", "OAuth 2.0·OIDC", "권한 모델"}),
+    "실시간 통신": frozenset({"WebSocket·SSE", "연결·전달 보장"}),
+    "비동기·서비스 통합": frozenset({"작업 큐", "메시지 브로커", "이벤트 기반 처리"}),
+    "데이터·저장소": frozenset(
+        {
+            "데이터 모델링",
+            "관계형 데이터베이스",
+            "트랜잭션·동시성 제어",
+            "인덱스·저장 구조",
+            "캐시·검색",
+            "분산 데이터",
+            "데이터 파이프라인·분석",
+        }
+    ),
+    "데이터 모델링": frozenset({"ERD·관계", "키·무결성", "정규화"}),
+    "관계형 데이터베이스": frozenset({"SQL·CRUD·Join", "PostgreSQL", "MySQL"}),
+    "트랜잭션·동시성 제어": frozenset({"격리 수준", "Lock·Deadlock"}),
+    "캐시·검색": frozenset({"Redis", "검색 엔진"}),
+    "분산 데이터": frozenset({"Partition", "Sharding"}),
+    "컴퓨터 시스템·네트워크": frozenset({"컴퓨터 구조", "운영체제", "네트워크", "시스템 성능"}),
+    "운영체제": frozenset(
+        {"프로세스·스레드", "메모리·가상 메모리", "파일 시스템·입출력", "동시성"}
+    ),
+    "네트워크": frozenset({"TCP·UDP", "DNS·TLS·HTTPS", "분산 시스템 기초"}),
+    "시스템 성능": frozenset({"측정·프로파일링", "최적화"}),
+    "품질·보안·신뢰성": frozenset(
+        {"테스트·검증", "애플리케이션 보안", "장애 허용 설계", "복구·연속성"}
+    ),
+    "테스트·검증": frozenset({"Unit·Integration·E2E", "계약·회귀 테스트", "성능·보안 검증"}),
+    "애플리케이션 보안": frozenset({"OWASP", "CSRF·CORS", "입력 검증·비밀 관리", "Rate Limiting"}),
+    "장애 허용 설계": frozenset({"Retry·Timeout·Circuit Breaker", "장애 격리"}),
+    "복구·연속성": frozenset({"Backup·Recovery", "SLO·Error Budget"}),
+    "소프트웨어 설계·아키텍처": frozenset(
+        {
+            "코드 설계·리팩터링",
+            "설계 원칙·패턴",
+            "애플리케이션 아키텍처",
+            "분산 아키텍처",
+            "ADR·기술 의사결정",
+        }
+    ),
+    "애플리케이션 아키텍처": frozenset(
+        {"계층형 아키텍처·MVC", "Modular Monolith", "Clean·Hexagonal Architecture"}
+    ),
+    "분산 아키텍처": frozenset({"Microservices", "Event-Driven Architecture·CQRS"}),
+    "플랫폼·전달·운영": frozenset(
+        {
+            "개발 환경·협업",
+            "CI·CD·릴리스",
+            "컨테이너·Kubernetes",
+            "Cloud·Infrastructure as Code",
+            "관측성",
+            "서비스 운영",
+        }
+    ),
+    "개발 환경·협업": frozenset({"Git"}),
+    "관측성": frozenset({"Logging", "Metrics·Tracing"}),
+    "서비스 운영": frozenset({"Incident 대응", "Postmortem"}),
+    "AI·머신러닝": frozenset(
+        {"머신러닝 기초", "딥러닝", "대규모 언어 모델", "AI 애플리케이션", "AI 평가·안전성"}
+    ),
+    "프로젝트": frozenset({"K8s Clue"}),
+    "책": frozenset(
+        {
+            "프로그래밍 언어·설계",
+            "프런트엔드·백엔드",
+            "데이터·저장소",
+            "시스템·플랫폼",
+            "품질·보안·신뢰성",
+            "AI·머신러닝",
+        }
+    ),
+}
 LIFECYCLE_STATES = {
     "idea",
     "planned",
@@ -419,6 +567,7 @@ def render_wiki_tree_view(
         authored, "하위 키워드", CHILDREN_START, CHILDREN_END
     )
     book_map_kind = _book_navigation_kind(node, tuple(nodes.values()))
+    keyword_heading_map = book_map_kind is not None or _uses_keyword_heading_map(node, nodes)
 
     if node.entity_kind == "book" and not node.navigation_groups:
         updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
@@ -450,10 +599,11 @@ def render_wiki_tree_view(
                 texts,
                 include_sequence=node.view_mode == "linear" and book_map_kind is None,
                 book_map_kind=book_map_kind,
+                topic_headings=keyword_heading_map,
             ),
             CHILDREN_END,
         ]
-        if book_map_kind is not None:
+        if keyword_heading_map:
             updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
             updated = _replace_or_insert_after_h1(
                 updated, CHILDREN_START, CHILDREN_END, "\n".join(child_rows)
@@ -470,6 +620,7 @@ def render_wiki_tree_view(
             node.node_kind in {"root", "hub"}
             or book_map_kind is not None
             or is_book_scoped_canonical_id(node.canonical_id)
+            or node.entity_kind == "project"
         ):
             updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
         else:
@@ -514,6 +665,7 @@ def render_wiki_tree_view(
                 updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
     elif (
         node.node_kind == "entity"
+        and node.entity_kind != "project"
         and related
         and any(
             item.include_in_latest and not _contains_wikilink_to(authored, item.relative_path)
@@ -835,13 +987,31 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
     issues: list[str] = []
     root = "wiki/README.md"
     books_path = "wiki/books/README.md"
+    books_parent_path = root
     resources_path = "wiki/resources/README.md"
     people_path = "wiki/people/README.md"
+    public_hub = by_path.get(PUBLIC_WIKI_HUB_PATH)
 
-    books = by_path.get(books_path)
+    if public_hub is not None:
+        if public_hub.parent_path != root:
+            issues.append(
+                f"{PUBLIC_WIKI_HUB_PATH}: public Wiki hub must be a direct child of Wiki root"
+            )
+        if public_hub.node_kind != "hub" or public_hub.title != "Wiki":
+            issues.append(
+                f"{PUBLIC_WIKI_HUB_PATH}: public Wiki hub must be titled 'Wiki' "
+                "and use node_kind hub"
+            )
+        books_parent_path = public_hub.relative_path
+        books_path = _direct_child_path_by_title(children, public_hub.relative_path, "책")
+        resources_path = None
+        people_path = _direct_child_path_by_title(children, root, "인물")
+        issues.extend(_public_hub_vocabulary_issues(children))
+
+    books = by_path.get(books_path) if books_path is not None else None
     if books is not None:
-        if books.parent_path != root:
-            issues.append(f"{books_path}: books must be a direct child of Wiki root")
+        if books.parent_path != books_parent_path:
+            issues.append(f"{books_path}: books must be a direct child of its Wiki boundary hub")
         if books.title != "책" or books.keywords[:1] != ("책",):
             issues.append(f"{books_path}: books root must use the visible keyword '책'")
         for genre in children.get(books_path, ()):
@@ -854,7 +1024,7 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
                         "must be book entities"
                     )
 
-    resources = by_path.get(resources_path)
+    resources = by_path.get(resources_path) if resources_path is not None else None
     if resources is not None:
         if resources.parent_path != root:
             issues.append(f"{resources_path}: resources must be a direct child of Wiki root")
@@ -938,7 +1108,12 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
                 )
             )
         if node.entity_kind == "book":
-            if not _has_ancestor(node, books_path, by_path):
+            if books_path is None:
+                issues.append(
+                    f"{node.relative_path}: book entity requires a visible '책' hub below "
+                    "the public Wiki hub"
+                )
+            elif not _has_ancestor(node, books_path, by_path):
                 issues.append(f"{node.relative_path}: book entity must stay below the books root")
             if node.navigation_groups:
                 authored = _strip_section(
@@ -961,12 +1136,61 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
                 "on one resource keyword topic"
             )
 
-    if people_path in by_path:
+    if people_path is not None and people_path in by_path:
         for child in children.get(people_path, ()):
             if child.node_kind != "entity" or child.entity_kind != "person":
                 issues.append(
                     f"{child.relative_path}: direct children of people must be person entities"
                 )
+    return issues
+
+
+def _direct_child_path_by_title(
+    children: dict[str, tuple[WikiTreeNode, ...]], parent_path: str, title: str
+) -> str | None:
+    """Return one direct child with ``title`` or leave the optional hub absent.
+
+    The target hierarchy intentionally does not create empty hubs.  Therefore a
+    missing optional boundary is valid until a child needs it, while duplicate
+    titles remain a normal identity error handled by the tree loader.
+    """
+
+    return next(
+        (child.relative_path for child in children.get(parent_path, ()) if child.title == title),
+        None,
+    )
+
+
+def _public_hub_vocabulary_issues(
+    children: dict[str, tuple[WikiTreeNode, ...]],
+) -> list[str]:
+    """Reject an unapproved navigation level below the fixed public tree."""
+
+    issues: list[str] = []
+    pending: list[tuple[str, str]] = [(PUBLIC_WIKI_HUB_PATH, "Wiki")]
+    while pending:
+        parent_path, parent_title = pending.pop()
+        allowed = PUBLIC_WIKI_HUB_CHILDREN.get(parent_title)
+        if allowed is None:
+            continue
+        for node in children.get(parent_path, ()):
+            if node.title not in allowed:
+                issues.append(
+                    f"{node.relative_path}: public Wiki child {node.title!r} is not in the fixed "
+                    f"taxonomy below {parent_title!r}"
+                )
+            elif parent_title == "프로젝트":
+                if node.node_kind != "entity" or node.entity_kind != "project":
+                    issues.append(
+                        f"{node.relative_path}: fixed project child must be a project entity"
+                    )
+            elif node.node_kind != "hub":
+                issues.append(
+                    f"{node.relative_path}: fixed taxonomy child below {parent_title!r} "
+                    "must use node_kind hub"
+                )
+            else:
+                pending.append((node.relative_path, node.title))
     return issues
 
 
@@ -1378,6 +1602,8 @@ def _entity_root_issues(
     contain dates.
     """
 
+    if node.entity_kind == "project" and direct and node.navigation_groups:
+        return []
     _, body = split_markdown(strip_generated_wiki_views(text))
     semantic = re.sub(r"(?m)^# .+?\s*$", "", body, count=1)
     semantic = re.sub(r"<!--.*?-->", "", semantic, flags=re.DOTALL).strip()
@@ -1560,6 +1786,7 @@ def _render_navigation_children(
     *,
     include_sequence: bool,
     book_map_kind: str | None = None,
+    topic_headings: bool = False,
 ) -> tuple[str, ...]:
     """Render one direct-child map without exposing grandchildren."""
 
@@ -1570,7 +1797,7 @@ def _render_navigation_children(
             children,
             texts,
             include_sequence=include_sequence,
-            topic_headings=book_map_kind is not None,
+            topic_headings=topic_headings,
             suppress_owner_heading=book_map_kind == "section-root",
         )
 
@@ -1605,6 +1832,12 @@ def _render_navigation_children(
             for item, label in zip(grouped, grouped_labels, strict=True)
         )
     return tuple(rows)
+
+
+def _uses_keyword_heading_map(node: WikiTreeNode, nodes: dict[str, WikiTreeNode]) -> bool:
+    """Use H2 keyword groups after the new public Wiki boundary is installed."""
+
+    return PUBLIC_WIKI_HUB_PATH in nodes and node.relative_path != "wiki/README.md"
 
 
 def _render_ordered_book_reader_sections(

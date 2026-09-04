@@ -19,11 +19,11 @@ def test_refresh_preserves_existing_children_before_source_index(tmp_path: Path)
     _write_page(
         tmp_path,
         "wiki/README.md",
-        title="Wiki",
+        title="Vault",
         canonical_id="README",
         node_kind="root",
         parent=None,
-        keywords=("Wiki",),
+        keywords=("Vault",),
         body=(
             "## 하위 키워드\n\n"
             f"{CHILDREN_START}\n"
@@ -259,6 +259,234 @@ def _write_history(vault: Path, parent_path: str, parent_title: str) -> None:
         view_mode="topic-timeline",
         body="- 2026-08-25 · 최초 기록",
         extra="entity_section: history\n",
+    )
+
+
+def test_public_wiki_hub_owns_books_while_private_people_stay_at_root(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Vault",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Vault",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/README.md",
+        title="Wiki",
+        canonical_id="wiki",
+        node_kind="hub",
+        parent="[[wiki/README|Vault]]",
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/books/README.md",
+        title="책",
+        canonical_id="wiki/books",
+        node_kind="hub",
+        parent="[[wiki/Wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/books/programming-language-design.md",
+        title="프로그래밍 언어·설계",
+        canonical_id="wiki/books/programming-language-design",
+        node_kind="hub",
+        parent="[[wiki/Wiki/books/README|책]]",
+        keywords=("프로그래밍 언어", "설계"),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/books/programming-language-design/refactoring.md",
+        title="리팩터링 2판",
+        canonical_id="wiki/books/refactoring-2e",
+        node_kind="entity",
+        parent="[[wiki/Wiki/books/programming-language-design|프로그래밍 언어·설계]]",
+        keywords=("리팩터링",),
+        view_mode="linear",
+        extra="entity_kind: book\n",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/인물/README.md",
+        title="인물",
+        canonical_id="people",
+        node_kind="hub",
+        parent="[[wiki/README|Vault]]",
+        keywords=("인물",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/인물/example.md",
+        title="예시 인물",
+        canonical_id="people/example",
+        node_kind="entity",
+        parent="[[wiki/인물/README|인물]]",
+        keywords=("예시 인물",),
+        body="이 문서는 실존 인물의 확인된 관계와 자료를 구분합니다.",
+        extra="entity_kind: person\nlifecycle_status: active\n",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+
+
+def test_project_entity_renders_only_information_and_blog_maps(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Vault",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Vault",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/README.md",
+        title="Wiki",
+        canonical_id="wiki",
+        node_kind="hub",
+        parent="[[wiki/README|Vault]]",
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/projects.md",
+        title="프로젝트",
+        canonical_id="wiki/projects",
+        node_kind="hub",
+        parent="[[wiki/Wiki/README|Wiki]]",
+        keywords=("프로젝트",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/projects/k8s-clue.md",
+        title="K8s Clue",
+        canonical_id="wiki/projects/k8s-clue",
+        node_kind="entity",
+        parent="[[wiki/Wiki/projects|프로젝트]]",
+        keywords=("K8s Clue",),
+        view_mode="project",
+        extra=(
+            "entity_kind: project\n"
+            "lifecycle_status: active\n"
+            "navigation_groups:\n"
+            "- label: 프로젝트 정보\n"
+            "  children:\n"
+            "  - wiki/projects/k8s-clue/overview\n"
+            "  - wiki/projects/k8s-clue/architecture\n"
+            "  - wiki/projects/k8s-clue/verification\n"
+            "  - wiki/projects/k8s-clue/roadmap\n"
+            "- label: 블로그\n"
+            "  children:\n"
+            "  - wiki/projects/k8s-clue/blog\n"
+        ),
+    )
+    for slug, title in (
+        ("overview", "개요"),
+        ("architecture", "아키텍처"),
+        ("verification", "검증·제약"),
+        ("roadmap", "현재 상태·로드맵"),
+        ("blog", "블로그"),
+    ):
+        _write_page(
+            tmp_path,
+            f"wiki/Wiki/projects/k8s-clue/{slug}.md",
+            title=title,
+            canonical_id=f"wiki/projects/k8s-clue/{slug}",
+            node_kind="topic",
+            parent="[[wiki/Wiki/projects/k8s-clue|K8s Clue]]",
+            keywords=(title,),
+        )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / "wiki/Wiki/projects/k8s-clue.md"].decode("utf-8")
+    assert "## 프로젝트 정보" in rendered
+    assert "## 블로그" in rendered
+    assert "## 하위 키워드" not in rendered
+    assert "## 최신 하위 문서" not in rendered
+    assert "## 최신 관련 문서" not in rendered
+
+
+def test_public_wiki_rejects_an_unapproved_hub_level(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Vault",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Vault",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/README.md",
+        title="Wiki",
+        canonical_id="wiki",
+        node_kind="hub",
+        parent="[[wiki/README|Vault]]",
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/experimental-category.md",
+        title="임의 분류",
+        canonical_id="wiki/experimental-category",
+        node_kind="hub",
+        parent="[[wiki/Wiki/README|Wiki]]",
+        keywords=("임의 분류",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == (
+        "wiki/Wiki/experimental-category.md: public Wiki child '임의 분류' is not in the "
+        "fixed taxonomy below 'Wiki'",
+    )
+
+
+def test_public_wiki_rejects_an_unapproved_topic_at_a_structural_level(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Vault",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Vault",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/README.md",
+        title="Wiki",
+        canonical_id="wiki",
+        node_kind="hub",
+        parent="[[wiki/README|Vault]]",
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/experimental-topic.md",
+        title="임의 주제",
+        canonical_id="wiki/experimental-topic",
+        node_kind="topic",
+        parent="[[wiki/Wiki/README|Wiki]]",
+        keywords=("임의 주제",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == (
+        "wiki/Wiki/experimental-topic.md: public Wiki child '임의 주제' is not in the "
+        "fixed taxonomy below 'Wiki'",
     )
 
 

@@ -118,6 +118,14 @@ from woon_core.knowledge.source_catalog import (
     plan_source_catalog,
     write_source_catalog,
 )
+from woon_core.knowledge.source_restructure import (
+    prepare_source_restructure_preflight,
+    write_source_restructure_template,
+)
+from woon_core.knowledge.wiki_restructure import (
+    prepare_wiki_restructure_preflight,
+    write_wiki_restructure_template,
+)
 from woon_core.knowledge.wiki_tree import apply_wiki_tree_refresh, prepare_wiki_tree_refresh
 from woon_core.people.cli import run_people
 from woon_core.registry import Registry
@@ -204,6 +212,10 @@ Usage:
     --next-question <text> --recorded-on <YYYY-MM-DD> --expected-revision <sha256>
     [--vault <path>]
   woon knowledge refresh-wiki-tree [--vault <path>]
+  woon knowledge restructure-preflight --manifest <path> [--vault <path>]
+  woon knowledge restructure-template --output <local-path> [--vault <path>]
+  woon knowledge source-restructure-template --output <local-path> [--vault <path>]
+  woon knowledge source-restructure-preflight --manifest <path> [--vault <path>]
   woon knowledge project-novel [--day <YYYY-MM-DD>] [--vault <path>]
   woon knowledge evaluate --cases <path> [--output <path>] [--vault <path>]
   woon knowledge evaluate-answers --cases <path> --answers <path>
@@ -609,6 +621,18 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "refresh-wiki-tree":
         _run_wiki_tree_refresh(raw_options, output)
+        return
+    if command == "restructure-preflight":
+        _run_wiki_restructure_preflight(raw_options, output)
+        return
+    if command == "restructure-template":
+        _run_wiki_restructure_template(raw_options, output)
+        return
+    if command == "source-restructure-template":
+        _run_source_restructure_template(raw_options, output)
+        return
+    if command == "source-restructure-preflight":
+        _run_source_restructure_preflight(raw_options, output)
         return
     if command == "book-coverage-audit":
         _run_book_coverage_audit(raw_options, output)
@@ -1519,6 +1543,151 @@ def _run_wiki_tree_refresh(arguments: list[str], output: TextIO) -> None:
             indent=2,
         ),
         file=output,
+    )
+
+
+def _run_wiki_restructure_preflight(arguments: list[str], output: TextIO) -> None:
+    """Audit a complete migration manifest without changing the Vault."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--manifest", "--vault"}:
+            raise WoonError(f"unexpected knowledge restructure-preflight argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    manifest = values.get("--manifest")
+    if manifest is None:
+        raise WoonError("knowledge restructure-preflight requires --manifest <path>")
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    report = prepare_wiki_restructure_preflight(vault, Path(manifest))
+    pending = report.disposition_counts.get("review", 0)
+    print(
+        json.dumps(
+            {
+                "status": "invalid" if report.issues else "pending" if pending else "ready",
+                "document_count": report.document_count,
+                "disposition_counts": report.disposition_counts,
+                "target_count": report.target_count,
+                "pending_review_count": pending,
+                "issues": list(report.issues),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_wiki_restructure_template(arguments: list[str], output: TextIO) -> None:
+    """Write a complete local review baseline without changing Wiki pages."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--output", "--vault"}:
+            raise WoonError(f"unexpected knowledge restructure-template argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    destination = values.get("--output")
+    if destination is None:
+        raise WoonError("knowledge restructure-template requires --output <local-path>")
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    written = write_wiki_restructure_template(vault, Path(destination))
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "manifest": written.relative_to(vault).as_posix(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_source_restructure_template(arguments: list[str], output: TextIO) -> None:
+    """Write a complete local raw-source inventory without moving source bytes."""
+
+    values = _source_restructure_options(arguments, command="source-restructure-template")
+    destination = values.get("--output")
+    if destination is None:
+        raise WoonError("knowledge source-restructure-template requires --output <local-path>")
+    vault = _source_restructure_vault(values)
+    written = write_source_restructure_template(vault, Path(destination))
+    print(
+        json.dumps(
+            {"status": "ok", "manifest": written.relative_to(vault).as_posix()},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_source_restructure_preflight(arguments: list[str], output: TextIO) -> None:
+    """Validate the raw-source relocation manifest without changing the Vault."""
+
+    values = _source_restructure_options(arguments, command="source-restructure-preflight")
+    manifest = values.get("--manifest")
+    if manifest is None:
+        raise WoonError("knowledge source-restructure-preflight requires --manifest <path>")
+    report = prepare_source_restructure_preflight(_source_restructure_vault(values), Path(manifest))
+    pending = report.disposition_counts.get("review", 0)
+    print(
+        json.dumps(
+            {
+                "status": "invalid" if report.issues else "pending" if pending else "ready",
+                "file_count": report.file_count,
+                "byte_count": report.byte_count,
+                "disposition_counts": report.disposition_counts,
+                "pending_review_count": pending,
+                "issues": list(report.issues),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _source_restructure_options(arguments: list[str], *, command: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--output", "--manifest", "--vault"}:
+            raise WoonError(f"unexpected knowledge {command} argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    return values
+
+
+def _source_restructure_vault(values: dict[str, str]) -> Path:
+    vault_option = values.get("--vault")
+    return (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
     )
 
 
