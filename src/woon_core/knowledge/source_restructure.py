@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -23,6 +25,24 @@ class SourceRestructurePreflight:
     disposition_counts: dict[str, int]
     catalog_pending_count: int
     issues: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCatalogReferenceAudit:
+    """Every catalog reference to one legacy raw-source byte path.
+
+    This is deliberately read-only.  It is the evidence required before a
+    relocation manifest can mark a source record as catalog-reconciled.
+    """
+
+    file_count: int
+    catalog_record_count: int
+    reference_count: int
+    orphan_count: int
+    duplicate_primary_count: int
+    stale_reference_count: int
+    issues: tuple[str, ...]
+    records: tuple[dict[str, object], ...]
 
 
 def render_source_restructure_template(vault: Path) -> bytes:
@@ -78,6 +98,152 @@ def write_source_restructure_template(vault: Path, output_path: Path) -> Path:
         raise WoonError(f"source restructure template already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(output, render_source_restructure_template(root), mode=0o600)
+    return output
+
+
+def audit_source_catalog_references(vault: Path) -> SourceCatalogReferenceAudit:
+    """Inventory catalog locators before relocating raw source bytes.
+
+    ``catalog/sources`` owns source records through ``records[*].target``.
+    All YAML and JSON catalog documents are also scanned for legacy locators so
+    claims, page specifications, and receipts cannot silently retain a path
+    that will disappear.  A source can have many references but must have no
+    more than one primary catalog owner.
+    """
+
+    root = vault.expanduser().resolve()
+    source_root = root / LEGACY_SOURCE_ROOT
+    catalog_root = root / "catalog"
+    if not source_root.is_dir():
+        raise WoonError(f"legacy raw source root is missing: {source_root}")
+    if not catalog_root.is_dir():
+        raise WoonError(f"catalog root is missing: {catalog_root}")
+
+    paths = tuple(
+        sorted(
+            path.relative_to(root).as_posix()
+            for path in source_root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        )
+    )
+    active = set(paths)
+    primary_owners: dict[str, list[str]] = {path: [] for path in paths}
+    references: dict[str, list[str]] = {path: [] for path in paths}
+    issues: list[str] = []
+    catalog_record_count = 0
+
+    for document in sorted(catalog_root.rglob("*")):
+        if not document.is_file() or document.is_symlink():
+            continue
+        suffix = document.suffix.lower()
+        if suffix not in {".yaml", ".yml", ".json"}:
+            continue
+        relative_document = document.relative_to(root).as_posix()
+        try:
+            payload = _load_catalog_document(document)
+        except (OSError, UnicodeError, json.JSONDecodeError, yaml.YAMLError) as error:
+            issues.append(f"catalog document is unreadable: {relative_document}: {error}")
+            continue
+        for scalar_path, value in _scalar_strings(payload):
+            for source_path, locator in _legacy_locators(value):
+                label = f"{relative_document}:{scalar_path}"
+                if source_path not in active:
+                    issues.append(f"stale raw-source locator {locator} at {label}")
+                    continue
+                references[source_path].append(f"{label}={locator}")
+        if document.parent == catalog_root / "sources":
+            records = payload.get("records") if isinstance(payload, dict) else None
+            if not isinstance(records, list):
+                issues.append(f"source catalog has no records list: {relative_document}")
+                continue
+            for index, record in enumerate(records, start=1):
+                if not isinstance(record, dict):
+                    issues.append(
+                        f"invalid source catalog record: {relative_document}:records[{index}]"
+                    )
+                    continue
+                catalog_record_count += 1
+                target = record.get("target")
+                if not isinstance(target, str):
+                    continue
+                for source_path, _locator in _legacy_locators(target):
+                    if source_path in active:
+                        source_id = record.get("source_id", "<missing-source-id>")
+                        primary_owners[source_path].append(
+                            f"{relative_document}:records[{index}]={source_id}"
+                        )
+
+    records: list[dict[str, object]] = []
+    orphan_count = 0
+    duplicate_primary_count = 0
+    for path in paths:
+        owners = sorted(primary_owners[path])
+        refs = sorted(references[path])
+        if not owners:
+            orphan_count += 1
+        if len(owners) > 1:
+            duplicate_primary_count += 1
+            issues.append(f"raw source has multiple primary catalog owners: {path}")
+        records.append(
+            {
+                "current_path": path,
+                "primary_catalog_owners": owners,
+                "catalog_references": refs,
+                "catalog_reconciliation": "reconciled" if len(owners) == 1 else "pending",
+            }
+        )
+    stale_reference_count = sum(issue.startswith("stale raw-source locator ") for issue in issues)
+    return SourceCatalogReferenceAudit(
+        file_count=len(paths),
+        catalog_record_count=catalog_record_count,
+        reference_count=sum(len(items) for items in references.values()),
+        orphan_count=orphan_count,
+        duplicate_primary_count=duplicate_primary_count,
+        stale_reference_count=stale_reference_count,
+        issues=tuple(issues),
+        records=tuple(records),
+    )
+
+
+def render_source_catalog_reference_audit(vault: Path) -> bytes:
+    """Render a full, local-only locator inventory for human review."""
+
+    report = audit_source_catalog_references(vault)
+    return (
+        json.dumps(
+            {
+                "version": 1,
+                "file_count": report.file_count,
+                "catalog_record_count": report.catalog_record_count,
+                "reference_count": report.reference_count,
+                "orphan_count": report.orphan_count,
+                "duplicate_primary_count": report.duplicate_primary_count,
+                "stale_reference_count": report.stale_reference_count,
+                "issues": list(report.issues),
+                "records": list(report.records),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def write_source_catalog_reference_audit(vault: Path, output_path: Path) -> Path:
+    """Write a locator inventory below the local-only restructure workspace."""
+
+    root = vault.expanduser().resolve()
+    output = output_path.expanduser().resolve()
+    local_root = root / ".local/woon-knowledge/source-restructure"
+    if not output.is_relative_to(local_root):
+        raise WoonError(
+            "source catalog reference audit must stay below "
+            ".local/woon-knowledge/source-restructure"
+        )
+    if output.exists():
+        raise WoonError(f"source catalog reference audit already exists: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(output, render_source_catalog_reference_audit(root), mode=0o600)
     return output
 
 
@@ -188,6 +354,52 @@ def _default_destination(relative: str) -> tuple[str, str | None, str]:
         if relative.startswith(current):
             return "move", target + relative.removeprefix(current), scope
     return "review", None, "review"
+
+
+def _load_catalog_document(path: Path) -> Any:
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        return json.loads(text)
+    return yaml.safe_load(text)
+
+
+def _scalar_strings(value: object, prefix: str = "$") -> tuple[tuple[str, str], ...]:
+    if isinstance(value, str):
+        return ((prefix, value),)
+    if isinstance(value, list):
+        result: list[tuple[str, str]] = []
+        for index, child in enumerate(value):
+            result.extend(_scalar_strings(child, f"{prefix}[{index}]"))
+        return tuple(result)
+    if isinstance(value, dict):
+        result = []
+        for key, child in value.items():
+            result.extend(_scalar_strings(child, f"{prefix}.{key}"))
+        return tuple(result)
+    return ()
+
+
+def _legacy_locators(value: str) -> tuple[tuple[str, str], ...]:
+    """Extract a raw byte path and full locator (including an optional fragment)."""
+
+    marker = LEGACY_SOURCE_ROOT.as_posix() + "/"
+    locators: list[tuple[str, str]] = []
+    start = 0
+    while True:
+        offset = value.find(marker, start)
+        if offset < 0:
+            break
+        end = len(value)
+        for delimiter in ("\n", "\r", "`", '"', "'", ")", "]", ">", "|"):
+            candidate = value.find(delimiter, offset)
+            if candidate >= 0:
+                end = min(end, candidate)
+        locator = value[offset:end].strip().rstrip(".,;:")
+        source_path = locator.partition("#")[0]
+        if source_path:
+            locators.append((source_path, locator))
+        start = offset + len(marker)
+    return tuple(locators)
 
 
 def _relative(value: object, label: str, field: str, issues: list[str]) -> str | None:

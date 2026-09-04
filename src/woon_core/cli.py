@@ -119,7 +119,9 @@ from woon_core.knowledge.source_catalog import (
     write_source_catalog,
 )
 from woon_core.knowledge.source_restructure import (
+    audit_source_catalog_references,
     prepare_source_restructure_preflight,
+    write_source_catalog_reference_audit,
     write_source_restructure_template,
 )
 from woon_core.knowledge.wiki_restructure import (
@@ -216,6 +218,7 @@ Usage:
   woon knowledge restructure-template --output <local-path> [--vault <path>]
   woon knowledge source-restructure-template --output <local-path> [--vault <path>]
   woon knowledge source-restructure-preflight --manifest <path> [--vault <path>]
+  woon knowledge source-restructure-catalog-audit --output <local-path> [--vault <path>]
   woon knowledge project-novel [--day <YYYY-MM-DD>] [--vault <path>]
   woon knowledge evaluate --cases <path> [--output <path>] [--vault <path>]
   woon knowledge evaluate-answers --cases <path> --answers <path>
@@ -633,6 +636,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "source-restructure-preflight":
         _run_source_restructure_preflight(raw_options, output)
+        return
+    if command == "source-restructure-catalog-audit":
+        _run_source_restructure_catalog_audit(raw_options, output)
         return
     if command == "book-coverage-audit":
         _run_book_coverage_audit(raw_options, output)
@@ -1662,6 +1668,41 @@ def _run_source_restructure_preflight(arguments: list[str], output: TextIO) -> N
                 "pending_review_count": pending_review,
                 "catalog_pending_count": report.catalog_pending_count,
                 "issues": list(report.issues),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_source_restructure_catalog_audit(arguments: list[str], output: TextIO) -> None:
+    """Write the read-only catalog locator inventory for raw source relocation."""
+
+    values = _source_restructure_options(arguments, command="source-restructure-catalog-audit")
+    destination = values.get("--output")
+    if destination is None:
+        raise WoonError("knowledge source-restructure-catalog-audit requires --output <local-path>")
+    vault = _source_restructure_vault(values)
+    report = audit_source_catalog_references(vault)
+    written = write_source_catalog_reference_audit(vault, Path(destination))
+    print(
+        json.dumps(
+            {
+                "status": "invalid"
+                if report.issues
+                else "pending"
+                if report.orphan_count
+                else "ready",
+                "report": written.relative_to(vault).as_posix(),
+                "file_count": report.file_count,
+                "catalog_record_count": report.catalog_record_count,
+                "reference_count": report.reference_count,
+                "orphan_count": report.orphan_count,
+                "duplicate_primary_count": report.duplicate_primary_count,
+                "stale_reference_count": report.stale_reference_count,
+                "issue_count": len(report.issues),
+                "issue_preview": list(report.issues[:5]),
             },
             ensure_ascii=False,
             indent=2,
