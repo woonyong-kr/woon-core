@@ -1685,7 +1685,7 @@ def _run_source_restructure_catalog_audit(arguments: list[str], output: TextIO) 
         raise WoonError("knowledge source-restructure-catalog-audit requires --output <local-path>")
     vault = _source_restructure_vault(values)
     report = audit_source_catalog_references(vault)
-    written = write_source_catalog_reference_audit(vault, Path(destination))
+    written = write_source_catalog_reference_audit(vault, Path(destination), report)
     print(
         json.dumps(
             {

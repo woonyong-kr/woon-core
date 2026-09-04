@@ -205,10 +205,12 @@ def audit_source_catalog_references(vault: Path) -> SourceCatalogReferenceAudit:
     )
 
 
-def render_source_catalog_reference_audit(vault: Path) -> bytes:
+def render_source_catalog_reference_audit(
+    vault: Path, report: SourceCatalogReferenceAudit | None = None
+) -> bytes:
     """Render a full, local-only locator inventory for human review."""
 
-    report = audit_source_catalog_references(vault)
+    report = report or audit_source_catalog_references(vault)
     return (
         json.dumps(
             {
@@ -229,7 +231,9 @@ def render_source_catalog_reference_audit(vault: Path) -> bytes:
     )
 
 
-def write_source_catalog_reference_audit(vault: Path, output_path: Path) -> Path:
+def write_source_catalog_reference_audit(
+    vault: Path, output_path: Path, report: SourceCatalogReferenceAudit | None = None
+) -> Path:
     """Write a locator inventory below the local-only restructure workspace."""
 
     root = vault.expanduser().resolve()
@@ -243,7 +247,7 @@ def write_source_catalog_reference_audit(vault: Path, output_path: Path) -> Path
     if output.exists():
         raise WoonError(f"source catalog reference audit already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(output, render_source_catalog_reference_audit(root), mode=0o600)
+    atomic_write(output, render_source_catalog_reference_audit(root, report), mode=0o600)
     return output
 
 
