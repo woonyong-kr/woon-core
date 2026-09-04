@@ -18,11 +18,11 @@ from typing import Literal, cast
 
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write, encode_json
+from woon_core.knowledge.source_boundary import private_source_relative
 
 type SourceRole = Literal["user", "assistant"]
 
 _ARCHIVE_SCHEMA_VERSION = 1
-_ARCHIVE_RELATIVE_ROOT = Path("wiki/private/_sources/codex")
 _MESSAGE_LIMIT = 200_000
 _BUNDLE_LIMIT = 16_000_000
 _LABEL_LIMIT = 160
@@ -115,7 +115,7 @@ def record_codex_source_bundle(vault: Path, bundle: CodexSourceBundle) -> CodexS
 
     _validate_bundle(bundle)
     root = vault.expanduser().resolve()
-    archive_root = root / _ARCHIVE_RELATIVE_ROOT
+    archive_root = root / _archive_relative_root(root)
     day_root = archive_root / bundle.day.isoformat()
     _ensure_private_directory(root, day_root)
     bundle_key = hashlib.sha256(
@@ -143,7 +143,8 @@ def record_codex_source_bundle(vault: Path, bundle: CodexSourceBundle) -> CodexS
 def load_codex_source_bundles(vault: Path, *, day: date) -> tuple[dict[str, object], ...]:
     """Read validated source bundles for a daily projection without locators."""
 
-    day_root = vault.expanduser().resolve() / _ARCHIVE_RELATIVE_ROOT / day.isoformat()
+    root = vault.expanduser().resolve()
+    day_root = root / _archive_relative_root(root) / day.isoformat()
     if not day_root.is_dir():
         return ()
     values: list[dict[str, object]] = []
@@ -288,8 +289,12 @@ def _short_text(value: str, field: str, limit: int) -> None:
         raise WoonError(f"Codex source {field} is invalid")
 
 
+def _archive_relative_root(vault: Path) -> Path:
+    return private_source_relative(vault, "codex")
+
+
 def _ensure_private_directory(vault: Path, directory: Path) -> None:
-    runtime_root = (vault / _ARCHIVE_RELATIVE_ROOT).resolve()
+    runtime_root = (vault / _archive_relative_root(vault)).resolve()
     target = directory.resolve()
     if not target.is_relative_to(runtime_root):
         raise WoonError("Codex source archive path is outside the Wiki private source root")

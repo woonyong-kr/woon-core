@@ -40,7 +40,7 @@ def test_records_allowed_messages_redacts_secrets_and_replays(tmp_path: Path) ->
     first = record_codex_source_bundle(tmp_path, bundle)
     second = record_codex_source_bundle(tmp_path, bundle)
 
-    path = next((tmp_path / "wiki/private/_sources/codex/2026-08-25").glob("*.json"))
+    path = next((tmp_path / "private/codex/2026-08-25").glob("*.json"))
     value = json.loads(path.read_text(encoding="utf-8"))
     assert first.replayed is False
     assert second.replayed is True
@@ -49,6 +49,23 @@ def test_records_allowed_messages_redacts_secrets_and_replays(tmp_path: Path) ->
     assert value.get("source_locator") is None
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_preserves_legacy_archive_location_until_vault_migration(tmp_path: Path) -> None:
+    (tmp_path / "wiki/private/_sources").mkdir(parents=True)
+    bundle = CodexSourceBundle(
+        day=date(2026, 8, 25),
+        source_locator="thread-legacy:2026-08-25",
+        title="기존 Vault 위치를 유지한다",
+        messages=(
+            CodexSourceMessage(role="user", text="기존 경로", created_at="2026-08-25T00:00:00Z"),
+        ),
+    )
+
+    record_codex_source_bundle(tmp_path, bundle)
+
+    assert list((tmp_path / "wiki/private/_sources/codex/2026-08-25").glob("*.json"))
+    assert not (tmp_path / "private/codex").exists()
 
 
 def test_allows_only_append_and_rejects_other_roles(tmp_path: Path) -> None:
