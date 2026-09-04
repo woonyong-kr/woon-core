@@ -144,7 +144,7 @@ def audit_source_catalog_references(vault: Path) -> SourceCatalogReferenceAudit:
         except (OSError, UnicodeError, json.JSONDecodeError, yaml.YAMLError) as error:
             issues.append(f"catalog document is unreadable: {relative_document}: {error}")
             continue
-        for scalar_path, value in _scalar_strings(payload):
+        for scalar_path, value in _catalog_scalar_strings(payload, relative_document):
             for source_path, locator in _legacy_locators(value):
                 label = f"{relative_document}:{scalar_path}"
                 if source_path not in active:
@@ -400,6 +400,45 @@ def _scalar_strings(value: object, prefix: str = "$") -> tuple[tuple[str, str], 
             result.extend(_scalar_strings(child, f"{prefix}.{key}"))
         return tuple(result)
     return ()
+
+
+def _catalog_scalar_strings(payload: object, relative_document: str) -> tuple[tuple[str, str], ...]:
+    """Return locator-bearing values while retaining inactive provenance as history.
+
+    Archived compiler sources and superseded claims remain in the catalog so an
+    earlier conclusion can be traced, but their reader bodies are not live
+    dependencies. Their historic raw locators must therefore not block an
+    otherwise hash-complete archive relocation. Every compiled source and every
+    accepted claim is still scanned without exception.
+    """
+
+    if relative_document == "catalog/llm-wiki/sources.yaml":
+        records = payload.get("sources") if isinstance(payload, dict) else None
+        if isinstance(records, list):
+            values: list[tuple[str, str]] = []
+            for index, record in enumerate(records):
+                if not isinstance(record, dict):
+                    values.extend(_scalar_strings(record, f"$.sources[{index}]"))
+                    continue
+                for key, value in record.items():
+                    if key == "body" and record.get("lifecycle") == "archived":
+                        continue
+                    values.extend(_scalar_strings(value, f"$.sources[{index}].{key}"))
+            return tuple(values)
+    if relative_document == "catalog/llm-wiki/claims.yaml":
+        records = payload.get("claims") if isinstance(payload, dict) else None
+        if isinstance(records, list):
+            values = []
+            for index, record in enumerate(records):
+                if not isinstance(record, dict):
+                    values.extend(_scalar_strings(record, f"$.claims[{index}]"))
+                    continue
+                for key, value in record.items():
+                    if key == "markdown" and record.get("status") == "superseded":
+                        continue
+                    values.extend(_scalar_strings(value, f"$.claims[{index}].{key}"))
+            return tuple(values)
+    return _scalar_strings(payload)
 
 
 def _legacy_locators(value: str) -> tuple[tuple[str, str], ...]:

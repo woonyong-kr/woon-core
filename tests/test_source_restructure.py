@@ -146,6 +146,51 @@ def test_source_catalog_reference_audit_tracks_owners_and_stale_locators(tmp_pat
     )
 
 
+def test_source_catalog_reference_audit_keeps_archived_locator_history_non_blocking(
+    tmp_path: Path,
+) -> None:
+    source = _write_source(tmp_path, "wiki/private/_sources/knowledge/local-only/book.pdf", b"book")
+    catalog = tmp_path / "catalog/sources/book.yaml"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        "version: 1\nsource: book\nrecords:\n"
+        "- source_id: source://book\n"
+        f"  target: {source.relative_to(tmp_path).as_posix()}\n",
+        encoding="utf-8",
+    )
+    compiler_sources = tmp_path / "catalog/llm-wiki/sources.yaml"
+    compiler_sources.parent.mkdir(parents=True, exist_ok=True)
+    compiler_sources.write_text(
+        "sources:\n"
+        "- source_id: source://archived\n"
+        "  lifecycle: archived\n"
+        "  body: wiki/private/_sources/knowledge/local-only/missing-archived.pdf\n"
+        "- source_id: source://compiled\n"
+        "  lifecycle: compiled\n"
+        "  body: wiki/private/_sources/knowledge/local-only/missing-compiled.pdf\n",
+        encoding="utf-8",
+    )
+    claims = tmp_path / "catalog/llm-wiki/claims.yaml"
+    claims.write_text(
+        "claims:\n"
+        "- status: superseded\n"
+        "  markdown: wiki/private/_sources/knowledge/local-only/missing-superseded.pdf\n"
+        "- status: accepted\n"
+        "  markdown: wiki/private/_sources/knowledge/local-only/missing-accepted.pdf\n",
+        encoding="utf-8",
+    )
+
+    report = audit_source_catalog_references(tmp_path)
+
+    assert report.stale_reference_count == 2
+    assert report.issues == (
+        "stale raw-source locator wiki/private/_sources/knowledge/local-only/missing-accepted.pdf "
+        "at catalog/llm-wiki/claims.yaml:$.claims[1].markdown",
+        "stale raw-source locator wiki/private/_sources/knowledge/local-only/missing-compiled.pdf "
+        "at catalog/llm-wiki/sources.yaml:$.sources[1].body",
+    )
+
+
 def test_source_restructure_preflight_rejects_unevidenced_reconciliation(tmp_path: Path) -> None:
     source = _write_source(tmp_path, "wiki/private/_sources/codex/day/talk.json", b"[]")
     (tmp_path / "catalog").mkdir()
