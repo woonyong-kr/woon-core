@@ -925,6 +925,7 @@ class KnowledgeService:
         if retirement_content_relocations:
             return self._compiled_wiki.validate_book_coverage_manifest_update(
                 coverage_manifest,
+                records=pages,
                 retirement_content_relocations=retirement_content_relocations,
             )
         return self._compiled_wiki.validate_book_coverage_manifest_update(coverage_manifest)

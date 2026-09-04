@@ -912,6 +912,7 @@ class CompiledWiki:
         if coverage_manifest is not None:
             coverage_path, coverage_bytes = self._validated_coverage_manifest_update(
                 coverage_manifest,
+                records=records,
                 retirement_content_relocations=retirement_content_relocations,
             )
             if coverage_manifest.mode == "materialize-scopes":
@@ -2323,12 +2324,14 @@ class CompiledWiki:
         self,
         update: BookCoverageManifestUpdate,
         *,
+        records: tuple[VerifiedBookPage, ...] = (),
         retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> Path:
         """Validate one coverage replacement and return its canonical local path."""
 
         path, _ = self._validated_coverage_manifest_update(
             update,
+            records=records,
             retirement_content_relocations=retirement_content_relocations,
         )
         return path
@@ -2886,6 +2889,7 @@ class CompiledWiki:
         self,
         update: BookCoverageManifestUpdate,
         *,
+        records: tuple[VerifiedBookPage, ...] = (),
         retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> tuple[Path, bytes]:
         if update.mode not in {"replace", "merge-scope", "materialize-scopes"}:
@@ -2952,12 +2956,20 @@ class CompiledWiki:
             raise WoonError("new book coverage manifest requires expected_sha256 to be null")
         if not isinstance(update.replacement, dict):
             raise WoonError("book coverage manifest replacement must be an object")
+        retired_ids = set((retirement_content_relocations or {}).keys())
+        allowed_node_parent_changes = self._validated_book_navigation_reparents(
+            records,
+            current_manifest,
+            update.replacement,
+            retired_ids,
+        )
         _validate_book_workflow_progression(
             current_manifest,
             update.replacement,
             "book coverage manifest",
             allow_source_landed_expansion=True,
-            allowed_retired_ids=set((retirement_content_relocations or {}).keys()),
+            allowed_retired_ids=retired_ids,
+            allowed_node_parent_changes=allowed_node_parent_changes,
         )
         try:
             replacement_bytes = (
@@ -2972,6 +2984,88 @@ class CompiledWiki:
         except (TypeError, ValueError) as error:
             raise WoonError("book coverage manifest replacement must be JSON") from error
         return path, replacement_bytes
+
+    def _validated_book_navigation_reparents(
+        self,
+        records: tuple[VerifiedBookPage, ...],
+        current_manifest: dict[str, Any] | None,
+        replacement_manifest: dict[str, Any],
+        retired_ids: set[str],
+    ) -> dict[str, tuple[str, str]]:
+        """Pin parent-only leaf moves into new source-free navigation groups."""
+
+        if not records or not retired_ids or current_manifest is None:
+            return {}
+        current_nodes = _indexed_manifest_records(
+            current_manifest.get("nodes"), "canonical_id", "current coverage nodes"
+        )
+        replacement_nodes = _indexed_manifest_records(
+            replacement_manifest.get("nodes"), "canonical_id", "replacement coverage nodes"
+        )
+        records_by_id = {record.page_id: record for record in records}
+        if len(records_by_id) != len(records):
+            return {}
+        sources, _, pages, _, _ = self._load_inputs()
+        allowed: dict[str, tuple[str, str]] = {}
+        for page_id, current_node in current_nodes.items():
+            replacement_node = replacement_nodes.get(page_id)
+            if replacement_node is None:
+                continue
+            old_parent = current_node.get("parent_id")
+            new_parent = replacement_node.get("parent_id")
+            if old_parent == new_parent or old_parent not in retired_ids:
+                continue
+            if not isinstance(old_parent, str) or not isinstance(new_parent, str):
+                continue
+            parent_record = records_by_id.get(new_parent)
+            child_record = records_by_id.get(page_id)
+            if parent_record is None or child_record is None or new_parent in pages:
+                continue
+            parent_frontmatter = parent_record.frontmatter
+            if (
+                parent_record.expected_revision is not None
+                or parent_record.body.strip()
+                or not _verified_book_toc_only(parent_frontmatter)
+                or parent_frontmatter.get("source_ids", []) != []
+            ):
+                continue
+            children = [
+                child_id
+                for group in parent_frontmatter.get("navigation_groups", [])
+                if isinstance(group, dict)
+                for child in group.get("children", [])
+                if isinstance(child, str)
+                if (child_id := _relation_target(child)) is not None
+            ]
+            if children.count(page_id) != 1:
+                continue
+            current_page = pages.get(page_id)
+            if not isinstance(current_page, dict):
+                continue
+            current_frontmatter = current_page.get("frontmatter")
+            if (
+                not isinstance(current_frontmatter, dict)
+                or _canonical_parent_id(current_frontmatter.get("parent")) != old_parent
+                or _canonical_parent_id(child_record.frontmatter.get("parent")) != new_parent
+                or current_page.get("title") != child_record.title
+            ):
+                continue
+            render = current_page.get("render")
+            if not isinstance(render, dict) or render.get("kind") != "source-body":
+                continue
+            source_id = render.get("source_id")
+            source = sources.get(source_id) if isinstance(source_id, str) else None
+            if not isinstance(source, dict):
+                continue
+            if (
+                _curated_body(child_record.body)
+                != _curated_body(str(source.get("body", "")))
+                or child_record.source_locator != source.get("locator")
+                or child_record.source_sha256 != source.get("original_sha256")
+            ):
+                continue
+            allowed[page_id] = (old_parent, new_parent)
+        return allowed
 
     def _validated_materialized_coverage_manifest_update(
         self, update: BookCoverageManifestUpdate
@@ -5920,6 +6014,7 @@ def _validate_book_workflow_progression(
     *,
     allow_source_landed_expansion: bool = False,
     allowed_retired_ids: set[str] | None = None,
+    allowed_node_parent_changes: dict[str, tuple[str, str]] | None = None,
 ) -> None:
     """Reject phase rollback and loss of immutable source/translation coverage."""
 
@@ -6047,6 +6142,9 @@ def _validate_book_workflow_progression(
                 label=label,
                 flexible_identities=flexible_identities,
                 allow_missing_flexible=allow_missing_flexible,
+                allowed_node_parent_changes=(
+                    allowed_node_parent_changes if field == "nodes" else None
+                ),
             )
         _validate_source_asset_inventory_evidence(
             replacement.get("source_asset_inventory"),
@@ -6350,14 +6448,15 @@ def _validate_ordered_supersequence(
     label: str,
     flexible_identities: set[str] | None = None,
     allow_missing_flexible: bool = False,
+    allowed_node_parent_changes: dict[str, tuple[str, str]] | None = None,
 ) -> None:
     """Allow insertion while preserving every existing identified object and its order."""
 
     if not isinstance(current, list) or not isinstance(replacement, list):
         raise WoonError(f"{label} {field} must remain an array during source landing")
 
-    def indexed(items: list[Any], version: str) -> dict[str, tuple[int, bytes]]:
-        result: dict[str, tuple[int, bytes]] = {}
+    def indexed(items: list[Any], version: str) -> dict[str, tuple[int, bytes, Any]]:
+        result: dict[str, tuple[int, bytes, Any]] = {}
         for index, item in enumerate(items):
             identity = item.get(identity_field) if isinstance(item, dict) else None
             if not isinstance(identity, str) or not identity:
@@ -6373,14 +6472,15 @@ def _validate_ordered_supersequence(
                 ).encode("utf-8")
             except (TypeError, ValueError) as error:
                 raise WoonError(f"{label} {version} {field}[{index}] must be JSON") from error
-            result[identity] = (index, canonical)
+            result[identity] = (index, canonical, item)
         return result
 
     current_by_id = indexed(current, "current")
     replacement_by_id = indexed(replacement, "replacement")
     flexible = flexible_identities or set()
     previous_index = -1
-    for identity, (_, current_bytes) in current_by_id.items():
+    allowed_reparents = allowed_node_parent_changes or {}
+    for identity, (_, current_bytes, current_item) in current_by_id.items():
         replacement_item = replacement_by_id.get(identity)
         if identity in flexible:
             if replacement_item is None and not allow_missing_flexible:
@@ -6390,9 +6490,34 @@ def _validate_ordered_supersequence(
             continue
         if replacement_item is None:
             raise WoonError(f"{label} {field} cannot delete existing {identity_field}: {identity}")
-        replacement_index, replacement_bytes = replacement_item
+        replacement_index, replacement_bytes, replacement_value = replacement_item
         if replacement_bytes != current_bytes:
-            raise WoonError(f"{label} {field} cannot change existing {identity_field}: {identity}")
+            parent_change = allowed_reparents.get(identity)
+            if (
+                parent_change is None
+                or not isinstance(current_item, dict)
+                or not isinstance(replacement_value, dict)
+            ):
+                raise WoonError(
+                    f"{label} {field} cannot change existing {identity_field}: {identity}"
+                )
+            old_parent, new_parent = parent_change
+            normalized_current = copy.deepcopy(current_item)
+            normalized_current["parent_id"] = new_parent
+            new_parent_record = replacement_by_id.get(new_parent)
+            if (
+                current_item.get("parent_id") != old_parent
+                or replacement_value.get("parent_id") != new_parent
+                or normalized_current != replacement_value
+                or new_parent in current_by_id
+                or new_parent_record is None
+                or not isinstance(new_parent_record[2], dict)
+                or new_parent_record[2].get("leaf") is not False
+                or new_parent_record[2].get("has_direct_content") is not False
+            ):
+                raise WoonError(
+                    f"{label} {field} cannot change existing {identity_field}: {identity}"
+                )
         if replacement_index <= previous_index:
             raise WoonError(f"{label} {field} cannot reorder existing {identity_field}: {identity}")
         previous_index = replacement_index

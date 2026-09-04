@@ -2956,6 +2956,60 @@ def test_source_landed_progression_allows_declared_retirement_relocation() -> No
     )
 
 
+def test_coverage_nodes_allow_only_declared_parent_move_to_new_navigation_group() -> None:
+    old_parent = "books/example/chapter-03"
+    new_parent = f"{old_parent}/3-3"
+    leaf_id = f"{old_parent}/3-3-1"
+    leaf = {
+        "canonical_id": leaf_id,
+        "parent_id": old_parent,
+        "kind": "subsection",
+        "leaf": True,
+        "has_direct_content": True,
+        "source_locator": "source://example#3.3.1",
+    }
+    group = {
+        "canonical_id": new_parent,
+        "parent_id": "books/example",
+        "kind": "section",
+        "leaf": False,
+        "has_direct_content": False,
+        "source_locator": "source://example#3.3",
+    }
+    moved = copy.deepcopy(leaf)
+    moved["parent_id"] = new_parent
+
+    compiled_wiki_module._validate_ordered_supersequence(
+        [leaf],
+        [group, moved],
+        field="nodes",
+        identity_field="canonical_id",
+        label="book coverage manifest",
+        allowed_node_parent_changes={leaf_id: (old_parent, new_parent)},
+    )
+
+    with pytest.raises(WoonError, match="cannot change existing canonical_id"):
+        compiled_wiki_module._validate_ordered_supersequence(
+            [leaf],
+            [group, moved],
+            field="nodes",
+            identity_field="canonical_id",
+            label="book coverage manifest",
+        )
+
+    changed_metadata = copy.deepcopy(moved)
+    changed_metadata["kind"] = "chapter"
+    with pytest.raises(WoonError, match="cannot change existing canonical_id"):
+        compiled_wiki_module._validate_ordered_supersequence(
+            [leaf],
+            [group, changed_metadata],
+            field="nodes",
+            identity_field="canonical_id",
+            label="book coverage manifest",
+            allowed_node_parent_changes={leaf_id: (old_parent, new_parent)},
+        )
+
+
 def test_atomic_verified_book_update_restores_compiler_state_on_final_audit_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

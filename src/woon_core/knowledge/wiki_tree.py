@@ -573,7 +573,9 @@ def preserve_generated_wiki_views(existing: str, rendered: str) -> str:
     for heading, start, end in (("하위 키워드", CHILDREN_START, CHILDREN_END),):
         block = _optional_marker_block(existing, start, end)
         if block is not None:
-            if _managed_navigation_uses_h2(block):
+            if _managed_navigation_uses_h2(block) or _managed_navigation_follows_h1(
+                existing, block
+            ):
                 updated = _strip_section(updated, heading, start, end)
                 updated = _replace_or_insert_after_h1(updated, start, end, block)
             else:
@@ -1868,6 +1870,14 @@ def _managed_navigation_uses_h2(block: str) -> bool:
     """Return whether a managed map owns source topic headings itself."""
 
     return re.search(r"(?m)^##\s+\S", block) is not None
+
+
+def _managed_navigation_follows_h1(text: str, block: str) -> bool:
+    """Recognize a compiler-owned book map rendered directly below its H1."""
+
+    start = text.find(block)
+    h1 = re.search(r"(?m)^#\s+\S.*$", text)
+    return start >= 0 and h1 is not None and not text[h1.end() : start].strip()
 
 
 def _compact_keyword_label(value: str) -> str:

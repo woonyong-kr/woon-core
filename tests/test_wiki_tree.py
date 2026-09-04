@@ -92,6 +92,22 @@ def test_preserved_book_map_keeps_h2_topics_without_generic_children_heading() -
     assert "## 하위 키워드" not in preserved
 
 
+def test_preserved_book_section_map_keeps_direct_leaf_bullets_below_h1() -> None:
+    rendered = "---\ntype: Wiki\n---\n\n# 3.3 셀프 어텐션\n"
+    existing = (
+        "---\ntype: Wiki\n---\n\n# 3.3 셀프 어텐션\n\n"
+        f"{CHILDREN_START}\n"
+        "- [[wiki/book/chapter-03/3-3-1|3.3.1 첫째]]\n"
+        "- [[wiki/book/chapter-03/3-3-2|3.3.2 둘째]]\n"
+        f"{CHILDREN_END}\n"
+    )
+
+    preserved = preserve_generated_wiki_views(existing, rendered)
+
+    assert preserved == existing
+    assert "## 하위 키워드" not in preserved
+
+
 def test_refresh_removing_direct_h1_navigation_keeps_canonical_spacing(
     tmp_path: Path,
 ) -> None:
