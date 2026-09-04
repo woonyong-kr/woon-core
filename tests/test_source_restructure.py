@@ -61,3 +61,29 @@ def test_source_restructure_preflight_rejects_stale_or_incomplete_manifest(tmp_p
     assert report.issues == (
         "records[1]: current_sha256 does not match: wiki/private/_sources/codex/day/talk.json",
     )
+
+
+def test_source_restructure_preflight_rejects_an_extra_source_record(tmp_path: Path) -> None:
+    source = _write_source(tmp_path, "wiki/private/_sources/codex/day/talk.json", b"[]")
+    manifest = tmp_path / "source-restructure.yaml"
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest.write_text(
+        "version: 1\nrecords:\n"
+        "- current_path: wiki/private/_sources/codex/day/talk.json\n"
+        f"  current_sha256: {digest}\n"
+        "  bytes: 2\n  storage_scope: local-only\n  disposition: move\n"
+        "  target_path: private/codex/day/talk.json\n"
+        "- current_path: wiki/private/_sources/codex/day/missing.json\n"
+        "  current_sha256: missing\n"
+        "  bytes: 0\n  storage_scope: local-only\n  disposition: move\n"
+        "  target_path: private/codex/day/missing.json\n",
+        encoding="utf-8",
+    )
+
+    report = prepare_source_restructure_preflight(tmp_path, manifest)
+
+    assert report.issues == (
+        "records[2]: current_path is not an active raw source: "
+        "wiki/private/_sources/codex/day/missing.json",
+        "manifest names 1 non-active raw source files",
+    )

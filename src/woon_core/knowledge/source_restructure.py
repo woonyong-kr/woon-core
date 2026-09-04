@@ -96,13 +96,18 @@ def prepare_source_restructure_preflight(
     records = payload.get("records")
     if not isinstance(records, list):
         raise WoonError("source restructure manifest requires a records list")
+    paths = tuple(sorted(source_root.rglob("*")))
     active = {
         path.relative_to(root).as_posix(): path
-        for path in sorted(source_root.rglob("*"))
+        for path in paths
         if path.is_file() and not path.is_symlink()
     }
     counts: dict[str, int] = {}
-    issues: list[str] = []
+    issues = [
+        f"raw source restructure rejects symlink: {path.relative_to(root).as_posix()}"
+        for path in paths
+        if path.is_symlink()
+    ]
     seen: set[str] = set()
     targets: dict[str, str] = {}
     for index, record in enumerate(records, start=1):
@@ -149,6 +154,9 @@ def prepare_source_restructure_preflight(
     missing = set(active) - seen
     if missing:
         issues.append(f"manifest omits {len(missing)} active raw source files")
+    extra = seen - set(active)
+    if extra:
+        issues.append(f"manifest names {len(extra)} non-active raw source files")
     return SourceRestructurePreflight(
         file_count=len(active),
         byte_count=sum(path.stat().st_size for path in active.values()),
