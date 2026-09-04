@@ -117,9 +117,7 @@ def load_book_rights_restoration(raw: object) -> BookRightsRestoration:
     if not isinstance(raw, dict) or set(raw) != fields:
         raise WoonError("book rights restore fields are invalid")
     if raw.get("schema_version") != RESTORE_SCHEMA_VERSION:
-        raise WoonError(
-            f"book rights restore schema_version must be {RESTORE_SCHEMA_VERSION}"
-        )
+        raise WoonError(f"book rights restore schema_version must be {RESTORE_SCHEMA_VERSION}")
     contract = raw.get("rights_contract")
     if not isinstance(contract, dict) or set(contract) != {"version", "sha256"}:
         raise WoonError("book rights restore rights_contract fields are invalid")
@@ -168,13 +166,9 @@ def load_book_rights_restoration(raw: object) -> BookRightsRestoration:
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(normalized_evidence["authorized_on"])) is None:
         raise WoonError("book rights restore authorized_on must be YYYY-MM-DD")
     if normalized_evidence["decision"] != PRIVATE_AUTHORIZATION_DECISION:
-        raise WoonError(
-            f"book rights restore decision must be {PRIVATE_AUTHORIZATION_DECISION}"
-        )
+        raise WoonError(f"book rights restore decision must be {PRIVATE_AUTHORIZATION_DECISION}")
     if normalized_evidence["ownership_basis"] != PRIVATE_AUTHORIZATION_OWNERSHIP:
-        raise WoonError(
-            "book rights restore ownership_basis must identify a user-purchased copy"
-        )
+        raise WoonError("book rights restore ownership_basis must identify a user-purchased copy")
     if normalized_evidence["authorized_scope"] != PRIVATE_AUTHORIZATION_SCOPE:
         raise WoonError(
             f"book rights restore authorized_scope must be {PRIVATE_AUTHORIZATION_SCOPE}"
@@ -210,9 +204,7 @@ def load_book_rights_restoration(raw: object) -> BookRightsRestoration:
     seen_paths: set[str] = set()
     for index, item in enumerate(raw_quarantines):
         if not isinstance(item, dict) or set(item) != {"relative_path", "expected_sha256"}:
-            raise WoonError(
-                f"book rights restore quarantine_manifests[{index}] fields are invalid"
-            )
+            raise WoonError(f"book rights restore quarantine_manifests[{index}] fields are invalid")
         relative = _restore_text(item.get("relative_path"), "quarantine relative_path")
         digest = _restore_text(item.get("expected_sha256"), "quarantine expected_sha256")
         _restore_safe_relative(
@@ -307,9 +299,7 @@ def load_book_rights_demotion(path: Path) -> tuple[bool, BookRightsDemotion]:
     )
     navigation_groups = _navigation_group_map(raw.get("survivor_navigation_groups"))
     survivor_bodies = _body_map(raw.get("survivor_bodies"))
-    survivor_body_sha256 = _digest_map(
-        raw.get("survivor_body_sha256"), "survivor_body_sha256"
-    )
+    survivor_body_sha256 = _digest_map(raw.get("survivor_body_sha256"), "survivor_body_sha256")
     sources = _string_tuple(raw.get("affected_source_ids"), "affected_source_ids")
     claims = _string_tuple(raw.get("affected_claim_ids"), "affected_claim_ids")
     if not survivors or not retirees or not sources or not claims:
@@ -424,9 +414,7 @@ def _string_tuple(
     return items
 
 
-def _string_map(
-    value: object, label: str, *, allow_empty: bool = False
-) -> dict[str, str]:
+def _string_map(value: object, label: str, *, allow_empty: bool = False) -> dict[str, str]:
     if not isinstance(value, dict):
         raise WoonError(f"book rights demotion {label} must be an object")
     if not value and not allow_empty:

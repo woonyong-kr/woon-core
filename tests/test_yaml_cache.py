@@ -27,6 +27,4 @@ def test_load_yaml_text_returns_isolated_values() -> None:
     first = load_yaml_text("nested:\n  items:\n    - one\n")
     first["nested"]["items"].append("mutated")
 
-    assert load_yaml_text("nested:\n  items:\n    - one\n") == {
-        "nested": {"items": ["one"]}
-    }
+    assert load_yaml_text("nested:\n  items:\n    - one\n") == {"nested": {"items": ["one"]}}

@@ -54,9 +54,7 @@ def payload() -> dict[str, object]:
             f"{BOOK_ID}/chapter-01/1-1",
         ],
         "retire_page_ids": [f"{BOOK_ID}/chapter-01/section-1"],
-        "retire_replacements": {
-            f"{BOOK_ID}/chapter-01/section-1": f"{BOOK_ID}/chapter-01/1-1"
-        },
+        "retire_replacements": {f"{BOOK_ID}/chapter-01/section-1": f"{BOOK_ID}/chapter-01/1-1"},
         "survivor_navigation_groups": {},
         "survivor_bodies": {
             f"{BOOK_ID}/chapter-01": "",
@@ -246,9 +244,7 @@ def test_book_rights_restore_supersedes_blocked_decision_records() -> None:
         expected_revision=None,
     )
 
-    CompiledWiki._retire_book_rights_decisions(
-        BOOK_ID, (record,), sources, claims, pages
-    )
+    CompiledWiki._retire_book_rights_decisions(BOOK_ID, (record,), sources, claims, pages)
 
     assert pages[page_id]["source_ids"] == [current_source]
     assert pages[page_id]["claim_ids"] == [current_claim]
@@ -390,26 +386,32 @@ def test_toc_indexed_rights_restore_terminates_rights_records_without_self_cycle
     )
 
     cyclic_source = {**sources[rights_source], "superseded_by": rights_source}
-    assert _inactive_revision_error(
-        rights_source,
-        cyclic_source,
-        {rights_source: cyclic_source},
-        set(),
-        state_key="lifecycle",
-        inactive_state="archived",
-        record_label="source",
-    ) == "source supersession chain contains a cycle"
+    assert (
+        _inactive_revision_error(
+            rights_source,
+            cyclic_source,
+            {rights_source: cyclic_source},
+            set(),
+            state_key="lifecycle",
+            inactive_state="archived",
+            record_label="source",
+        )
+        == "source supersession chain contains a cycle"
+    )
 
     ordinary_source = {"kind": "book", "lifecycle": "archived"}
-    assert _inactive_revision_error(
-        "source://ordinary",
-        ordinary_source,
-        {"source://ordinary": ordinary_source},
-        set(),
-        state_key="lifecycle",
-        inactive_state="archived",
-        record_label="source",
-    ) == "inactive source has no superseded_by"
+    assert (
+        _inactive_revision_error(
+            "source://ordinary",
+            ordinary_source,
+            {"source://ordinary": ordinary_source},
+            set(),
+            state_key="lifecycle",
+            inactive_state="archived",
+            record_label="source",
+        )
+        == "inactive source has no superseded_by"
+    )
 
 
 @pytest.mark.parametrize(
@@ -442,8 +444,7 @@ def test_book_rights_restore_rejects_other_source_free_pages(
     with pytest.raises(
         WoonError,
         match=(
-            "page source_ids must be a non-empty string list|"
-            "replacement page has no current source"
+            "page source_ids must be a non-empty string list|replacement page has no current source"
         ),
     ):
         CompiledWiki._retire_book_rights_decisions(
@@ -500,9 +501,7 @@ def test_load_book_rights_demotion_rejects_replacement_outside_survivors(
     tmp_path: Path,
 ) -> None:
     value = payload()
-    value["retire_replacements"] = {
-        f"{BOOK_ID}/chapter-01/section-1": f"{BOOK_ID}/chapter-02"
-    }
+    value["retire_replacements"] = {f"{BOOK_ID}/chapter-01/section-1": f"{BOOK_ID}/chapter-02"}
 
     with pytest.raises(WoonError, match="surviving pages"):
         load_book_rights_demotion(write_payload(tmp_path, value))
@@ -525,18 +524,17 @@ def test_rights_demotion_can_reduce_large_wrapper_free_books_to_maps(
         children = [leaf_id for leaf_id in leaf_ids if f"chapter-{chapter:02d}/" in leaf_id]
         pages[root_id] = {
             "title": f"{chapter}장",
-            "frontmatter": {
-                "navigation_groups": [{"label": f"{chapter}장", "children": children}]
-            },
+            "frontmatter": {"navigation_groups": [{"label": f"{chapter}장", "children": children}]},
         }
-        assert _flatten_navigation_groups(
-            pages[root_id]["frontmatter"]["navigation_groups"],
-            pages,
-            set(leaf_ids),
-        ) == []
-        body = f"## {chapter}장\n\n" + "\n".join(
-            f"- {pages[child]['title']}" for child in children
+        assert (
+            _flatten_navigation_groups(
+                pages[root_id]["frontmatter"]["navigation_groups"],
+                pages,
+                set(leaf_ids),
+            )
+            == []
         )
+        body = f"## {chapter}장\n\n" + "\n".join(f"- {pages[child]['title']}" for child in children)
         _validate_rights_toc_body(body, root_id, set(leaf_ids))
 
 
@@ -547,15 +545,11 @@ def test_rights_demotion_expands_retired_wrapper_to_surviving_leaves() -> None:
     pages = {
         root_id: {
             "title": "3장",
-            "frontmatter": {
-                "navigation_groups": [{"label": "3장", "children": [wrapper_id]}]
-            },
+            "frontmatter": {"navigation_groups": [{"label": "3장", "children": [wrapper_id]}]},
         },
         wrapper_id: {
             "title": "3.3 셀프 어텐션",
-            "frontmatter": {
-                "navigation_groups": [{"label": "3.3", "children": leaf_ids}]
-            },
+            "frontmatter": {"navigation_groups": [{"label": "3.3", "children": leaf_ids}]},
         },
     }
 
@@ -573,9 +567,7 @@ def test_book_rights_restore_rolls_back_intake_and_coverage_on_writer_failure(
     (vault / "wiki").mkdir(parents=True)
     archive_bytes = b"purchased private source"
     source_hash = hashlib.sha256(archive_bytes).hexdigest()
-    archive_relative = (
-        "wiki/private/_sources/knowledge/local-only/example/book.pdf"
-    )
+    archive_relative = "wiki/private/_sources/knowledge/local-only/example/book.pdf"
     archive_path = vault / archive_relative
     archive_path.parent.mkdir(parents=True)
     archive_path.write_bytes(archive_bytes)
@@ -672,9 +664,7 @@ def test_book_rights_restore_rolls_back_intake_and_coverage_on_writer_failure(
             del args, kwargs
             return None
 
-        def validate_book_workflow_pages(
-            self, *args: object, **kwargs: object
-        ) -> None:
+        def validate_book_workflow_pages(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
             return None
 

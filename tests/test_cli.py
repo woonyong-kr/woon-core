@@ -916,7 +916,7 @@ def test_book_promotion_coverage_parser_rejects_unsafe_materialized_scope(
     base_relative_path = "catalog/book-coverage/kotlin.json"
     base_path = vault / base_relative_path
     base_path.parent.mkdir(parents=True)
-    base_bytes = b'{}\n'
+    base_bytes = b"{}\n"
     base_path.write_bytes(base_bytes)
 
     with pytest.raises(WoonError, match="path or hash is invalid"):
@@ -936,6 +936,7 @@ def test_book_promotion_coverage_parser_rejects_unsafe_materialized_scope(
             },
             vault,
         )
+
 
 def test_book_promotion_coverage_parser_rejects_existing_manifest_with_null_revision(
     tmp_path: Path,
@@ -964,7 +965,7 @@ def test_knowledge_book_promote_preflights_without_applying(
     vault.mkdir()
     coverage_path = vault / "catalog/book-coverage/kotlin.json"
     coverage_path.parent.mkdir(parents=True)
-    coverage_bytes = b'{}\n'
+    coverage_bytes = b"{}\n"
     coverage_path.write_bytes(coverage_bytes)
     staged_path = tmp_path / "staged-source-assets/figure.png"
     staged_path.parent.mkdir()
@@ -994,8 +995,7 @@ def test_knowledge_book_promote_preflights_without_applying(
                     {
                         "staging_relative_path": "staged-source-assets/figure.png",
                         "archive_relative_path": (
-                            "wiki/private/_sources/knowledge/local-only/"
-                            "kotlin/images/figure.png"
+                            "wiki/private/_sources/knowledge/local-only/kotlin/images/figure.png"
                         ),
                         "sha256": staged_sha256,
                         "size": len(staged_bytes),
@@ -1033,7 +1033,7 @@ def test_knowledge_book_promote_preflights_without_applying(
             body_sha256: dict[str, str],
             coverage_manifest: BookCoverageManifestUpdate,
             staged_assets: tuple[StagedBookAsset, ...],
-            ) -> VerifiedBookPreflightReport:
+        ) -> VerifiedBookPreflightReport:
             preflight_calls.append(pages)
             assert replacements == {}
             assert expected_revisions == {}
@@ -1094,8 +1094,7 @@ def test_book_promote_rejects_staged_asset_path_traversal(
                 {
                     "staging_relative_path": staging_relative_path,
                     "archive_relative_path": (
-                        "wiki/private/_sources/knowledge/local-only/"
-                        "kotlin/images/figure.png"
+                        "wiki/private/_sources/knowledge/local-only/kotlin/images/figure.png"
                     ),
                     "sha256": "a" * 64,
                     "size": 1,
@@ -1121,8 +1120,7 @@ def test_book_promote_parses_75_regular_staged_assets(tmp_path: Path) -> None:
             {
                 "staging_relative_path": f"staged-source-assets/{name}",
                 "archive_relative_path": (
-                    "wiki/private/_sources/knowledge/local-only/"
-                    f"kotlin/images/{name}"
+                    f"wiki/private/_sources/knowledge/local-only/kotlin/images/{name}"
                 ),
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "size": len(content),
@@ -1152,8 +1150,7 @@ def test_book_promote_rejects_symlinked_staged_asset(tmp_path: Path) -> None:
                 {
                     "staging_relative_path": "staged-source-assets/figure.png",
                     "archive_relative_path": (
-                        "wiki/private/_sources/knowledge/local-only/"
-                        "kotlin/images/figure.png"
+                        "wiki/private/_sources/knowledge/local-only/kotlin/images/figure.png"
                     ),
                     "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                     "size": source.stat().st_size,
@@ -1404,9 +1401,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
                 "retire_replacements": {"books/kotlin/part-01": "books/kotlin"},
                 "retirement_expected_revisions": {"books/kotlin/part-01": "part-revision"},
                 "retirement_body_sha256": {"books/kotlin/part-01": "b" * 64},
-                "retirement_content_relocations": {
-                    "books/kotlin/part-01": ["books/kotlin"]
-                },
+                "retirement_content_relocations": {"books/kotlin/part-01": ["books/kotlin"]},
                 "retirement_image_replacements": {
                     "books/kotlin/part-01": {
                         "wiki/private/_sources/knowledge/local-only/kotlin/images/old.png": (
@@ -1418,8 +1413,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
                     {
                         "staging_relative_path": "staged-source-assets/figure.png",
                         "archive_relative_path": (
-                            "wiki/private/_sources/knowledge/local-only/"
-                            "kotlin/images/figure.png"
+                            "wiki/private/_sources/knowledge/local-only/kotlin/images/figure.png"
                         ),
                         "sha256": staged_sha256,
                         "size": len(staged_bytes),
@@ -1606,7 +1600,7 @@ def test_knowledge_book_rights_restore_uses_one_atomic_private_service_call(
     vault.mkdir()
     coverage_path = vault / "catalog/book-coverage/book.json"
     coverage_path.parent.mkdir(parents=True)
-    coverage_bytes = b'{}\n'
+    coverage_bytes = b"{}\n"
     coverage_path.write_bytes(coverage_bytes)
     source_hash = "a" * 64
     input_path = tmp_path / "restore.json"

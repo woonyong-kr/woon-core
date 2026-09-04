@@ -1657,9 +1657,7 @@ def _run_book_promotion(arguments: list[str], output: TextIO) -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2), file=output)
 
 
-def _parse_staged_book_assets(
-    raw: object, input_path: Path
-) -> tuple[StagedBookAsset, ...]:
+def _parse_staged_book_assets(raw: object, input_path: Path) -> tuple[StagedBookAsset, ...]:
     """Resolve byte-pinned asset sources without permitting path or symlink escapes."""
 
     if raw is None:
@@ -1927,14 +1925,11 @@ def _parse_retirement_image_replacements(raw: object) -> dict[str, dict[str, str
             or not page_id.strip()
             or not isinstance(replacements, dict)
         ):
-            raise WoonError(
-                "book-promote-retire retirement_image_replacements fields are invalid"
-            )
+            raise WoonError("book-promote-retire retirement_image_replacements fields are invalid")
         page_replacements: dict[str, str] = {}
         for old_target, new_target in replacements.items():
             if not all(
-                isinstance(value, str) and value.strip()
-                for value in (old_target, new_target)
+                isinstance(value, str) and value.strip() for value in (old_target, new_target)
             ):
                 raise WoonError(
                     "book-promote-retire retirement image targets must be non-empty strings"
@@ -1964,14 +1959,10 @@ def _parse_retirement_content_relocations(raw: object) -> dict[str, tuple[str, .
             or not successors
             or any(not isinstance(item, str) or not item.strip() for item in successors)
         ):
-            raise WoonError(
-                "book-promote-retire retirement_content_relocations fields are invalid"
-            )
+            raise WoonError("book-promote-retire retirement_content_relocations fields are invalid")
         normalized = tuple(item.strip() for item in successors)
         if len(normalized) != len(set(normalized)):
-            raise WoonError(
-                "book-promote-retire retirement content successors must be unique"
-            )
+            raise WoonError("book-promote-retire retirement content successors must be unique")
         parsed[page_id.strip()] = normalized
     return parsed
 
@@ -2033,9 +2024,7 @@ def _run_book_rights_restoration(arguments: list[str], output: TextIO) -> None:
     except (OSError, json.JSONDecodeError) as error:
         raise WoonError("book-rights-restore input is invalid JSON") from error
     if not isinstance(payload, dict) or not isinstance(payload.get("apply"), bool):
-        raise WoonError(
-            "book-rights-restore input must explicitly set apply to true or false"
-        )
+        raise WoonError("book-rights-restore input must explicitly set apply to true or false")
     require_current_book_contract(payload, "book-rights-restore")
     expected_fields = {
         "apply",
@@ -2052,9 +2041,7 @@ def _run_book_rights_restoration(arguments: list[str], output: TextIO) -> None:
     if set(payload) != expected_fields:
         raise WoonError("book-rights-restore input fields are invalid")
     if payload.get("workflow_phase") not in {"toc-indexed", "source-landed"}:
-        raise WoonError(
-            "book-rights-restore must begin at toc-indexed or source-landed"
-        )
+        raise WoonError("book-rights-restore must begin at toc-indexed or source-landed")
     if payload.get("translation_required") is not False:
         raise WoonError("book-rights-restore for a Korean source requires translation false")
     raw_pages = payload.get("pages")
@@ -2216,9 +2203,7 @@ def _parse_book_coverage_manifest_update(
     if mode == "materialize-scopes":
         raw_scopes = raw.get("scopes")
         if not isinstance(raw_scopes, list) or not raw_scopes:
-            raise WoonError(
-                "book promotion materialize-scopes requires a non-empty scopes array"
-            )
+            raise WoonError("book promotion materialize-scopes requires a non-empty scopes array")
         scopes: list[BookCoverageScopeRevision] = []
         for index, item in enumerate(raw_scopes):
             if not isinstance(item, dict) or set(item) != {

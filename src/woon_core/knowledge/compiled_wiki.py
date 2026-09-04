@@ -3058,8 +3058,7 @@ class CompiledWiki:
             if not isinstance(source, dict):
                 continue
             if (
-                _curated_body(child_record.body)
-                != _curated_body(str(source.get("body", "")))
+                _curated_body(child_record.body) != _curated_body(str(source.get("body", "")))
                 or child_record.source_locator != source.get("locator")
                 or child_record.source_sha256 != source.get("original_sha256")
             ):

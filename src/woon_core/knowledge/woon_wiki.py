@@ -1598,9 +1598,7 @@ def _frontmatter_list(text: str, key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _normalize_article_view(
-    text: str, *, parent: object = _UNRESOLVED_FRONTMATTER
-) -> str:
+def _normalize_article_view(text: str, *, parent: object = _UNRESOLVED_FRONTMATTER) -> str:
     """Keep structural metadata in Properties instead of a repeated body card."""
 
     start_count = text.count(WIKI_OVERVIEW_START)
@@ -1624,9 +1622,7 @@ def _normalize_article_view(
     return _normalize_timeline_heading(updated)
 
 
-def _normalize_managed_prose(
-    text: str, *, parent: object = _UNRESOLVED_FRONTMATTER
-) -> str:
+def _normalize_managed_prose(text: str, *, parent: object = _UNRESOLVED_FRONTMATTER) -> str:
     """Remove legacy archive scaffolding that repeats the current conclusion."""
 
     frontmatter_match = re.match(r"\A---\n.*?\n---", text, flags=re.DOTALL)
@@ -1664,9 +1660,7 @@ def _normalize_managed_prose(
     )
 
 
-def _normalize_semantic_sections(
-    text: str, *, parent: object = _UNRESOLVED_FRONTMATTER
-) -> str:
+def _normalize_semantic_sections(text: str, *, parent: object = _UNRESOLVED_FRONTMATTER) -> str:
     """Replace conversation scaffolding with headings that explain reader use."""
 
     updated = re.sub(r"(?m)^## 현재 이해[ \t]*$", f"## {WIKI_CURRENT_HEADING}", text)

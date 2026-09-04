@@ -141,9 +141,7 @@ def audit_book_intake(vault: Path, manifest_name: str = "official-books") -> Boo
         if state and state not in PROCESSING_STATES:
             errors.append(f"{label}.processing_state is invalid: {state}")
         if rights == "processing-prohibited" and state != "blocked-rights":
-            errors.append(
-                f"{label}: processing-prohibited material must remain blocked-rights"
-            )
+            errors.append(f"{label}: processing-prohibited material must remain blocked-rights")
         if not isinstance(priority, int) or priority < 1:
             errors.append(f"{label}.priority must be a positive integer")
         if "private_processing_authorized" in raw:
@@ -199,9 +197,11 @@ def validate_book_promotion_rights(
             raise WoonError(f"book promotion intake is invalid: {path.name}: {error}") from error
         bundles = payload.get("bundles") if isinstance(payload, dict) else None
         for bundle in bundles if isinstance(bundles, list) else ():
-            if isinstance(bundle, dict) and bundle.get("kind") == "book" and bundle.get(
-                "target"
-            ) == book_id:
+            if (
+                isinstance(bundle, dict)
+                and bundle.get("kind") == "book"
+                and bundle.get("target") == book_id
+            ):
                 matches.append((path, bundle))
     if not matches:
         return
@@ -213,9 +213,7 @@ def validate_book_promotion_rights(
     if rights in {"processing-prohibited", "unverified-commercial"}:
         if allow_blocked_restore and state == "blocked-rights":
             return
-        raise WoonError(
-            f"book promotion is rights-blocked; use book-rights-restore: {book_id}"
-        )
+        raise WoonError(f"book promotion is rights-blocked; use book-rights-restore: {book_id}")
     if rights != PRIVATE_AUTHORIZATION_DECISION:
         return
     report = audit_book_intake(vault, manifest_path.stem)
@@ -232,9 +230,7 @@ def validate_book_promotion_rights(
         raise WoonError("book promotion authorized source archive hash changed")
 
 
-def _required_text(
-    raw: dict[str, Any], key: str, label: str, errors: list[str]
-) -> str:
+def _required_text(raw: dict[str, Any], key: str, label: str, errors: list[str]) -> str:
     value = raw.get(key)
     if not isinstance(value, str) or not value.strip():
         errors.append(f"{label}.{key} is required")
@@ -299,24 +295,25 @@ def _audit_private_authorization(
         "notice_sha256",
         "authorization_receipt_sha256",
     ):
-        if not isinstance(evidence.get(key), str) or re.fullmatch(
-            r"[0-9a-f]{64}", str(evidence[key])
-        ) is None:
+        if (
+            not isinstance(evidence.get(key), str)
+            or re.fullmatch(r"[0-9a-f]{64}", str(evidence[key])) is None
+        ):
             errors.append(f"{label}.rights_evidence.{key} must be a lowercase SHA-256")
     if evidence.get("decision") != PRIVATE_AUTHORIZATION_DECISION:
         errors.append(f"{label}.rights_evidence.decision must be user-authorized-private")
     if evidence.get("ownership_basis") != PRIVATE_AUTHORIZATION_OWNERSHIP:
         errors.append(
-            f"{label}.rights_evidence.ownership_basis must be "
-            f"{PRIVATE_AUTHORIZATION_OWNERSHIP}"
+            f"{label}.rights_evidence.ownership_basis must be {PRIVATE_AUTHORIZATION_OWNERSHIP}"
         )
     if evidence.get("authorized_scope") != PRIVATE_AUTHORIZATION_SCOPE:
         errors.append(
             f"{label}.rights_evidence.authorized_scope must be {PRIVATE_AUTHORIZATION_SCOPE}"
         )
-    if not isinstance(evidence.get("authorized_on"), str) or re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}", str(evidence.get("authorized_on"))
-    ) is None:
+    if (
+        not isinstance(evidence.get("authorized_on"), str)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(evidence.get("authorized_on"))) is None
+    ):
         errors.append(f"{label}.rights_evidence.authorized_on must be YYYY-MM-DD")
     if evidence.get("restrictions") != list(PRIVATE_AUTHORIZATION_RESTRICTIONS):
         errors.append(f"{label}.rights_evidence.restrictions must preserve private-only use")

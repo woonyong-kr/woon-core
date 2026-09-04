@@ -1044,6 +1044,7 @@ def test_book_chapter_interleaves_source_body_and_deep_navigation_in_source_orde
     assert replay.issues == ()
     assert replay.changed_count == 0
 
+
 def test_ordered_reader_sections_fail_closed_outside_book_chapter(tmp_path: Path) -> None:
     _write_page(
         tmp_path,
@@ -1261,8 +1262,7 @@ def test_toc_heading_rejects_authored_body_and_mixed_reader_kinds(tmp_path: Path
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert any(
-        "toc-heading may combine only with navigation-group" in issue
-        for issue in report.issues
+        "toc-heading may combine only with navigation-group" in issue for issue in report.issues
     )
 
     _write_page(

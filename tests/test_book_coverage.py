@@ -1791,9 +1791,7 @@ def test_source_structure_accepts_multiple_independent_mixed_chapters(
         metadata: dict[str, object] = {
             "title": f"{chapter}장",
             "content_state": "toc-only",
-            "navigation_groups": [
-                {"label": f"{chapter}.2 깊은 묶음", "children": [child]}
-            ],
+            "navigation_groups": [{"label": f"{chapter}.2 깊은 묶음", "children": [child]}],
             "ordered_reader_sections": [
                 {"kind": "toc-heading", "label": f"{chapter}.1 얕은 절"},
                 {
@@ -1868,8 +1866,7 @@ def test_source_structure_accepts_multiple_independent_mixed_chapters(
     )
 
     assert any(
-        "must be contiguous or match ordered_reader_sections exactly: " + second_owner
-        in error
+        "must be contiguous or match ordered_reader_sections exactly: " + second_owner in error
         for error in invalid_errors
     )
 

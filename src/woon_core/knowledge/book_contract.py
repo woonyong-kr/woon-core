@@ -85,9 +85,7 @@ BOOK_CONTRACT: dict[str, Any] = {
         "narrative_example": "prose-evidence",
     },
     "promotion": {
-        "coverage_manifest": (
-            "required-explicit-replace-merge-scope-or-materialize-pinned-scopes"
-        ),
+        "coverage_manifest": ("required-explicit-replace-merge-scope-or-materialize-pinned-scopes"),
         "staged_scope": ("schema-v3-fragment-with-byte-preserved-base-and-optimistic-hashes"),
         "legacy_scope_audit": "stored-schema-v2-remains-readable",
         "content_relocation": (

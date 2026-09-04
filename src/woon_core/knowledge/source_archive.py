@@ -399,8 +399,7 @@ def _source_id_replacements(
     if not isinstance(prior_records, list):
         return {}
     new_by_identity = {
-        (record.get("target"), record.get("sha256")): record.get("source_id")
-        for record in records
+        (record.get("target"), record.get("sha256")): record.get("source_id") for record in records
     }
     replacements: dict[str, str] = {}
     for record in prior_records:
@@ -452,9 +451,7 @@ def _migrate_source_id_references(paths: tuple[Path, ...], replacements: dict[st
             atomic_write(path, updated)
 
 
-def _verify_source_id_references(
-    paths: tuple[Path, ...], replacements: dict[str, str]
-) -> None:
+def _verify_source_id_references(paths: tuple[Path, ...], replacements: dict[str, str]) -> None:
     for path in paths:
         if not path.is_file():
             continue

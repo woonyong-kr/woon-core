@@ -1368,9 +1368,7 @@ def _audit_source_structure_contract(
                 )
             page = pages.get(owner_id)
             if page is None or page[1].get("entity_kind") != "book":
-                errors.append(
-                    f"{label}: navigation-group-heading owner is not a book root page"
-                )
+                errors.append(f"{label}: navigation-group-heading owner is not a book root page")
             if group_label != expected_label:
                 errors.append(
                     f"{label}.label must exactly match the source title: {expected_label}"
@@ -1498,8 +1496,7 @@ def _audit_source_structure_contract(
         if (
             not isinstance(ordered, list)
             or not any(
-                isinstance(item, dict) and item.get("kind") == "toc-heading"
-                for item in ordered
+                isinstance(item, dict) and item.get("kind") == "toc-heading" for item in ordered
             )
             or any(
                 not isinstance(item, dict)
@@ -1602,13 +1599,9 @@ def _ordered_reader_owner_runs(metadata: dict[str, Any], owner_id: str) -> list[
     runs: list[str] = []
     ordered_groups: list[str] = []
     kinds: set[str] = set()
-    toc_mode = any(
-        isinstance(item, dict) and item.get("kind") == "toc-heading" for item in ordered
-    )
+    toc_mode = any(isinstance(item, dict) and item.get("kind") == "toc-heading" for item in ordered)
     allowed_kinds = (
-        {"toc-heading", "navigation-group"}
-        if toc_mode
-        else {"source-body", "navigation-group"}
+        {"toc-heading", "navigation-group"} if toc_mode else {"source-body", "navigation-group"}
     )
     for item in ordered:
         if not isinstance(item, dict) or set(item) != {"kind", "label"}:
@@ -1710,9 +1703,7 @@ def _audit_ordered_reader_source_structure(
     expected_structure_ids = [_text(root_structures[0].get("structure_id"))]
     listed_children: list[str] = []
     ordered_group_labels: list[str] = []
-    toc_mode = any(
-        isinstance(item, dict) and item.get("kind") == "toc-heading" for item in ordered
-    )
+    toc_mode = any(isinstance(item, dict) and item.get("kind") == "toc-heading" for item in ordered)
     heading_by_title = toc_heading_by_title if toc_mode else in_page_by_title
     for item in ordered:
         if not isinstance(item, dict) or set(item) != {"kind", "label"}:
@@ -1721,9 +1712,7 @@ def _audit_ordered_reader_source_structure(
         kind = item.get("kind")
         label = item.get("label")
         allowed_kinds = (
-            {"toc-heading", "navigation-group"}
-            if toc_mode
-            else {"source-body", "navigation-group"}
+            {"toc-heading", "navigation-group"} if toc_mode else {"source-body", "navigation-group"}
         )
         if kind not in allowed_kinds or not isinstance(label, str):
             errors.append(f"{prefix}: ordered reader source section entry is invalid: {owner_id}")
@@ -3009,9 +2998,7 @@ def _audit_ordered_book_reader_ui(
                 f"{canonical_id}: toc-heading reader must not contain authored prose, "
                 "code, images, or links"
             )
-        toc_labels = [
-            str(item.get("label")).strip() for item in ordered if isinstance(item, dict)
-        ]
+        toc_labels = [str(item.get("label")).strip() for item in ordered if isinstance(item, dict)]
         toc_group_by_label: dict[str, list[str]] = {}
         for group in groups:
             if not isinstance(group, dict) or set(group) != {"label", "children"}:

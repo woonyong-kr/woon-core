@@ -796,7 +796,7 @@ title: 큐
 
 
 def test_compiler_context_refactor_preserves_exact_output_bytes() -> None:
-    existing = '''---
+    existing = """---
 type: Wiki
 title: 큐
 canonical_id: ai/queue
@@ -821,8 +821,8 @@ parent: '[[wiki/algorithm/README|알고리즘과 자료구조]]'
 <!-- woon-wiki-timeline:start -->
 - 2026-08-24 · 실행 — 큐를 다시 학습했다.
 <!-- woon-wiki-timeline:end -->
-'''
-    rendered = '''---
+"""
+    rendered = """---
 type: 키워드
 title: 큐
 summary: 먼저 들어온 항목을 먼저 처리한다.
@@ -837,8 +837,8 @@ updated: '2026-09-01'
 # 큐
 
 근거로 다시 만든 설명
-'''
-    expected = '''---
+"""
+    expected = """---
 type: Wiki
 title: 큐
 summary: 먼저 들어온 항목을 먼저 처리한다.
@@ -872,7 +872,7 @@ state_reason: accepted-evidence-receipt
 <!-- woon-wiki-timeline:start -->
 - 2026-08-24 · 실행 — 큐를 다시 학습했다.
 <!-- woon-wiki-timeline:end -->
-'''
+"""
 
     assert preserve_managed_context(existing, rendered) == expected
 
@@ -880,7 +880,7 @@ state_reason: accepted-evidence-receipt
 def test_compiler_context_parses_existing_and_rendered_frontmatter_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    existing = '''---
+    existing = """---
 type: Wiki
 title: 큐
 canonical_id: ai/queue
@@ -892,8 +892,8 @@ aliases: [FIFO]
 # 큐
 
 기존 설명
-'''
-    rendered = '''---
+"""
+    rendered = """---
 type: 키워드
 title: 큐
 summary: 먼저 들어온 항목을 먼저 처리한다.
@@ -902,7 +902,7 @@ summary: 먼저 들어온 항목을 먼저 처리한다.
 # 큐
 
 근거로 다시 만든 설명
-'''
+"""
     _parse_yaml_text.cache_clear()
     original_load = yaml.load
     load_calls = 0
@@ -920,7 +920,7 @@ summary: 먼저 들어온 항목을 먼저 처리한다.
 
 
 def test_compiler_context_keeps_existing_fail_closed_errors() -> None:
-    retired = '''---
+    retired = """---
 type: Wiki
 title: 큐
 knowledge_state: 폐기됨
@@ -929,8 +929,8 @@ knowledge_state: 폐기됨
 # 큐
 
 폐기된 설명
-'''
-    rendered = '''---
+"""
+    rendered = """---
 type: Wiki
 title: 큐
 ---
@@ -938,7 +938,7 @@ title: 큐
 # 큐
 
 새 설명
-'''
+"""
 
     with pytest.raises(WoonError, match="retired Wiki document"):
         preserve_managed_context(retired, rendered)

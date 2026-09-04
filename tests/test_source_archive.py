@@ -107,9 +107,7 @@ def test_replay_excludes_managed_rights_quarantine_and_refreshes_receipt(
         assert legacy_id not in path.read_text(encoding="utf-8")
         assert current_id in path.read_text(encoding="utf-8")
     receipt = json.loads(
-        (
-            vault / ".local/woon-knowledge/source-archive/study-drop.json"
-        ).read_text(encoding="utf-8")
+        (vault / ".local/woon-knowledge/source-archive/study-drop.json").read_text(encoding="utf-8")
     )
     assert receipt["catalog_sha256"] == hashlib.sha256(catalog_path.read_bytes()).hexdigest()
 

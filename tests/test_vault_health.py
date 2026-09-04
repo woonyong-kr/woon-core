@@ -538,11 +538,7 @@ class ObsidianGraphColorPolicyTests(unittest.TestCase):
         color_groups = config["colorGroups"]
         self.assertIsInstance(color_groups, list)
         self.assertFalse(
-            any(
-                " OR " in str(group["query"])
-                for group in color_groups
-                if isinstance(group, dict)
-            )
+            any(" OR " in str(group["query"]) for group in color_groups if isinstance(group, dict))
         )
 
     def test_rejects_empty_filter_and_boolean_or_group(self) -> None:
