@@ -214,6 +214,35 @@ def test_book_intake_allows_hash_pinned_user_authorized_private_processing(
     assert report.complete
 
 
+def test_book_intake_accepts_target_private_archive_locator(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _source_catalog(vault)
+    (vault / "private").mkdir()
+    evidence = _private_rights_evidence()
+    evidence["source_archive_relative_path"] = "private/knowledge/local-only/book/Book.pdf"
+    _manifest(
+        vault,
+        [
+            _bundle(
+                rights_status="user-authorized-private",
+                processing_state="content-in-progress",
+                rights_evidence=evidence,
+            ),
+            _bundle(
+                id="course",
+                title="Course",
+                source_root="course/",
+                kind="course",
+                rights_status="official-public",
+                processing_state="routed-resource",
+                target="resources/course",
+            ),
+        ],
+    )
+
+    assert audit_book_intake(vault).complete
+
+
 def test_book_intake_rejects_private_authorization_without_exact_date(
     tmp_path: Path,
 ) -> None:

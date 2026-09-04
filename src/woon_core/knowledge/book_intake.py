@@ -16,6 +16,11 @@ from woon_core.knowledge.book_rights import (
     PRIVATE_AUTHORIZATION_RESTRICTIONS,
     PRIVATE_AUTHORIZATION_SCOPE,
 )
+from woon_core.knowledge.source_boundary import (
+    SOURCE_ARCHIVE_RELATIVE,
+    private_source_relative,
+    source_storage_layout,
+)
 from woon_core.knowledge.source_catalog import load_source_catalog
 
 SCHEMA_VERSION = 1
@@ -152,7 +157,7 @@ def audit_book_intake(vault: Path, manifest_name: str = "official-books") -> Boo
         if rights == "unverified-commercial" and state != "blocked-rights":
             errors.append(f"{label}: unverified commercial material must be blocked-rights")
         if rights == PRIVATE_AUTHORIZATION_DECISION:
-            _audit_private_authorization(raw, label, catalog.records, root, errors)
+            _audit_private_authorization(vault, raw, label, catalog.records, root, errors)
 
     assigned_count = 0
     unassigned_count = 0
@@ -260,6 +265,7 @@ def _matches(locator: str, root: str) -> bool:
 
 
 def _audit_private_authorization(
+    vault: Path,
     raw: dict[str, Any],
     label: str,
     records: tuple[Any, ...],
@@ -326,12 +332,19 @@ def _audit_private_authorization(
         errors.append(f"{label}.rights_evidence.source_archive_relative_path is required")
     else:
         pure = PurePosixPath(archive)
-        prefix = ("wiki", "private", "_sources", "knowledge", "local-only")
+        candidate = Path(*pure.parts)
+        expected_root = private_source_relative(vault, "knowledge", "local-only")
+        accepts_legacy_bootstrap = source_storage_layout(
+            vault
+        ) == "empty" and candidate.is_relative_to(
+            SOURCE_ARCHIVE_RELATIVE / "knowledge" / "local-only"
+        )
         if (
             pure.is_absolute()
             or pure.as_posix() != archive
             or ".." in pure.parts
-            or pure.parts[: len(prefix)] != prefix
+            or candidate == expected_root
+            or (not candidate.is_relative_to(expected_root) and not accepts_legacy_bootstrap)
         ):
             errors.append(
                 f"{label}.rights_evidence.source_archive_relative_path must stay local-only"
