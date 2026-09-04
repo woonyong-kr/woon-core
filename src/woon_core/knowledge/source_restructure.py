@@ -285,6 +285,23 @@ def prepare_source_restructure_preflight(
     ]
     seen: set[str] = set()
     targets: dict[str, str] = {}
+    reconciled_records = [
+        record
+        for record in records
+        if isinstance(record, dict) and record.get("catalog_reconciliation") == "reconciled"
+    ]
+    catalog_states: dict[str, str] = {}
+    if reconciled_records:
+        catalog_audit = audit_source_catalog_references(root)
+        catalog_states = {
+            str(record["current_path"]): str(record["catalog_reconciliation"])
+            for record in catalog_audit.records
+        }
+        if catalog_audit.issues:
+            issues.append(
+                "catalog reference audit has unresolved issues; "
+                "no source record may be marked reconciled"
+            )
     for index, record in enumerate(records, start=1):
         label = f"records[{index}]"
         if not isinstance(record, dict):
@@ -318,6 +335,8 @@ def prepare_source_restructure_preflight(
             issues.append(f"{label}: invalid catalog_reconciliation {catalog_reconciliation!r}")
         elif catalog_reconciliation == "pending":
             catalog_pending_count += 1
+        elif catalog_reconciliation == "reconciled" and catalog_states.get(current) != "reconciled":
+            issues.append(f"{label}: catalog reconciliation is not evidenced for {current}")
         target = record.get("target_path")
         if disposition == "move":
             target_path = _relative(target, label, "target_path", issues)

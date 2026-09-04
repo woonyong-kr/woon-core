@@ -144,3 +144,25 @@ def test_source_catalog_reference_audit_tracks_owners_and_stale_locators(tmp_pat
             "catalog_reconciliation": "reconciled",
         },
     )
+
+
+def test_source_restructure_preflight_rejects_unevidenced_reconciliation(tmp_path: Path) -> None:
+    source = _write_source(tmp_path, "wiki/private/_sources/codex/day/talk.json", b"[]")
+    (tmp_path / "catalog").mkdir()
+    manifest = tmp_path / "source-restructure.yaml"
+    manifest.write_text(
+        "version: 1\nrecords:\n"
+        "- current_path: wiki/private/_sources/codex/day/talk.json\n"
+        f"  current_sha256: {hashlib.sha256(source.read_bytes()).hexdigest()}\n"
+        "  bytes: 2\n  storage_scope: local-only\n  disposition: move\n"
+        "  catalog_reconciliation: reconciled\n"
+        "  target_path: private/codex/day/talk.json\n",
+        encoding="utf-8",
+    )
+
+    report = prepare_source_restructure_preflight(tmp_path, manifest)
+
+    assert report.issues == (
+        "records[1]: catalog reconciliation is not evidenced for "
+        "wiki/private/_sources/codex/day/talk.json",
+    )
