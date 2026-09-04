@@ -981,6 +981,7 @@ class CompiledWiki:
             normalized,
             retirement_body_sha256,
             sources,
+            claims,
             pages,
             coverage_manifest=coverage_manifest,
             retirement_image_replacements=retirement_image_replacements,
@@ -1394,12 +1395,13 @@ class CompiledWiki:
         source-element assignment.
         """
 
-        sources, _, pages, _, _ = self._load_inputs()
+        sources, claims, pages, _, _ = self._load_inputs()
         self._validate_verified_book_retirement_content(
             records,
             replacements,
             retirement_body_sha256,
             sources,
+            claims,
             pages,
             coverage_manifest=coverage_manifest,
             retirement_image_replacements=retirement_image_replacements,
@@ -2006,6 +2008,7 @@ class CompiledWiki:
         replacements: dict[str, str],
         retirement_body_sha256: dict[str, str],
         sources: dict[str, dict[str, Any]],
+        claims: dict[str, dict[str, Any]],
         pages: dict[str, dict[str, Any]],
         *,
         coverage_manifest: BookCoverageManifestUpdate | None,
@@ -2030,7 +2033,15 @@ class CompiledWiki:
             page = pages.get(page_id)
             if page is None:
                 raise WoonError(f"compiled Wiki page spec not found: {page_id}")
-            if _is_explicit_source_free_toc_page(page):
+            rights_toc_body = self._unrendered_rights_toc_wrapper_retirement_body(
+                page_id,
+                page,
+                sources,
+                claims,
+            )
+            if rights_toc_body is not None:
+                current_relocation_bodies[page_id] = rights_toc_body
+            elif _is_explicit_source_free_toc_page(page):
                 current_relocation_bodies[page_id] = self._source_free_toc_leaf_retirement_body(
                     page_id,
                     page,
@@ -2050,7 +2061,15 @@ class CompiledWiki:
             page = pages.get(page_id)
             if page is None:
                 raise WoonError(f"compiled Wiki page spec not found: {page_id}")
-            if _is_explicit_source_free_toc_page(page):
+            rights_toc_body = self._unrendered_rights_toc_wrapper_retirement_body(
+                page_id,
+                page,
+                sources,
+                claims,
+            )
+            if rights_toc_body is not None:
+                normalized_body = rights_toc_body
+            elif _is_explicit_source_free_toc_page(page):
                 normalized_body = self._source_free_toc_leaf_retirement_body(
                     page_id,
                     page,
@@ -2209,6 +2228,68 @@ class CompiledWiki:
                     f"{sorted(unused)[0]}"
                 )
         return set(relocations)
+
+    def _unrendered_rights_toc_wrapper_retirement_body(
+        self,
+        page_id: str,
+        page: dict[str, Any],
+        sources: dict[str, dict[str, Any]],
+        claims: dict[str, dict[str, Any]],
+    ) -> str | None:
+        """Return an empty body only for a provenance-only rights TOC wrapper.
+
+        A book-rights decision may retain the historical source TOC in its
+        provenance record while the compiled reader page renders only a
+        generated navigation view.  That unrendered source body is not reader
+        content and therefore does not need relocation when the wrapper is
+        retired.  Any non-rights source or claim stays on the strict source-body
+        relocation path.
+        """
+
+        render = page.get("render")
+        frontmatter = page.get("frontmatter")
+        if (
+            not isinstance(render, dict)
+            or render.get("kind") != "toc-only"
+            or not isinstance(frontmatter, dict)
+            or frontmatter.get("content_state") != "toc-only"
+        ):
+            return None
+        raw_source_ids = page.get("source_ids")
+        raw_claim_ids = page.get("claim_ids")
+        if raw_source_ids == [] or raw_claim_ids == []:
+            return None
+        source_ids = _string_list(raw_source_ids, "page source_ids")
+        claim_ids = _string_list(raw_claim_ids, "page claim_ids")
+        if (
+            not source_ids
+            or not claim_ids
+            or any(
+                source_id not in sources or sources[source_id].get("kind") != "book-rights-decision"
+                for source_id in source_ids
+            )
+            or any(
+                claim_id not in claims or claims[claim_id].get("kind") != "book-rights-decision"
+                for claim_id in claim_ids
+            )
+        ):
+            return None
+
+        relative = Path(_required_string(page, "output_path"))
+        output_path = _inside(self._settings.output_root, relative.as_posix(), "page output_path")
+        if not output_path.is_file():
+            raise WoonError(f"toc-only rights wrapper retirement output is missing: {page_id}")
+        _, title, body = _parse_markdown(
+            output_path.read_text(encoding="utf-8"),
+            relative,
+        )
+        if title != _required_string(page, "title"):
+            raise WoonError(f"toc-only rights wrapper retirement title changed: {page_id}")
+        if _retirement_body(body).strip():
+            raise WoonError(
+                f"toc-only rights wrapper retirement contains authored reader content: {page_id}"
+            )
+        return ""
 
     def _source_free_toc_leaf_retirement_body(
         self,

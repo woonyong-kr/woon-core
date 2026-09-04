@@ -541,6 +541,62 @@ def add_source_free_toc_leaf(compiler: CompiledWiki) -> str:
     return page_id
 
 
+def convert_atomic_wrapper_to_rights_toc_only(compiler: CompiledWiki) -> str:
+    """Replace the fixture wrapper's rendered source with rights-only provenance."""
+
+    page_id = "books/atomic-book/part-01"
+    source_id = "source://book-rights/books/atomic-book/part-01"
+    claim_id = "claim://book-rights/books/atomic-book/part-01"
+    source_body = "## 1부\n\n- 1장 실제 내용\n"
+    sources, claims, pages, curations, _ = compiler._load_inputs()
+    page = pages[page_id]
+    previous_source_ids = tuple(page["source_ids"])
+    previous_claim_ids = tuple(page["claim_ids"])
+    previous_source = copy.deepcopy(sources[previous_source_ids[0]])
+    previous_claim = copy.deepcopy(claims[previous_claim_ids[0]])
+    for previous_source_id in previous_source_ids:
+        del sources[previous_source_id]
+    for previous_claim_id in previous_claim_ids:
+        del claims[previous_claim_id]
+
+    previous_source.update(
+        {
+            "source_id": source_id,
+            "kind": "book-rights-decision",
+            "locator": "source://atomic-book#rights",
+            "normalized_sha256": hashlib.sha256(source_body.encode("utf-8")).hexdigest(),
+            "title": "원자적 책 1부 권리 제한 목차",
+            "purpose": "권리 제한 중에는 원문 목차의 위치만 보존한다.",
+            "body": source_body,
+        }
+    )
+    previous_claim.update(
+        {
+            "claim_id": claim_id,
+            "kind": "book-rights-decision",
+            "status": "accepted",
+            "statement": "1부는 권리 제한으로 목차 전용 상태다.",
+            "source_ids": [source_id],
+            "markdown": "",
+        }
+    )
+    sources[source_id] = previous_source
+    claims[claim_id] = previous_claim
+    page["source_ids"] = [source_id]
+    page["claim_ids"] = [claim_id]
+    page["render"] = {"kind": "toc-only"}
+    page["frontmatter"].update(
+        {
+            "content_state": "toc-only",
+            "source_ids": [source_id],
+            "state_reason": "blocked-rights",
+        }
+    )
+    compiler._write_inputs(sources, claims, pages, curations)
+    compiler.compile(force=True)
+    return page_id
+
+
 def atomic_book_new_coverage_update(
     vault: Path,
     *,
@@ -3497,6 +3553,56 @@ def test_source_free_toc_only_leaf_retirement_rejects_authored_prose(
             {shell_id: shell.revision},
             {shell_id: body_sha256},
             None,
+        )
+
+
+def test_preflight_accepts_empty_reader_body_for_rights_toc_wrapper(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, _, _ = atomic_book_service(tmp_path)
+    wrapper_id = convert_atomic_wrapper_to_rights_toc_only(compiler)
+    service.reindex()
+    root = service.get("books/atomic-book")
+    wrapper = service.get(wrapper_id)
+    coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
+
+    assert wrapper.body == ""
+    report = service.preflight_verified_book_update(
+        (replace(record, expected_revision=root.revision),),
+        {wrapper_id: "books/atomic-book"},
+        {wrapper_id: wrapper.revision},
+        {wrapper_id: hashlib.sha256(b"").hexdigest()},
+        coverage_update,
+    )
+
+    assert report.ready is True
+    assert report.retirement_count == 1
+
+
+def test_rights_toc_wrapper_retirement_rejects_authored_reader_body(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, _, _ = atomic_book_service(tmp_path)
+    wrapper_id = convert_atomic_wrapper_to_rights_toc_only(compiler)
+    wrapper_path = tmp_path / "wiki" / f"{wrapper_id}.md"
+    wrapper_path.write_text(
+        wrapper_path.read_text(encoding="utf-8") + "\n이 문장은 보존해야 하는 독자 본문이다.\n",
+        encoding="utf-8",
+    )
+    root = service.get("books/atomic-book")
+    wrapper = service.get(wrapper_id)
+    coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
+
+    with pytest.raises(
+        WoonError,
+        match="toc-only rights wrapper retirement contains authored reader content",
+    ):
+        service.preflight_verified_book_update(
+            (replace(record, expected_revision=root.revision),),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper.revision},
+            {wrapper_id: hashlib.sha256(_retirement_body(wrapper.body).encode()).hexdigest()},
+            coverage_update,
         )
 
 
