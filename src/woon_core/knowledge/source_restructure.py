@@ -21,15 +21,18 @@ class SourceRestructurePreflight:
     file_count: int
     byte_count: int
     disposition_counts: dict[str, int]
+    catalog_pending_count: int
     issues: tuple[str, ...]
 
 
 def render_source_restructure_template(vault: Path) -> bytes:
     """Create one hash-complete source manifest without moving a byte.
 
-    Only prefixes with an unambiguous source boundary receive a destination.
-    Mixed imports and prior ``local-only`` corpora remain review records until
-    their catalog-level storage scope has been reconciled.
+    Public web snapshots move below ``sources/``. Everything else stays private
+    by default; the user-approved private Git boundary does not make it public.
+    Every record still starts with catalog reconciliation pending, because a
+    byte move without updating locator-bearing catalog and receipt records is
+    unsafe.
     """
 
     root = vault.expanduser().resolve()
@@ -51,6 +54,7 @@ def render_source_restructure_template(vault: Path) -> bytes:
             "bytes": path.stat().st_size,
             "storage_scope": storage_scope,
             "disposition": disposition,
+            "catalog_reconciliation": "pending",
         }
         if target is not None:
             record["target_path"] = target
@@ -103,6 +107,7 @@ def prepare_source_restructure_preflight(
         if path.is_file() and not path.is_symlink()
     }
     counts: dict[str, int] = {}
+    catalog_pending_count = 0
     issues = [
         f"raw source restructure rejects symlink: {path.relative_to(root).as_posix()}"
         for path in paths
@@ -138,6 +143,11 @@ def prepare_source_restructure_preflight(
         scope = record.get("storage_scope")
         if scope not in {"public-tracked", "private-tracked", "local-only", "review"}:
             issues.append(f"{label}: invalid storage_scope {scope!r}")
+        catalog_reconciliation = record.get("catalog_reconciliation")
+        if catalog_reconciliation not in {"pending", "reconciled", "not-required"}:
+            issues.append(f"{label}: invalid catalog_reconciliation {catalog_reconciliation!r}")
+        elif catalog_reconciliation == "pending":
+            catalog_pending_count += 1
         target = record.get("target_path")
         if disposition == "move":
             target_path = _relative(target, label, "target_path", issues)
@@ -161,6 +171,7 @@ def prepare_source_restructure_preflight(
         file_count=len(active),
         byte_count=sum(path.stat().st_size for path in active.values()),
         disposition_counts=counts,
+        catalog_pending_count=catalog_pending_count,
         issues=tuple(issues),
     )
 
@@ -168,6 +179,7 @@ def prepare_source_restructure_preflight(
 def _default_destination(relative: str) -> tuple[str, str | None, str]:
     prefixes = (
         ("knowledge/web/", "sources/knowledge/web/", "public-tracked"),
+        ("knowledge/", "private/knowledge/", "private-tracked"),
         ("novel/", "private/novel/", "private-tracked"),
         ("codex/", "private/codex/", "local-only"),
         ("legacy-wiki/", "private/legacy-wiki/", "private-tracked"),

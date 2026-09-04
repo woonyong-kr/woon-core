@@ -32,9 +32,13 @@ def test_source_restructure_template_classifies_only_unambiguous_prefixes(tmp_pa
         "bytes": 8,
         "storage_scope": "public-tracked",
         "disposition": "move",
+        "catalog_reconciliation": "pending",
         "target_path": "sources/knowledge/web/official.html",
     }
-    assert records[local.relative_to(tmp_path).as_posix()]["disposition"] == "review"
+    assert records[local.relative_to(tmp_path).as_posix()]["target_path"] == (
+        "private/knowledge/local-only/book.pdf"
+    )
+    assert records[local.relative_to(tmp_path).as_posix()]["storage_scope"] == "private-tracked"
     assert records[codex.relative_to(tmp_path).as_posix()]["target_path"] == (
         "private/codex/2026-09-05/talk.json"
     )
@@ -50,6 +54,7 @@ def test_source_restructure_preflight_rejects_stale_or_incomplete_manifest(tmp_p
         "  bytes: 2\n"
         "  storage_scope: local-only\n"
         "  disposition: move\n"
+        "  catalog_reconciliation: pending\n"
         "  target_path: private/codex/day/talk.json\n",
         encoding="utf-8",
     )
@@ -58,6 +63,7 @@ def test_source_restructure_preflight_rejects_stale_or_incomplete_manifest(tmp_p
 
     assert report.file_count == 1
     assert report.byte_count == source.stat().st_size
+    assert report.catalog_pending_count == 1
     assert report.issues == (
         "records[1]: current_sha256 does not match: wiki/private/_sources/codex/day/talk.json",
     )
@@ -72,10 +78,12 @@ def test_source_restructure_preflight_rejects_an_extra_source_record(tmp_path: P
         "- current_path: wiki/private/_sources/codex/day/talk.json\n"
         f"  current_sha256: {digest}\n"
         "  bytes: 2\n  storage_scope: local-only\n  disposition: move\n"
+        "  catalog_reconciliation: pending\n"
         "  target_path: private/codex/day/talk.json\n"
         "- current_path: wiki/private/_sources/codex/day/missing.json\n"
         "  current_sha256: missing\n"
         "  bytes: 0\n  storage_scope: local-only\n  disposition: move\n"
+        "  catalog_reconciliation: pending\n"
         "  target_path: private/codex/day/missing.json\n",
         encoding="utf-8",
     )

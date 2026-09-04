@@ -1650,7 +1650,8 @@ def _run_source_restructure_preflight(arguments: list[str], output: TextIO) -> N
     if manifest is None:
         raise WoonError("knowledge source-restructure-preflight requires --manifest <path>")
     report = prepare_source_restructure_preflight(_source_restructure_vault(values), Path(manifest))
-    pending = report.disposition_counts.get("review", 0)
+    pending_review = report.disposition_counts.get("review", 0)
+    pending = pending_review + report.catalog_pending_count
     print(
         json.dumps(
             {
@@ -1658,7 +1659,8 @@ def _run_source_restructure_preflight(arguments: list[str], output: TextIO) -> N
                 "file_count": report.file_count,
                 "byte_count": report.byte_count,
                 "disposition_counts": report.disposition_counts,
-                "pending_review_count": pending,
+                "pending_review_count": pending_review,
+                "catalog_pending_count": report.catalog_pending_count,
                 "issues": list(report.issues),
             },
             ensure_ascii=False,
