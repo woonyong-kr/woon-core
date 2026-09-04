@@ -17,6 +17,7 @@ from woon_core.knowledge.book_contract import (
     book_workflow_evidence_phases,
     book_workflow_phase_index,
 )
+from woon_core.knowledge.source_boundary import private_source_relative
 from woon_core.knowledge.wiki_tree import (
     BOOK_READER_NAVIGATION_END,
     BOOK_READER_NAVIGATION_START,
@@ -790,17 +791,18 @@ def _audit_workflow_contract(
         actual_title = _text(source_archive.get("actual_title"))
         archive_sha256 = _text(source_archive.get("sha256"))
         candidate = Path(relative_path)
+        archive_root = private_source_relative(vault, "knowledge", "local-only")
         valid_path = (
             bool(relative_path)
             and not candidate.is_absolute()
             and candidate.as_posix() == relative_path
-            and candidate.parts[:5] == ("wiki", "private", "_sources", "knowledge", "local-only")
+            and candidate != archive_root
+            and candidate.is_relative_to(archive_root)
             and ".." not in candidate.parts
         )
         if not valid_path:
             errors.append(
-                f"{prefix}: source_archive.relative_path must be under "
-                "wiki/private/_sources/knowledge/local-only"
+                f"{prefix}: source_archive.relative_path must be under {archive_root.as_posix()}"
             )
         if not actual_title or Path(actual_title).name != actual_title:
             errors.append(f"{prefix}: source_archive.actual_title must be one file title")
@@ -851,19 +853,17 @@ def _audit_workflow_contract(
         _audit_pinned_evidence(label, item, "source_locator", "source_sha256", errors)
         archive_relative_path = _text(item.get("archive_relative_path"))
         archive_candidate = Path(archive_relative_path)
+        archive_root = private_source_relative(vault, "knowledge", "local-only")
         valid_archive_path = (
             bool(archive_relative_path)
             and not archive_candidate.is_absolute()
             and archive_candidate.as_posix() == archive_relative_path
-            and archive_candidate.parts[:5]
-            == ("wiki", "private", "_sources", "knowledge", "local-only")
+            and archive_candidate != archive_root
+            and archive_candidate.is_relative_to(archive_root)
             and ".." not in archive_candidate.parts
         )
         if not valid_archive_path:
-            errors.append(
-                f"{label}.archive_relative_path must be under "
-                "wiki/private/_sources/knowledge/local-only"
-            )
+            errors.append(f"{label}.archive_relative_path must be under {archive_root.as_posix()}")
         archive_sha256 = _text(item.get("archive_sha256"))
         if _LOWER_SHA256.fullmatch(archive_sha256) is None:
             errors.append(f"{label}.archive_sha256 must be a lowercase SHA-256")

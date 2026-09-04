@@ -475,6 +475,26 @@ def test_book_coverage_v7_accepts_source_language_before_translation(
     assert report.covered_leaf_count == 1
 
 
+def test_book_coverage_v7_accepts_private_source_layout_after_relocation(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    target, manifest = _verified_fixture(vault)
+    _write_verified_root_map(vault)
+    _upgrade_manifest_to_v7(vault, manifest)
+    (vault / "wiki/private/_sources").rename(vault / "private")
+    source_archive = manifest["source_archive"]
+    assert isinstance(source_archive, dict)
+    source_archive["relative_path"] = str(source_archive["relative_path"]).replace(
+        "wiki/private/_sources/", "private/", 1
+    )
+    target.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = audit_book_coverage(vault)
+
+    assert report.complete
+
+
 def test_book_coverage_accepts_explicit_toc_only_non_leaf(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     target, manifest = _verified_fixture(vault)
