@@ -167,7 +167,7 @@ def audit_source_catalog_references(vault: Path) -> SourceCatalogReferenceAudit:
                 if not isinstance(target, str):
                     continue
                 for source_path, _locator in _legacy_locators(target):
-                    if source_path in active:
+                    if source_path in active and record.get("state") in {None, "canonical"}:
                         source_id = record.get("source_id", "<missing-source-id>")
                         primary_owners[source_path].append(
                             f"{relative_document}:records[{index}]={source_id}"
