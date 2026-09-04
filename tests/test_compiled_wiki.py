@@ -1823,6 +1823,20 @@ def test_verified_book_asset_preflight_rejects_tampered_staging_bytes(
     assert not (tmp_path / relative).exists()
 
 
+def test_book_asset_destination_uses_target_private_source_layout(tmp_path: Path) -> None:
+    compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
+    (tmp_path / "private").mkdir()
+    relative = "private/knowledge/local-only/atomic-book/images/figure.png"
+
+    destination = compiler._book_asset_destination(relative)
+
+    assert destination == tmp_path / relative
+    with pytest.raises(WoonError, match="private source image archive"):
+        compiler._book_asset_destination(
+            "wiki/private/_sources/knowledge/local-only/atomic-book/images/figure.png"
+        )
+
+
 def scan_crop_asset_fixture(
     tmp_path: Path,
 ) -> tuple[CompiledWiki, BookCoverageManifestUpdate, StagedBookAsset]:

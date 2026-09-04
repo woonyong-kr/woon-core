@@ -45,6 +45,11 @@ from woon_core.knowledge.book_rights import (
     BookRightsDemotionReport,
 )
 from woon_core.knowledge.domain import DocumentMetadata
+from woon_core.knowledge.source_boundary import (
+    SOURCE_ARCHIVE_RELATIVE,
+    private_source_relative,
+    source_storage_layout,
+)
 from woon_core.knowledge.wiki_tree import (
     apply_wiki_tree_refresh,
     load_wiki_tree,
@@ -2715,7 +2720,9 @@ class CompiledWiki:
     def restore_staged_book_assets(self, snapshot: dict[Path, bytes | None]) -> None:
         """Restore prior asset bytes and remove directories created only by a failed landing."""
 
-        stop = self._settings.vault / "wiki/private/_sources/knowledge/local-only"
+        stop = self._settings.vault / private_source_relative(
+            self._settings.vault, "knowledge", "local-only"
+        )
         for path, content in snapshot.items():
             if content is None:
                 path.unlink(missing_ok=True)
@@ -2731,13 +2738,15 @@ class CompiledWiki:
 
     def _book_asset_destination(self, relative: str) -> Path:
         candidate = Path(relative)
+        archive_root = private_source_relative(self._settings.vault, "knowledge", "local-only")
         if (
             not relative
             or "\\" in relative
             or candidate.is_absolute()
             or candidate.as_posix() != relative
-            or candidate.parts[:5] != ("wiki", "private", "_sources", "knowledge", "local-only")
-            or "images" not in candidate.parts[5:]
+            or candidate == archive_root
+            or not candidate.is_relative_to(archive_root)
+            or "images" not in candidate.relative_to(archive_root).parts
             or ".." in candidate.parts
         ):
             raise WoonError(
@@ -4241,10 +4250,16 @@ class CompiledWiki:
             archive_path = _inside(
                 self._settings.vault, adoption.archive_path, "legacy archive_path"
             )
-            if not str(archive_path.relative_to(self._settings.vault.resolve())).startswith(
-                "wiki/private/_sources/"
+            archive_relative = archive_path.relative_to(self._settings.vault.resolve())
+            expected_archive_root = private_source_relative(self._settings.vault)
+            accepts_legacy_bootstrap = source_storage_layout(
+                self._settings.vault
+            ) == "empty" and archive_relative.is_relative_to(SOURCE_ARCHIVE_RELATIVE)
+            if (
+                not archive_relative.is_relative_to(expected_archive_root)
+                and not accepts_legacy_bootstrap
             ):
-                raise WoonError("legacy adoption archive must stay below wiki/private/_sources")
+                raise WoonError("legacy adoption archive must stay below the private source root")
             if archive_path.exists():
                 raise WoonError("legacy adoption archive path already exists")
             frontmatter, title, body = _parse_markdown(raw_bytes.decode("utf-8"), Path(output_path))
