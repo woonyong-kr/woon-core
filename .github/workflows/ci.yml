@@ -15,6 +15,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Install Poppler for PDF asset validation
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install --yes poppler-utils
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install poppler
+          fi
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
