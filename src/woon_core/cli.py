@@ -126,6 +126,7 @@ from woon_core.knowledge.source_restructure import (
 )
 from woon_core.knowledge.wiki_restructure import (
     prepare_wiki_restructure_preflight,
+    write_wiki_restructure_classification,
     write_wiki_restructure_template,
 )
 from woon_core.knowledge.wiki_tree import apply_wiki_tree_refresh, prepare_wiki_tree_refresh
@@ -216,6 +217,7 @@ Usage:
   woon knowledge refresh-wiki-tree [--vault <path>]
   woon knowledge restructure-preflight --manifest <path> [--vault <path>]
   woon knowledge restructure-template --output <local-path> [--vault <path>]
+  woon knowledge restructure-classify --output <local-path> [--vault <path>]
   woon knowledge source-restructure-template --output <local-path> [--vault <path>]
   woon knowledge source-restructure-preflight --manifest <path> [--vault <path>]
   woon knowledge source-restructure-catalog-audit --output <local-path> [--vault <path>]
@@ -630,6 +632,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "restructure-template":
         _run_wiki_restructure_template(raw_options, output)
+        return
+    if command == "restructure-classify":
+        _run_wiki_restructure_classification(raw_options, output)
         return
     if command == "source-restructure-template":
         _run_source_restructure_template(raw_options, output)
@@ -1622,6 +1627,39 @@ def _run_wiki_restructure_template(arguments: list[str], output: TextIO) -> None
                 "status": "ok",
                 "manifest": written.relative_to(vault).as_posix(),
             },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
+
+
+def _run_wiki_restructure_classification(arguments: list[str], output: TextIO) -> None:
+    """Write a complete legacy-to-approved-branch classification."""
+
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in {"--output", "--vault"}:
+            raise WoonError(f"unexpected knowledge restructure-classify argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    destination = values.get("--output")
+    if destination is None:
+        raise WoonError("knowledge restructure-classify requires --output <local-path>")
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    written = write_wiki_restructure_classification(vault, Path(destination))
+    print(
+        json.dumps(
+            {"status": "ok", "classification": written.relative_to(vault).as_posix()},
             ensure_ascii=False,
             indent=2,
         ),

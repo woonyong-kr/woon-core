@@ -32,6 +32,16 @@ class WikiRestructurePreflight:
     issues: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class WikiRestructureClassification:
+    """A complete, non-mutating assignment to the approved target tree."""
+
+    document_count: int
+    disposition_counts: dict[str, int]
+    scope_counts: dict[str, int]
+    records: tuple[dict[str, str], ...]
+
+
 def render_wiki_restructure_template(vault: Path) -> bytes:
     """Render a complete local baseline without assigning final destinations.
 
@@ -76,6 +86,58 @@ def write_wiki_restructure_template(vault: Path, output_path: Path) -> Path:
         raise WoonError(f"Wiki restructure template already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(output, render_wiki_restructure_template(root), mode=0o600)
+    return output
+
+
+def render_wiki_restructure_classification(vault: Path) -> bytes:
+    """Classify every active page before any path or catalog mutation.
+
+    A scope names the sole branch approved by the user.  It is intentionally
+    not a target path: compiler-owned pages must still move through their
+    source/claim/page-spec transaction, never through a Markdown rename.
+    """
+
+    root = vault.expanduser().resolve()
+    records: list[dict[str, str]] = []
+    dispositions: dict[str, int] = {}
+    scopes: dict[str, int] = {}
+    for path in iter_wiki_pages(root / "wiki"):
+        relative = path.relative_to(root).as_posix()
+        scope, disposition, rationale = _approved_scope_for_legacy_path(relative)
+        records.append(
+            {
+                "current_path": relative,
+                "target_scope": scope,
+                "disposition": disposition,
+                "rationale": rationale,
+            }
+        )
+        dispositions[disposition] = dispositions.get(disposition, 0) + 1
+        scopes[scope] = scopes.get(scope, 0) + 1
+    payload = {
+        "version": 1,
+        "document_count": len(records),
+        "disposition_counts": dispositions,
+        "scope_counts": dict(sorted(scopes.items())),
+        "records": records,
+    }
+    return yaml.safe_dump(payload, allow_unicode=True, sort_keys=False, width=100).encode("utf-8")
+
+
+def write_wiki_restructure_classification(vault: Path, output_path: Path) -> Path:
+    """Write the complete local-only classification without touching Wiki pages."""
+
+    root = vault.expanduser().resolve()
+    output = output_path.expanduser().resolve()
+    local_root = root / ".local/woon-knowledge/wiki-restructure"
+    if not output.is_relative_to(local_root):
+        raise WoonError(
+            "Wiki restructure classification must stay below .local/woon-knowledge/wiki-restructure"
+        )
+    if output.exists():
+        raise WoonError(f"Wiki restructure classification already exists: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(output, render_wiki_restructure_classification(root), mode=0o600)
     return output
 
 
@@ -223,3 +285,46 @@ def _compiler_owned_paths(root: Path) -> frozenset[str]:
             raise WoonError(f"Wiki page catalog pages[{index}] has invalid output_path")
         result.add((Path("wiki") / output).as_posix())
     return frozenset(result)
+
+
+def _approved_scope_for_legacy_path(relative: str) -> tuple[str, str, str]:
+    """Assign legacy areas to one branch of the fixed, approved tree."""
+
+    prefixes = (
+        ("wiki/personal/kotlin-in-action", "Wiki > 책 > 프로그래밍 언어·설계", "book"),
+        ("wiki/personal/컴퓨터-시스템-3판", "Wiki > 책 > 시스템·플랫폼", "book"),
+        ("wiki/personal/밑바닥부터-시작하는-딥러닝-1", "Wiki > 책 > AI·머신러닝", "book"),
+        ("wiki/personal/밑바닥부터-만들면서-배우는-llm", "Wiki > 책 > AI·머신러닝", "book"),
+        ("wiki/private/novel", "창작 > 창작 프로젝트", "creative-project"),
+        ("wiki/personal/projects", "창작 > 창작 프로젝트", "creative-project"),
+        ("wiki/personal/career", "커리어", "career"),
+        ("wiki/personal/interview", "커리어 > 지원 자료 > 면접 준비", "career"),
+        ("wiki/ai", "Wiki > AI·머신러닝", "domain"),
+        ("wiki/algorithm", "Wiki > 컴퓨터 과학 기초", "domain"),
+        ("wiki/backend", "Wiki > 백엔드·서비스", "domain"),
+        ("wiki/database", "Wiki > 데이터·저장소", "domain"),
+        ("wiki/network", "Wiki > 컴퓨터 시스템·네트워크 > 네트워크", "domain"),
+        ("wiki/os", "Wiki > 컴퓨터 시스템·네트워크 > 운영체제", "domain"),
+        ("wiki/pintos", "Wiki > 컴퓨터 시스템·네트워크 > 운영체제", "learning-implementation"),
+        ("wiki/security", "Wiki > 품질·보안·신뢰성", "domain"),
+        ("wiki/books", "Wiki > 책", "book-map"),
+        ("wiki/tools", "개인 운영 > 지식 운영", "operating"),
+        ("wiki/knowledge", "개인 운영 > 지식 운영", "operating"),
+        ("wiki/people", "인물", "people-map"),
+    )
+    for prefix, scope, rationale in prefixes:
+        if relative == f"{prefix}.md" or relative.startswith(prefix + "/"):
+            return scope, "move", rationale
+    if relative == "wiki/README.md":
+        return "Vault root", "keep", "vault-root"
+    if relative.startswith("wiki/hubs/"):
+        return "review", "review", "legacy-navigation-wrapper"
+    if relative.startswith("wiki/resources/"):
+        return "review", "review", "legacy-resource-wrapper"
+    if relative.startswith(("wiki/common/", "wiki/concepts/", "wiki/nodes/")):
+        return "review", "review", "mixed-legacy-topic"
+    if relative.startswith("wiki/private/"):
+        return "review", "review", "private-legacy-boundary"
+    if relative.startswith("wiki/personal/"):
+        return "review", "review", "personal-legacy-boundary"
+    return "review", "review", "unclassified-legacy-path"

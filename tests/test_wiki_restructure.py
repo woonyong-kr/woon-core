@@ -5,6 +5,7 @@ from pathlib import Path
 
 from woon_core.knowledge.wiki_restructure import (
     prepare_wiki_restructure_preflight,
+    render_wiki_restructure_classification,
     render_wiki_restructure_template,
 )
 
@@ -120,3 +121,17 @@ def test_restructure_template_covers_each_active_page_and_marks_owner(tmp_path: 
     assert f"current_sha256: {hashlib.sha256(root.read_bytes()).hexdigest()}" in template
     assert "source_owner: compiler" in template
     assert "disposition: review" in template
+
+
+def test_restructure_classification_assigns_known_legacy_areas_once(tmp_path: Path) -> None:
+    _write_page(tmp_path, "wiki/README.md", "README")
+    _write_page(tmp_path, "wiki/ai/model.md", "ai/model")
+    _write_page(tmp_path, "wiki/personal/kotlin-in-action/chapter-01.md", "book/kotlin/1")
+    _write_page(tmp_path, "wiki/hubs/legacy.md", "hubs/legacy")
+
+    rendered = render_wiki_restructure_classification(tmp_path).decode("utf-8")
+
+    assert "document_count: 4" in rendered
+    assert "target_scope: Wiki > AI·머신러닝" in rendered
+    assert "target_scope: Wiki > 책 > 프로그래밍 언어·설계" in rendered
+    assert "rationale: legacy-navigation-wrapper" in rendered
