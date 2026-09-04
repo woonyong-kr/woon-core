@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import woon_core.cli as cli
 from woon_core.cli import run
@@ -24,7 +25,9 @@ from woon_core.knowledge.compiled_wiki import (
     CompiledWikiSettings,
     CompiledWikiTransaction,
     CompiledWikiTransactionReport,
+    LegacyPageAdoption,
     VerifiedBookPage,
+    _materialize_book_coverage_scopes,
     _normalize,
     _validate_book_workflow_progression,
 )
@@ -101,9 +104,7 @@ def _workflow_manifest(phase: str) -> dict[str, object]:
         "schema_version": 3,
         "workflow_phase": phase,
         "translation_required": True,
-        "phase_evidence": {
-            reached: {"proof": reached} for reached in phases[: rank + 1]
-        },
+        "phase_evidence": {reached: {"proof": reached} for reached in phases[: rank + 1]},
         "source_structure_elements": [{"structure_id": "structure:one"}],
         "source_elements": [{"element_id": "claim:one"}],
         "source_element_assignments": [
@@ -315,6 +316,195 @@ def _existing_seed_transaction(
     )
 
 
+def test_legacy_page_adoption_preflight_preserves_existing_raw_page(tmp_path: Path) -> None:
+    compiler, _ = _service(tmp_path)
+    raw_path = tmp_path / "wiki/legacy.md"
+    raw = (
+        "---\n"
+        "type: Wiki\ncanonical_id: legacy\ntitle: 레거시\ndomain: personal\n"
+        "summary: 기존 정본이다.\nstatus: Canonical\npublish: false\naccess: local-only\n"
+        "difficulty: foundation\nprerequisites: []\nnext_concepts: []\n"
+        "related: []\nsource_ids: []\n"
+        "---\n\n# 레거시\n\n원문 본문을 보존한다.\n"
+    )
+    raw_path.write_text(raw, encoding="utf-8")
+    body = "원문 본문을 보존한다.\n"
+    raw_sha = _digest(raw)
+    source_id = "source://legacy-wiki/wiki/legacy.md"
+    transaction = CompiledWikiTransaction(
+        expected_revisions={"legacy": None},
+        sources_upsert=(
+            {
+                "source_id": source_id,
+                "kind": "legacy-wiki",
+                "locator": "wiki/private/_sources/legacy/legacy.md",
+                "original_sha256": raw_sha,
+                "normalized_sha256": _digest(_normalize(body)),
+                "privacy": "local-only",
+                "lifecycle": "compiled",
+                "title": "레거시",
+                "body": body,
+            },
+        ),
+        claims_upsert=(
+            {
+                "claim_id": "claim://legacy-wiki/legacy",
+                "kind": "legacy-document",
+                "status": "accepted",
+                "statement": "레거시",
+                "source_ids": [source_id],
+                "markdown": "",
+            },
+        ),
+        pages_upsert=(
+            {
+                "page_id": "legacy",
+                "output_path": "legacy.md",
+                "title": "레거시",
+                "frontmatter": {
+                    "type": "Wiki",
+                    "canonical_id": "legacy",
+                    "title": "레거시",
+                    "domain": "personal",
+                    "summary": "기존 정본이다.",
+                    "status": "Canonical",
+                    "publish": False,
+                    "access": "local-only",
+                    "difficulty": "foundation",
+                    "prerequisites": [],
+                    "next_concepts": [],
+                    "related": [],
+                    "source_ids": [],
+                },
+                "source_ids": [source_id],
+                "claim_ids": ["claim://legacy-wiki/legacy"],
+                "render": {"kind": "source-body", "source_id": source_id},
+                "legacy_output_adoption": True,
+            },
+        ),
+        curations_upsert=(
+            {
+                "page_id": "legacy",
+                "current_use": "기존 정본을 다시 찾는다.",
+                "basis": "legacy-page-metadata",
+                "status": "provisional",
+            },
+        ),
+    )
+    assert compiler.preflight_legacy_page_adoptions(
+        transaction,
+        (
+            LegacyPageAdoption(
+                "legacy", "legacy.md", raw_sha, "wiki/private/_sources/legacy/legacy.md"
+            ),
+        ),
+    ) == ("legacy",)
+    assert raw_path.read_text(encoding="utf-8") == raw
+
+
+def test_legacy_page_adoption_preflight_rejects_changed_raw_hash(tmp_path: Path) -> None:
+    compiler, _ = _service(tmp_path)
+    with pytest.raises(WoonError, match="opt in explicitly"):
+        compiler.preflight_legacy_page_adoptions(
+            _transaction(),
+            (
+                LegacyPageAdoption(
+                    "concepts/reference-00",
+                    "concepts/reference-00.md",
+                    "0" * 64,
+                    "wiki/private/_sources/legacy/missing.md",
+                ),
+            ),
+        )
+
+
+def _legacy_adoption_transaction(
+    tmp_path: Path, *, invalid_curation: bool = False
+) -> tuple[CompiledWikiTransaction, LegacyPageAdoption, str]:
+    raw_path = tmp_path / "wiki/legacy.md"
+    raw = (
+        "---\n"
+        "type: Wiki\ncanonical_id: legacy\ntitle: 레거시\ndomain: personal\n"
+        "summary: 기존 정본이다.\nstatus: Canonical\npublish: false\n"
+        "access: local-only\ndifficulty: foundation\nprerequisites: []\n"
+        "next_concepts: []\nrelated: []\nsource_ids: []\nnode_kind: detail\n"
+        "view_mode: article\nparent: '[[wiki/seed|시드]]'\nsequence: 1\n"
+        "updated: '2026-09-04'\n"
+        "---\n\n# 레거시\n\n원문 본문을 보존한다.\n"
+    )
+    raw_path.write_text(raw, encoding="utf-8")
+    raw_sha, body = _digest(raw), "원문 본문을 보존한다.\n"
+    source_id, claim_id = "source://legacy-wiki/wiki/legacy.md", "claim://legacy-wiki/legacy"
+    archive = "wiki/private/_sources/legacy/legacy.md"
+    frontmatter = yaml.safe_load(raw.split("---\n", 3)[1])
+    transaction = CompiledWikiTransaction(
+        expected_revisions={"legacy": None},
+        sources_upsert=(
+            {
+                "source_id": source_id,
+                "kind": "legacy-wiki",
+                "locator": archive,
+                "original_sha256": raw_sha,
+                "normalized_sha256": _digest(_normalize(body)),
+                "privacy": "local-only",
+                "lifecycle": "compiled",
+                "title": "레거시",
+                "body": body,
+            },
+        ),
+        claims_upsert=(
+            {
+                "claim_id": claim_id,
+                "kind": "legacy-document",
+                "status": "accepted",
+                "statement": "레거시",
+                "source_ids": [source_id],
+                "markdown": "",
+            },
+        ),
+        pages_upsert=(
+            {
+                "page_id": "legacy",
+                "output_path": "legacy.md",
+                "title": "레거시",
+                "frontmatter": frontmatter,
+                "source_ids": [source_id],
+                "claim_ids": [claim_id],
+                "render": {"kind": "source-body", "source_id": source_id},
+                "legacy_output_adoption": True,
+            },
+        ),
+        curations_upsert=(
+            {
+                "page_id": "legacy",
+                "current_use": "" if invalid_curation else "기존 정본을 다시 찾는다.",
+                "basis": "legacy-page-metadata",
+                "status": "provisional",
+            },
+        ),
+    )
+    return transaction, LegacyPageAdoption("legacy", "legacy.md", raw_sha, archive), raw
+
+
+def test_legacy_page_adoption_applies_and_archives_exact_raw_bytes(tmp_path: Path) -> None:
+    compiler, service = _service(tmp_path)
+    transaction, adoption, raw = _legacy_adoption_transaction(tmp_path)
+    report = service.apply_legacy_page_adoptions(transaction, (adoption,))
+    assert report.page_ids == ("legacy",)
+    assert (tmp_path / adoption.archive_path).read_text(encoding="utf-8") == raw
+    assert "llm_wiki:" in (tmp_path / "wiki/legacy.md").read_text(encoding="utf-8")
+    assert compiler.audit().complete
+
+
+def test_legacy_page_adoption_restores_raw_bytes_after_compile_failure(tmp_path: Path) -> None:
+    _, service = _service(tmp_path)
+    transaction, adoption, raw = _legacy_adoption_transaction(tmp_path, invalid_curation=True)
+    with pytest.raises(WoonError):
+        service.apply_legacy_page_adoptions(transaction, (adoption,))
+    assert (tmp_path / "wiki/legacy.md").read_text(encoding="utf-8") == raw
+    assert not (tmp_path / adoption.archive_path).exists()
+
+
 def test_book_workflow_progression_starts_at_source_landed() -> None:
     with pytest.raises(WoonError, match="must begin at workflow_phase=source-landed"):
         _validate_book_workflow_progression(
@@ -322,6 +512,46 @@ def test_book_workflow_progression_starts_at_source_landed() -> None:
             _workflow_manifest("translated"),
             "book coverage manifest",
         )
+
+
+def test_book_workflow_progression_allows_independent_toc_index_before_source_landing() -> None:
+    toc_indexed: dict[str, object] = {
+        "schema_version": 3,
+        "workflow_phase": "toc-indexed",
+        "translation_required": True,
+        "edition": {"label": "2판", "source_sha256": "a" * 64},
+        "toc_evidence": [{"locator": "printed TOC", "verified_on": "2026-09-04"}],
+        "phase_evidence": {"toc-indexed": {"locator": "evidence/toc.json", "sha256": "b" * 64}},
+        "source_structure_inventory_evidence": {
+            "locator": "evidence/structure.json",
+            "sha256": "c" * 64,
+            "verified_on": "2026-09-04",
+        },
+        "source_structure_elements": [{"structure_id": "structure:one"}],
+    }
+    source_landed = _workflow_manifest("source-landed")
+    for field in (
+        "edition",
+        "toc_evidence",
+        "source_structure_inventory_evidence",
+        "source_structure_elements",
+    ):
+        source_landed[field] = copy.deepcopy(toc_indexed[field])
+
+    _validate_book_workflow_progression(None, toc_indexed, "book coverage manifest")
+    _validate_book_workflow_progression(toc_indexed, source_landed, "book coverage manifest")
+
+    direct_translation = copy.deepcopy(source_landed)
+    direct_translation["workflow_phase"] = "translated"
+    with pytest.raises(WoonError, match="must advance through source-landed"):
+        _validate_book_workflow_progression(
+            toc_indexed, direct_translation, "book coverage manifest"
+        )
+
+    changed_toc = copy.deepcopy(source_landed)
+    changed_toc["toc_evidence"] = [{"locator": "different TOC"}]
+    with pytest.raises(WoonError, match="verified TOC toc_evidence cannot change"):
+        _validate_book_workflow_progression(toc_indexed, changed_toc, "book coverage manifest")
 
 
 def test_book_workflow_progression_preserves_source_and_translation() -> None:
@@ -387,6 +617,142 @@ def test_source_landed_expansion_is_not_enabled_by_default() -> None:
             current,
             replacement,
             "scoped book coverage manifest",
+        )
+
+
+def test_materialize_book_coverage_scopes_replaces_only_pinned_subtrees() -> None:
+    book = "books/example"
+    chapter_one = f"{book}/chapter-01"
+    old_leaf = f"{chapter_one}/1-1"
+    chapter_two = f"{book}/chapter-02"
+    base = {
+        "schema_version": 3,
+        "book_id": book,
+        "edition": {"label": "1st", "source_sha256": "a" * 64},
+        "source_archive": {"relative_path": "archive.pdf", "sha256": "a" * 64},
+        "translation_required": False,
+        "workflow_phase": "source-landed",
+        "toc_node_count": 3,
+        "toc_leaf_count": 1,
+        "nodes": [
+            {"canonical_id": chapter_one, "leaf": False, "state": "toc-only"},
+            {"canonical_id": old_leaf, "leaf": True, "state": "source-covered"},
+            {"canonical_id": chapter_two, "leaf": False, "state": "toc-only"},
+        ],
+        "source_structure_elements": [
+            {"structure_id": "structure:chapter-one"},
+            {"structure_id": "structure:section-one"},
+            {"structure_id": "structure:chapter-two"},
+        ],
+        "source_structure_assignments": [
+            {
+                "structure_id": "structure:chapter-one",
+                "disposition": "canonical-node",
+                "canonical_id": chapter_one,
+            },
+            {
+                "structure_id": "structure:section-one",
+                "disposition": "canonical-node",
+                "canonical_id": old_leaf,
+            },
+            {
+                "structure_id": "structure:chapter-two",
+                "disposition": "canonical-node",
+                "canonical_id": chapter_two,
+            },
+        ],
+        "source_elements": [{"element_id": "figure:old"}],
+        "source_element_assignments": [
+            {
+                "element_id": "figure:old",
+                "owner_id": old_leaf,
+                "image_target": "archive/old.png",
+            }
+        ],
+        "source_asset_inventory": [
+            {
+                "asset_id": "asset:old",
+                "archive_relative_path": "archive/old.png",
+            }
+        ],
+        "retired_source_section_wrappers": [],
+    }
+    scope = copy.deepcopy(base)
+    scope["nodes"] = [{"canonical_id": chapter_one, "leaf": True, "state": "source-covered"}]
+    scope["source_structure_elements"] = [
+        {"structure_id": "structure:chapter-one"},
+        {"structure_id": "structure:section-one"},
+    ]
+    scope["source_structure_assignments"] = [
+        {
+            "structure_id": "structure:chapter-one",
+            "disposition": "canonical-node",
+            "canonical_id": chapter_one,
+        },
+        {
+            "structure_id": "structure:section-one",
+            "disposition": "in-page-h2",
+            "owner_id": chapter_one,
+            "heading": "## 1.1 첫 절",
+            "source_order": 1,
+        },
+    ]
+    scope["source_elements"] = [{"element_id": "figure:new"}]
+    scope["source_element_assignments"] = [
+        {
+            "element_id": "figure:new",
+            "owner_id": chapter_one,
+            "image_target": "archive/new.png",
+        }
+    ]
+    scope["source_asset_inventory"] = [
+        {
+            "asset_id": "asset:new",
+            "archive_relative_path": "archive/new.png",
+        }
+    ]
+
+    merged = _materialize_book_coverage_scopes(base, (scope,), (chapter_one,))
+
+    assert [node["canonical_id"] for node in merged["nodes"]] == [
+        chapter_one,
+        chapter_two,
+    ]
+    assert merged["toc_node_count"] == 2
+    assert merged["toc_leaf_count"] == 1
+    assert merged["source_structure_assignments"][1]["disposition"] == "in-page-h2"
+    assert merged["source_element_assignments"][0]["owner_id"] == chapter_one
+    assert merged["source_asset_inventory"] == scope["source_asset_inventory"]
+
+
+def test_materialize_book_coverage_scopes_rejects_out_of_scope_owner() -> None:
+    current, _ = _source_landed_extension_fixture()
+    current_assignments = current["source_structure_assignments"]
+    assert isinstance(current_assignments, list)
+    for assignment in current_assignments:
+        assert isinstance(assignment, dict)
+        assignment["disposition"] = "canonical-node"
+    scope = copy.deepcopy(current)
+    for field in (
+        "nodes",
+        "source_structure_elements",
+        "source_structure_assignments",
+        "source_elements",
+        "source_element_assignments",
+        "source_asset_inventory",
+    ):
+        values = scope[field]
+        assert isinstance(values, list)
+        scope[field] = values[:1]
+    assignments = scope["source_structure_assignments"]
+    assert isinstance(assignments, list) and isinstance(assignments[0], dict)
+    assignments[0]["canonical_id"] = "books/other/chapter-01"
+
+    with pytest.raises(WoonError, match="owner is outside its root"):
+        _materialize_book_coverage_scopes(
+            current,
+            (scope,),
+            ("books/example/chapter-01",),
         )
 
 
@@ -504,9 +870,7 @@ def test_compiled_transaction_rejects_stale_revision_before_mutation(tmp_path: P
     outputs_before = compiler.snapshot_outputs()
 
     with pytest.raises(WoonError, match="changed after it was read"):
-        service.apply_compiled_wiki_transaction(
-            _existing_seed_transaction(compiler, "0" * 64)
-        )
+        service.apply_compiled_wiki_transaction(_existing_seed_transaction(compiler, "0" * 64))
 
     assert compiler.snapshot_inputs() == inputs_before
     assert compiler.snapshot_outputs() == outputs_before
@@ -553,9 +917,7 @@ def test_compiled_transaction_rejects_non_exact_existing_source_id(tmp_path: Pat
     transaction = _existing_seed_transaction(compiler, service.get("seed").revision)
 
     with pytest.raises(WoonError, match="source ID collision is not an exact upsert"):
-        service.apply_compiled_wiki_transaction(
-            replace(transaction, sources_upsert=(source,))
-        )
+        service.apply_compiled_wiki_transaction(replace(transaction, sources_upsert=(source,)))
 
 
 def test_compiled_transaction_rolls_back_compile_failure(
@@ -682,9 +1044,9 @@ def test_compiled_transaction_refreshes_navigation_and_receipt(tmp_path: Path) -
     )
 
     assert report.pages_upserted == 2
-    assert "[[wiki/seed/child|개발 참고 0]]" in (
-        tmp_path / "wiki/seed.md"
-    ).read_text(encoding="utf-8")
+    assert "[[wiki/seed/child|개발 참고 0]]" in (tmp_path / "wiki/seed.md").read_text(
+        encoding="utf-8"
+    )
     assert compiler.audit().complete
 
 

@@ -14,6 +14,7 @@ from woon_core.knowledge.book_contract import (
     BOOK_CONTRACT_VERSION,
     BOOK_WORKFLOW_PHASES,
     book_reader_workflow_prose_violation,
+    book_workflow_evidence_phases,
     book_workflow_phase_index,
 )
 from woon_core.knowledge.wiki_tree import (
@@ -446,15 +447,19 @@ def _audit_book_coverage(
             pages,
             errors,
         )
-        element_counts, element_contract_valid = _audit_source_element_contract(
-            prefix,
-            manifest,
-            node_ids,
-            leaf_ids,
-            pages,
-            vault,
-            errors,
-        )
+        if workflow_phase == "toc-indexed":
+            element_counts: dict[tuple[str, str], int] = {}
+            element_contract_valid = True
+        else:
+            element_counts, element_contract_valid = _audit_source_element_contract(
+                prefix,
+                manifest,
+                node_ids,
+                leaf_ids,
+                pages,
+                vault,
+                errors,
+            )
         if not element_contract_valid:
             errors.append(
                 f"{prefix}: runnable audit is incomplete because the source element "
@@ -472,6 +477,8 @@ def _audit_book_coverage(
             locator = _text(node.get("source_locator"))
             leaf = node.get("leaf") is True
             has_direct_content = node.get("has_direct_content")
+            reader_language = _text(node.get("reader_language"))
+            source_prose_verified = node.get("source_prose_verified")
             if not canonical_id:
                 errors.append(f"{label}.canonical_id is required")
                 continue
@@ -489,10 +496,18 @@ def _audit_book_coverage(
                 errors.append(f"{label}.source_locator is required")
             if not isinstance(has_direct_content, bool):
                 errors.append(f"{label}.has_direct_content must be true or false")
+            if workflow_phase == "toc-indexed" and (
+                state != "toc-only"
+                or leaf
+                or has_direct_content is not False
+                or source_prose_verified is not False
+            ):
+                errors.append(
+                    f"{label}: toc-indexed nodes must remain non-leaf toc-only structure "
+                    "without reader content"
+                )
             if leaf and has_direct_content is not True:
                 errors.append(f"{label}: a leaf must declare has_direct_content=true")
-            reader_language = _text(node.get("reader_language"))
-            source_prose_verified = node.get("source_prose_verified")
             if manifest_schema == SCHEMA_VERSION:
                 if re.fullmatch(r"[a-z]{2,3}(?:-[A-Za-z0-9]+)*", reader_language) is None:
                     errors.append(f"{label}.reader_language must be a BCP-47 language tag")
@@ -538,15 +553,11 @@ def _audit_book_coverage(
                 if node.get("leaf") is not False:
                     errors.append(f"{label}: a toc-only node must declare leaf=false")
                 if has_direct_content is not False:
-                    errors.append(
-                        f"{label}: a toc-only node must declare has_direct_content=false"
-                    )
+                    errors.append(f"{label}: a toc-only node must declare has_direct_content=false")
                 if actual is not None:
                     _, metadata, _ = actual
                     if metadata.get("content_state") != "toc-only":
-                        errors.append(
-                            f"{label}: toc-only page must declare content_state=toc-only"
-                        )
+                        errors.append(f"{label}: toc-only page must declare content_state=toc-only")
                     if reader_body.strip():
                         errors.append(f"{label}: toc-only page contains authored prose")
                 continue
@@ -727,13 +738,45 @@ def _audit_workflow_contract(
     workflow_phase = _text(manifest.get("workflow_phase"))
     phase_rank = book_workflow_phase_index(workflow_phase)
     if phase_rank < 0:
-        errors.append(
-            f"{prefix}: workflow_phase must be one of: {', '.join(BOOK_WORKFLOW_PHASES)}"
-        )
+        errors.append(f"{prefix}: workflow_phase must be one of: {', '.join(BOOK_WORKFLOW_PHASES)}")
     translation_required = manifest.get("translation_required")
     if not isinstance(translation_required, bool):
         errors.append(f"{prefix}: translation_required must be true or false")
         translation_required = True
+
+    if workflow_phase == "toc-indexed":
+        forbidden = {
+            "source_archive",
+            "source_asset_inventory",
+            "source_asset_inventory_evidence",
+            "source_element_inventory_evidence",
+            "source_elements",
+            "source_element_assignments",
+        }
+        present = sorted(forbidden.intersection(manifest))
+        if present:
+            errors.append(
+                f"{prefix}: toc-indexed must not claim source archive, asset, or semantic "
+                f"coverage fields: {present!r}"
+            )
+        evidence = manifest.get("phase_evidence")
+        if not isinstance(evidence, dict) or set(evidence) != {"toc-indexed"}:
+            errors.append(
+                f"{prefix}: phase_evidence must contain exactly toc-indexed at TOC-only stage"
+            )
+        else:
+            item = evidence.get("toc-indexed")
+            if not isinstance(item, dict) or set(item) != {"locator", "sha256"}:
+                errors.append(f"{prefix}: phase_evidence.toc-indexed fields are invalid")
+            else:
+                _audit_pinned_evidence(
+                    f"{prefix}: phase_evidence.toc-indexed",
+                    item,
+                    "locator",
+                    "sha256",
+                    errors,
+                )
+        return workflow_phase, translation_required
 
     source_archive = manifest.get("source_archive")
     expected_archive_fields = {"relative_path", "actual_title", "sha256", "privacy"}
@@ -751,8 +794,7 @@ def _audit_workflow_contract(
             bool(relative_path)
             and not candidate.is_absolute()
             and candidate.as_posix() == relative_path
-            and candidate.parts[:5]
-            == ("wiki", "private", "_sources", "knowledge", "local-only")
+            and candidate.parts[:5] == ("wiki", "private", "_sources", "knowledge", "local-only")
             and ".." not in candidate.parts
         )
         if not valid_path:
@@ -763,9 +805,7 @@ def _audit_workflow_contract(
         if not actual_title or Path(actual_title).name != actual_title:
             errors.append(f"{prefix}: source_archive.actual_title must be one file title")
         elif valid_path and candidate.stem != actual_title:
-            errors.append(
-                f"{prefix}: source archive filename must use actual_title exactly"
-            )
+            errors.append(f"{prefix}: source archive filename must use actual_title exactly")
         if _LOWER_SHA256.fullmatch(archive_sha256) is None:
             errors.append(f"{prefix}: source_archive.sha256 must be a lowercase SHA-256")
         edition = manifest.get("edition")
@@ -848,24 +888,25 @@ def _audit_workflow_contract(
                 if not _stable_locator(_text(crop_provenance.get("page_locator"))):
                     errors.append(f"{label}: scan crop page_locator must be stable")
                 crop_box = crop_provenance.get("crop_box")
-                if not isinstance(crop_box, list) or len(crop_box) != 4 or not all(
-                    isinstance(value, (int, float)) and value >= 0 for value in crop_box
+                if (
+                    not isinstance(crop_box, list)
+                    or len(crop_box) != 4
+                    or not all(isinstance(value, (int, float)) and value >= 0 for value in crop_box)
                 ):
                     errors.append(f"{label}: scan crop crop_box must contain four numbers")
                 if not isinstance(crop_provenance.get("render_dpi"), int) or (
                     crop_provenance.get("render_dpi", 0) <= 0
                 ):
                     errors.append(f"{label}: scan crop render_dpi must be positive")
-                if _LOWER_SHA256.fullmatch(
-                    _text(crop_provenance.get("source_page_sha256"))
-                ) is None:
+                if (
+                    _LOWER_SHA256.fullmatch(_text(crop_provenance.get("source_page_sha256")))
+                    is None
+                ):
                     errors.append(
                         f"{label}: scan crop source_page_sha256 must be a lowercase SHA-256"
                     )
         else:
-            errors.append(
-                f"{label}.extraction_kind must be embedded-original or scan-crop"
-            )
+            errors.append(f"{label}.extraction_kind must be embedded-original or scan-crop")
 
     asset_evidence = manifest.get("source_asset_inventory_evidence")
     expected_asset_fields = {
@@ -878,9 +919,7 @@ def _audit_workflow_contract(
         "inventory_sha256",
     }
     if not isinstance(asset_evidence, dict) or set(asset_evidence) != expected_asset_fields:
-        errors.append(
-            f"{prefix}: source_asset_inventory_evidence fields are invalid"
-        )
+        errors.append(f"{prefix}: source_asset_inventory_evidence fields are invalid")
     else:
         _audit_pinned_evidence(
             f"{prefix}: source_asset_inventory_evidence",
@@ -890,22 +929,16 @@ def _audit_workflow_contract(
             errors,
         )
         if not _text(asset_evidence.get("verified_on")):
-            errors.append(
-                f"{prefix}: source_asset_inventory_evidence.verified_on is required"
-            )
+            errors.append(f"{prefix}: source_asset_inventory_evidence.verified_on is required")
         if asset_evidence.get("embedded_original_bytes") is not True:
-            errors.append(
-                f"{prefix}: embedded source images must preserve original bytes"
-            )
+            errors.append(f"{prefix}: embedded source images must preserve original bytes")
         if not isinstance(asset_evidence.get("scan_crop_provenance"), bool):
             errors.append(
                 f"{prefix}: source_asset_inventory_evidence.scan_crop_provenance "
                 "must be true or false"
             )
         if asset_evidence.get("expected_asset_count") != len(asset_inventory):
-            errors.append(
-                f"{prefix}: source asset expected count does not match inventory"
-            )
+            errors.append(f"{prefix}: source asset expected count does not match inventory")
         expected_inventory_sha256 = hashlib.sha256(
             json.dumps(
                 asset_inventory,
@@ -918,15 +951,13 @@ def _audit_workflow_contract(
             errors.append(f"{prefix}: source asset inventory hash does not match")
 
     evidence = manifest.get("phase_evidence")
-    expected_phase_keys = (
-        set(BOOK_WORKFLOW_PHASES[: phase_rank + 1]) if phase_rank >= 0 else set()
-    )
+    reached_phases = book_workflow_evidence_phases(workflow_phase)
+    expected_phase_keys = set(reached_phases)
     if not isinstance(evidence, dict) or set(evidence) != expected_phase_keys:
-        errors.append(
-            f"{prefix}: phase_evidence must contain exactly the reached workflow phases"
-        )
+        errors.append(f"{prefix}: phase_evidence must contain exactly the reached workflow phases")
         evidence = {}
     phase_fields = {
+        "toc-indexed": {"locator", "sha256"},
         "source-landed": {"locator", "sha256"},
         "translated": {"locator", "sha256"},
         "concept-linked": {
@@ -943,7 +974,7 @@ def _audit_workflow_contract(
             "source_session_ids",
         },
     }
-    for phase in BOOK_WORKFLOW_PHASES[: phase_rank + 1]:
+    for phase in reached_phases:
         item = evidence.get(phase)
         if not isinstance(item, dict) or set(item) != phase_fields[phase]:
             errors.append(f"{prefix}: phase_evidence.{phase} fields are invalid")
@@ -962,13 +993,14 @@ def _audit_workflow_contract(
         ):
             if digest_field in item and _LOWER_SHA256.fullmatch(_text(item[digest_field])) is None:
                 errors.append(
-                    f"{prefix}: phase_evidence.{phase}.{digest_field} must be a "
-                    "lowercase SHA-256"
+                    f"{prefix}: phase_evidence.{phase}.{digest_field} must be a lowercase SHA-256"
                 )
         if phase == "understanding-enriched":
             sessions = item.get("source_session_ids")
-            if not isinstance(sessions, list) or not sessions or not all(
-                isinstance(value, str) and value.strip() for value in sessions
+            if (
+                not isinstance(sessions, list)
+                or not sessions
+                or not all(isinstance(value, str) and value.strip() for value in sessions)
             ):
                 errors.append(
                     f"{prefix}: phase_evidence.understanding-enriched.source_session_ids "
@@ -1158,7 +1190,10 @@ def _audit_source_structure_contract(
     canonical_nodes: set[str] = set()
     owned_nodes: set[str] = set()
     owner_by_structure: dict[str, str] = {}
+    assignment_by_structure: dict[str, dict[str, Any]] = {}
     in_page_headings: dict[str, list[tuple[int, int, str]]] = {}
+    toc_headings: dict[str, list[tuple[int, int, str]]] = {}
+    navigation_group_headings: dict[str, list[tuple[int, int, str]]] = {}
     for index, assignment in enumerate(raw_assignments):
         label = f"{prefix}: source_structure_assignments[{index}]"
         if not isinstance(assignment, dict):
@@ -1174,6 +1209,7 @@ def _audit_source_structure_contract(
         if element is None:
             errors.append(f"{label}: assignment references unknown source structure")
             continue
+        assignment_by_structure[structure_id] = assignment
         if disposition == "canonical-node":
             _audit_exact_fields(
                 label,
@@ -1232,16 +1268,158 @@ def _audit_source_structure_contract(
                     f"expected={expected_source_order} actual={heading_source_order}"
                 )
             page = pages.get(owner_id)
-            reader_body = _reader_body(page[2]) if page is not None else ""
-            occurrences = reader_body.splitlines().count(heading) if heading else 0
+            page_body = page[2] if page is not None else ""
+            occurrences = page_body.splitlines().count(heading) if heading else 0
             if occurrences != 1:
                 errors.append(
                     f"{label}: in-page H2 must occur exactly once in the source-body page; "
                     f"actual={occurrences}"
                 )
-            position = reader_body.find(f"{heading}\n") if heading else -1
-            if position < 0 and reader_body.endswith(heading):
-                position = len(reader_body) - len(heading)
+            position = page_body.find(f"{heading}\n") if heading else -1
+            if position < 0 and page_body.endswith(heading):
+                position = len(page_body) - len(heading)
+            owner_headings.append(
+                (
+                    heading_source_order if isinstance(heading_source_order, int) else -1,
+                    position,
+                    heading,
+                )
+            )
+        elif disposition == "toc-heading":
+            _audit_exact_fields(
+                label,
+                assignment,
+                {"structure_id", "disposition", "owner_id", "heading", "source_order"},
+                errors,
+            )
+            owner_id = _text(assignment.get("owner_id"))
+            raw_heading = assignment.get("heading")
+            heading = raw_heading if isinstance(raw_heading, str) else ""
+            heading_source_order = assignment.get("source_order")
+            expected_heading = f"## {_text(element.get('title'))}"
+            owner_by_structure[structure_id] = owner_id
+            if _text(element.get("kind")) not in {"section", "back-matter"}:
+                errors.append(
+                    f"{label}: toc-heading is allowed only for source sections or chapter "
+                    "back matter"
+                )
+            page = pages.get(owner_id)
+            if owner_id not in node_ids or page is None:
+                errors.append(f"{label}: toc-heading owner is not a manifest node: {owner_id}")
+            elif owner_id in leaf_ids:
+                errors.append(f"{label}: toc-heading owner must be a non-leaf toc-only node")
+            elif page[1].get("content_state") != "toc-only":
+                errors.append(f"{label}: toc-heading owner must be a toc-only page")
+            elif _reader_body(page[2]).strip():
+                errors.append(
+                    f"{label}: toc-heading owner must not contain authored prose, code, or images"
+                )
+            if heading != expected_heading:
+                errors.append(
+                    f"{label}.heading must exactly match the source title: {expected_heading}"
+                )
+            owner_headings = toc_headings.setdefault(owner_id, [])
+            expected_source_order = len(owner_headings) + 1
+            if (
+                not isinstance(heading_source_order, int)
+                or isinstance(heading_source_order, bool)
+                or heading_source_order != expected_source_order
+            ):
+                errors.append(
+                    f"{label}.source_order must be the consecutive toc-only source order; "
+                    f"expected={expected_source_order} actual={heading_source_order}"
+                )
+            page_body = page[2] if page is not None else ""
+            occurrences = page_body.splitlines().count(heading) if heading else 0
+            if occurrences != 1:
+                errors.append(
+                    f"{label}: toc-heading H2 must occur exactly once in the generated page; "
+                    f"actual={occurrences}"
+                )
+            position = page_body.find(f"{heading}\n") if heading else -1
+            if position < 0 and page_body.endswith(heading):
+                position = len(page_body) - len(heading)
+            owner_headings.append(
+                (
+                    heading_source_order if isinstance(heading_source_order, int) else -1,
+                    position,
+                    heading,
+                )
+            )
+        elif disposition == "navigation-group-heading":
+            _audit_exact_fields(
+                label,
+                assignment,
+                {"structure_id", "disposition", "owner_id", "label", "source_order"},
+                errors,
+            )
+            owner_id = _text(assignment.get("owner_id"))
+            group_label = _text(assignment.get("label"))
+            heading_source_order = assignment.get("source_order")
+            expected_label = _text(element.get("title"))
+            book_id = _text(manifest.get("book_id"))
+            if _text(element.get("kind")) != "chapter":
+                errors.append(
+                    f"{label}: navigation-group-heading is allowed only for source chapters"
+                )
+            if owner_id != book_id:
+                errors.append(
+                    f"{label}: navigation-group-heading owner must be the book root: {book_id}"
+                )
+            page = pages.get(owner_id)
+            if page is None or page[1].get("entity_kind") != "book":
+                errors.append(
+                    f"{label}: navigation-group-heading owner is not a book root page"
+                )
+            if group_label != expected_label:
+                errors.append(
+                    f"{label}.label must exactly match the source title: {expected_label}"
+                )
+            owner_headings = navigation_group_headings.setdefault(owner_id, [])
+            expected_source_order = len(owner_headings) + 1
+            if (
+                not isinstance(heading_source_order, int)
+                or isinstance(heading_source_order, bool)
+                or heading_source_order != expected_source_order
+            ):
+                errors.append(
+                    f"{label}.source_order must be the consecutive book-root chapter order; "
+                    f"expected={expected_source_order} actual={heading_source_order}"
+                )
+            groups = page[1].get("navigation_groups") if page is not None else None
+            matching_group = None
+            if isinstance(groups, list) and 0 < expected_source_order <= len(groups):
+                candidate = groups[expected_source_order - 1]
+                if isinstance(candidate, dict) and _text(candidate.get("label")) == group_label:
+                    matching_group = candidate
+            if matching_group is None:
+                errors.append(
+                    f"{label}: source chapter must match the book-root navigation group "
+                    "at the declared source order"
+                )
+            else:
+                children = matching_group.get("children")
+                if not isinstance(children, list) or not children:
+                    errors.append(f"{label}: book-root chapter group must contain section pages")
+                else:
+                    for child_id in children:
+                        child = pages.get(_text(child_id))
+                        if child is None or _canonical_parent(child[1].get("parent")) != owner_id:
+                            errors.append(
+                                f"{label}: book-root chapter group child must be a direct "
+                                f"manifest page: {_text(child_id)}"
+                            )
+            page_body = page[2] if page is not None else ""
+            heading = f"## {group_label}" if group_label else ""
+            occurrences = page_body.splitlines().count(heading) if heading else 0
+            if occurrences != 1:
+                errors.append(
+                    f"{label}: chapter H2 must occur exactly once in the generated book root; "
+                    f"actual={occurrences}"
+                )
+            position = page_body.find(f"{heading}\n") if heading else -1
+            if position < 0 and page_body.endswith(heading):
+                position = len(page_body) - len(heading)
             owner_headings.append(
                 (
                     heading_source_order if isinstance(heading_source_order, int) else -1,
@@ -1265,7 +1443,8 @@ def _audit_source_structure_contract(
                 errors.append(f"{label}: metadata_field and reason are required")
         else:
             errors.append(
-                f"{label}.disposition must be canonical-node, in-page-h2, or metadata-only"
+                f"{label}.disposition must be canonical-node, in-page-h2, toc-heading, "
+                "navigation-group-heading, or metadata-only"
             )
 
     for structure_id in sorted(elements.keys() - assignment_counts.keys()):
@@ -1280,6 +1459,75 @@ def _audit_source_structure_contract(
         if any(position < 0 for position in positions) or positions != sorted(positions):
             errors.append(
                 f"{prefix}: in-page H2 order differs from source structure order: {owner_id}"
+            )
+        page = pages.get(owner_id)
+        if page is not None and isinstance(page[1].get("ordered_reader_sections"), list):
+            _audit_ordered_reader_source_structure(
+                prefix,
+                owner_id,
+                page[1],
+                raw_elements,
+                assignment_by_structure,
+                pages,
+                errors,
+            )
+    for owner_id, headings in toc_headings.items():
+        if owner_id not in canonical_nodes:
+            errors.append(
+                f"{prefix}: toc-heading owner must also own one canonical source structure: "
+                f"{owner_id}"
+            )
+        positions = [position for _, position, _ in headings]
+        if any(position < 0 for position in positions) or positions != sorted(positions):
+            errors.append(
+                f"{prefix}: toc-heading H2 order differs from source structure order: {owner_id}"
+            )
+        page = pages.get(owner_id)
+        ordered = page[1].get("ordered_reader_sections") if page is not None else None
+        expected_labels = [heading.removeprefix("## ") for _, _, heading in headings]
+        ordered_labels = (
+            [
+                _text(item.get("label"))
+                for item in ordered
+                if isinstance(item, dict)
+                and item.get("kind") in {"toc-heading", "navigation-group"}
+            ]
+            if isinstance(ordered, list)
+            else []
+        )
+        if (
+            not isinstance(ordered, list)
+            or not any(
+                isinstance(item, dict) and item.get("kind") == "toc-heading"
+                for item in ordered
+            )
+            or any(
+                not isinstance(item, dict)
+                or item.get("kind") not in {"toc-heading", "navigation-group"}
+                for item in ordered
+            )
+            or ordered_labels != expected_labels
+        ):
+            errors.append(
+                f"{prefix}: toc-heading assignments must match ordered_reader_sections "
+                f"exactly: {owner_id}"
+            )
+        elif page is not None:
+            _audit_ordered_reader_source_structure(
+                prefix,
+                owner_id,
+                page[1],
+                raw_elements,
+                assignment_by_structure,
+                pages,
+                errors,
+            )
+    for owner_id, headings in navigation_group_headings.items():
+        positions = [position for _, position, _ in headings]
+        if any(position < 0 for position in positions) or positions != sorted(positions):
+            errors.append(
+                f"{prefix}: book-root chapter H2 order differs from source structure order: "
+                f"{owner_id}"
             )
 
     extra_nodes = node_ids - owned_nodes
@@ -1302,23 +1550,22 @@ def _audit_source_structure_contract(
     repeated_owners = {
         owner_id for owner_id in source_owner_runs if source_owner_runs.count(owner_id) > 1
     }
-    if repeated_owners:
-        if len(repeated_owners) != 1:
+    for repeated_owner in sorted(
+        repeated_owners,
+        key=source_owner_runs.index,
+    ):
+        page = pages.get(repeated_owner)
+        expected_runs = (
+            _ordered_reader_owner_runs(page[1], repeated_owner) if page is not None else None
+        )
+        first = source_owner_runs.index(repeated_owner)
+        last = len(source_owner_runs) - 1 - source_owner_runs[::-1].index(repeated_owner)
+        actual_runs = source_owner_runs[first : last + 1]
+        if expected_runs != actual_runs:
             errors.append(
-                f"{prefix}: source structures for canonical nodes must be contiguous unless "
-                "one book chapter declares exact ordered_reader_sections"
+                f"{prefix}: source structures for one canonical node must be contiguous "
+                "or match ordered_reader_sections exactly: " + repeated_owner
             )
-        else:
-            repeated_owner = next(iter(repeated_owners))
-            page = pages.get(repeated_owner)
-            expected_runs = (
-                _ordered_reader_owner_runs(page[1], repeated_owner) if page is not None else None
-            )
-            if expected_runs != source_owner_runs:
-                errors.append(
-                    f"{prefix}: source structures for one canonical node must be contiguous "
-                    "or match ordered_reader_sections exactly: " + repeated_owner
-                )
     source_node_order = list(dict.fromkeys(source_owner_runs))
     if source_node_order != node_order:
         errors.append(
@@ -1331,8 +1578,8 @@ def _ordered_reader_owner_runs(metadata: dict[str, Any], owner_id: str) -> list[
     """Expand a fail-closed mixed-depth chapter order into source owner runs."""
 
     ordered = metadata.get("ordered_reader_sections")
-    groups = metadata.get("navigation_groups")
-    if not isinstance(ordered, list) or not ordered or not isinstance(groups, list) or not groups:
+    groups = metadata.get("navigation_groups", [])
+    if not isinstance(ordered, list) or not ordered or not isinstance(groups, list):
         return None
     group_children: dict[str, list[str]] = {}
     group_order: list[str] = []
@@ -1355,17 +1602,25 @@ def _ordered_reader_owner_runs(metadata: dict[str, Any], owner_id: str) -> list[
     runs: list[str] = []
     ordered_groups: list[str] = []
     kinds: set[str] = set()
+    toc_mode = any(
+        isinstance(item, dict) and item.get("kind") == "toc-heading" for item in ordered
+    )
+    allowed_kinds = (
+        {"toc-heading", "navigation-group"}
+        if toc_mode
+        else {"source-body", "navigation-group"}
+    )
     for item in ordered:
         if not isinstance(item, dict) or set(item) != {"kind", "label"}:
             return None
         kind = item.get("kind")
         label = item.get("label")
-        if kind not in {"source-body", "navigation-group"}:
+        if kind not in allowed_kinds:
             return None
         if not isinstance(label, str) or not label.strip():
             return None
         kinds.add(kind)
-        if kind == "source-body":
+        if kind in {"source-body", "toc-heading"}:
             runs.append(owner_id)
             continue
         normalized_label = label.strip()
@@ -1373,10 +1628,222 @@ def _ordered_reader_owner_runs(metadata: dict[str, Any], owner_id: str) -> list[
         if children is None:
             return None
         ordered_groups.append(normalized_label)
+        # The navigation group is a real source section owned by the chapter H2.
+        # Keep that owner run before its terminal child pages so adjacent groups
+        # preserve the exact source interleave instead of collapsing together.
+        runs.append(owner_id)
         runs.extend(children)
-    if kinds != {"source-body", "navigation-group"} or ordered_groups != group_order:
+    if (
+        (toc_mode and "toc-heading" not in kinds)
+        or (not toc_mode and kinds != {"source-body", "navigation-group"})
+        or ordered_groups != group_order
+    ):
         return None
     return list(dict.fromkeys(runs)) if len(runs) == len(set(runs)) else _collapse_runs(runs)
+
+
+def _audit_ordered_reader_source_structure(
+    prefix: str,
+    owner_id: str,
+    metadata: dict[str, Any],
+    raw_elements: list[object],
+    assignment_by_structure: dict[str, dict[str, Any]],
+    pages: dict[str, tuple[Path, dict[str, Any], str]],
+    errors: list[str],
+) -> None:
+    """Bind every mixed-depth H2 group to its exact source parent and direct leaves."""
+
+    ordered = metadata.get("ordered_reader_sections")
+    groups = metadata.get("navigation_groups", [])
+    if not isinstance(ordered, list) or not isinstance(groups, list):
+        errors.append(f"{prefix}: ordered reader source structure metadata is invalid: {owner_id}")
+        return
+
+    group_children: dict[str, list[str]] = {}
+    for group in groups:
+        if not isinstance(group, dict) or set(group) != {"label", "children"}:
+            errors.append(
+                f"{prefix}: ordered reader source navigation group is invalid: {owner_id}"
+            )
+            return
+        label = group.get("label")
+        children = group.get("children")
+        if (
+            not isinstance(label, str)
+            or not label.strip()
+            or label.strip() in group_children
+            or not isinstance(children, list)
+            or not children
+            or not all(isinstance(child, str) and child.strip() for child in children)
+        ):
+            errors.append(
+                f"{prefix}: ordered reader source navigation group is invalid: {owner_id}"
+            )
+            return
+        group_children[label.strip()] = [child.strip() for child in children]
+
+    structures = [element for element in raw_elements if isinstance(element, dict)]
+    in_page_by_title: dict[str, list[dict[str, Any]]] = {}
+    toc_heading_by_title: dict[str, list[dict[str, Any]]] = {}
+    canonical_by_owner: dict[str, list[dict[str, Any]]] = {}
+    for element in structures:
+        structure_id = _text(element.get("structure_id"))
+        assignment = assignment_by_structure.get(structure_id)
+        if assignment is None:
+            continue
+        disposition = _text(assignment.get("disposition"))
+        if disposition == "in-page-h2" and _text(assignment.get("owner_id")) == owner_id:
+            in_page_by_title.setdefault(_text(element.get("title")), []).append(element)
+        elif disposition == "toc-heading" and _text(assignment.get("owner_id")) == owner_id:
+            toc_heading_by_title.setdefault(_text(element.get("title")), []).append(element)
+        elif disposition == "canonical-node":
+            canonical_by_owner.setdefault(_text(assignment.get("canonical_id")), []).append(element)
+
+    root_structures = canonical_by_owner.get(owner_id, [])
+    if len(root_structures) != 1:
+        errors.append(
+            f"{prefix}: ordered reader owner must have exactly one canonical source structure: "
+            f"{owner_id}"
+        )
+        return
+
+    expected_structure_ids = [_text(root_structures[0].get("structure_id"))]
+    listed_children: list[str] = []
+    ordered_group_labels: list[str] = []
+    toc_mode = any(
+        isinstance(item, dict) and item.get("kind") == "toc-heading" for item in ordered
+    )
+    heading_by_title = toc_heading_by_title if toc_mode else in_page_by_title
+    for item in ordered:
+        if not isinstance(item, dict) or set(item) != {"kind", "label"}:
+            errors.append(f"{prefix}: ordered reader source section entry is invalid: {owner_id}")
+            return
+        kind = item.get("kind")
+        label = item.get("label")
+        allowed_kinds = (
+            {"toc-heading", "navigation-group"}
+            if toc_mode
+            else {"source-body", "navigation-group"}
+        )
+        if kind not in allowed_kinds or not isinstance(label, str):
+            errors.append(f"{prefix}: ordered reader source section entry is invalid: {owner_id}")
+            return
+        normalized_label = label.strip()
+        matching_parents = heading_by_title.get(normalized_label, [])
+        if len(matching_parents) != 1:
+            errors.append(
+                f"{prefix}: ordered reader H2 must own exactly one matching source section: "
+                f"{normalized_label}"
+            )
+            continue
+        parent_structure = matching_parents[0]
+        expected_structure_ids.append(_text(parent_structure.get("structure_id")))
+        if kind in {"source-body", "toc-heading"}:
+            continue
+
+        ordered_group_labels.append(normalized_label)
+        children = group_children.get(normalized_label)
+        if children is None:
+            errors.append(
+                f"{prefix}: ordered reader source group has no matching navigation group: "
+                f"{normalized_label}"
+            )
+            continue
+        parent_number = _source_section_number(normalized_label)
+        for child_id in children:
+            listed_children.append(child_id)
+            child_structures = canonical_by_owner.get(child_id, [])
+            if len(child_structures) != 1:
+                errors.append(
+                    f"{prefix}: ordered reader child must own exactly one source structure: "
+                    f"{child_id}"
+                )
+                continue
+            child_structure = child_structures[0]
+            child_title = _text(child_structure.get("title"))
+            child_number = _source_section_number(child_title)
+            if (
+                _text(parent_structure.get("kind")) != "section"
+                or _text(child_structure.get("kind")) != "subsection"
+                or parent_number is None
+                or child_number is None
+                or child_number[:-1] != parent_number
+                or len(child_number) != len(parent_number) + 1
+            ):
+                errors.append(
+                    f"{prefix}: ordered reader child is not a direct source subsection of "
+                    f"{normalized_label}: {child_title}"
+                )
+            child_page = pages.get(child_id)
+            if child_page is None or _canonical_parent(child_page[1].get("parent")) != owner_id:
+                errors.append(
+                    f"{prefix}: ordered reader source child is not a direct canonical child: "
+                    f"{child_id}"
+                )
+            elif isinstance(child_page[1].get("navigation_groups"), list) and child_page[1].get(
+                "navigation_groups"
+            ):
+                errors.append(
+                    f"{prefix}: ordered reader source child must be terminal, not a wrapper: "
+                    f"{child_id}"
+                )
+            expected_structure_ids.append(_text(child_structure.get("structure_id")))
+
+    if ordered_group_labels != list(group_children):
+        errors.append(
+            f"{prefix}: ordered reader source groups must match navigation_groups exactly: "
+            f"{owner_id}"
+        )
+
+    group_labels = set(group_children)
+    for canonical_id, (_, page_metadata, _) in pages.items():
+        if canonical_id == owner_id:
+            continue
+        if (
+            _canonical_parent(page_metadata.get("parent")) == owner_id
+            and _text(page_metadata.get("title")) in group_labels
+        ):
+            errors.append(
+                f"{prefix}: ordered reader group must not have a duplicate-title wrapper node: "
+                f"{canonical_id}"
+            )
+
+    listed_child_set = set(listed_children)
+    actual_direct_children = [
+        canonical_id
+        for canonical_id in canonical_by_owner
+        if canonical_id != owner_id
+        and canonical_id in pages
+        and _canonical_parent(pages[canonical_id][1].get("parent")) == owner_id
+        and any(
+            _text(element.get("kind")) == "subsection"
+            for element in canonical_by_owner[canonical_id]
+        )
+    ]
+    if set(actual_direct_children) != listed_child_set:
+        errors.append(
+            f"{prefix}: ordered reader navigation children do not exactly cover direct source "
+            f"subsections: expected={actual_direct_children!r} actual={listed_children!r}"
+        )
+
+    relevant_ids = set(expected_structure_ids)
+    actual_structure_ids = [
+        _text(element.get("structure_id"))
+        for element in structures
+        if _text(element.get("structure_id")) in relevant_ids
+    ]
+    if actual_structure_ids != expected_structure_ids:
+        errors.append(
+            f"{prefix}: ordered reader source assignment differs from exact source order: "
+            f"{owner_id}"
+        )
+
+
+def _source_section_number(title: str) -> tuple[str, ...] | None:
+    match = re.match(r"^(?P<number>(?:[A-Z]|\d+)(?:\.\d+)*)\s+", title)
+    if match is None:
+        return None
+    return tuple(match.group("number").split("."))
 
 
 def _collapse_runs(values: list[str]) -> list[str]:
@@ -2023,8 +2490,7 @@ def _audit_static_source_assignment(
         static_body = _fence_body(reader_body, language, block_index) if language else None
         if static_body is None:
             errors.append(
-                f"{label}: referenced reader static block does not exist: "
-                f"{language}#{block_index}"
+                f"{label}: referenced reader static block does not exist: {language}#{block_index}"
             )
     if static_body is not None:
         if not _code_block_has_executable_content(static_body):
@@ -2074,8 +2540,7 @@ def _audit_static_harness_fidelity(
     span = assignment.get("harness_fidelity_span")
     requires_korean = (
         manifest_schema != SCHEMA_VERSION
-        or book_workflow_phase_index(workflow_phase)
-        >= book_workflow_phase_index("translated")
+        or book_workflow_phase_index(workflow_phase) >= book_workflow_phase_index("translated")
         or (workflow_phase == "source-landed" and reader_language == "ko")
     )
     if not isinstance(span, str) or len(re.sub(r"\s+", "", span)) < 40:
@@ -2389,8 +2854,6 @@ def _audit_book_map_ui(
         if allowed_ids is not None and canonical_id not in allowed_ids:
             continue
         groups = metadata.get("navigation_groups")
-        if not isinstance(groups, list) or not groups:
-            continue
         ordered = metadata.get("ordered_reader_sections")
         reader_body = _reader_body(body).strip()
         if isinstance(ordered, list) and ordered:
@@ -2399,13 +2862,21 @@ def _audit_book_map_ui(
                 path,
                 body,
                 reader_body,
-                groups,
+                groups if isinstance(groups, list) else [],
                 ordered,
                 pages,
                 errors,
             )
             continue
-        if reader_body:
+        if not isinstance(groups, list) or not groups:
+            continue
+        section_reader_map = _is_direct_section_reader_map(
+            book_id,
+            canonical_id,
+            metadata,
+            groups,
+        )
+        if reader_body and not section_reader_map:
             errors.append(f"{path.name}: UI map contains authored prose: {canonical_id}")
         managed_block = _managed_book_map_block(canonical_id, path, body, errors)
         seen_children: set[str] = set()
@@ -2420,7 +2891,7 @@ def _audit_book_map_ui(
             children = group.get("children")
             if not group_label:
                 errors.append(f"{label}.label is required")
-            else:
+            elif not section_reader_map:
                 expected_group_labels.append(group_label)
             if group_label in {
                 "하위 키워드",
@@ -2481,6 +2952,27 @@ def _audit_book_map_ui(
             )
 
 
+def _is_direct_section_reader_map(
+    book_id: str,
+    canonical_id: str,
+    metadata: dict[str, Any],
+    groups: list[object],
+) -> bool:
+    """Recognize a real source section that also indexes deeper subsections."""
+
+    if canonical_id == book_id or _canonical_parent(metadata.get("parent")) != book_id:
+        return False
+    if len(groups) != 1 or not isinstance(groups[0], dict):
+        return False
+    group = groups[0]
+    return (
+        set(group) == {"label", "children"}
+        and _text(group.get("label")) == _text(metadata.get("title"))
+        and isinstance(group.get("children"), list)
+        and bool(group["children"])
+    )
+
+
 def _audit_ordered_book_reader_ui(
     canonical_id: str,
     path: Path,
@@ -2502,6 +2994,85 @@ def _audit_ordered_book_reader_ui(
             f"{path.name}: ordered book reader navigation blocks are missing or unbalanced: "
             f"{canonical_id}"
         )
+        return
+    toc_mode = all(
+        isinstance(item, dict)
+        and set(item) == {"kind", "label"}
+        and item.get("kind") in {"toc-heading", "navigation-group"}
+        and isinstance(item.get("label"), str)
+        and bool(item["label"].strip())
+        for item in ordered
+    ) and any(isinstance(item, dict) and item.get("kind") == "toc-heading" for item in ordered)
+    if toc_mode:
+        if reader_body:
+            errors.append(
+                f"{canonical_id}: toc-heading reader must not contain authored prose, "
+                "code, images, or links"
+            )
+        toc_labels = [
+            str(item.get("label")).strip() for item in ordered if isinstance(item, dict)
+        ]
+        toc_group_by_label: dict[str, list[str]] = {}
+        for group in groups:
+            if not isinstance(group, dict) or set(group) != {"label", "children"}:
+                errors.append(f"{canonical_id}: toc-heading navigation group is invalid")
+                return
+            label = group.get("label")
+            children = group.get("children")
+            if (
+                not isinstance(label, str)
+                or not label.strip()
+                or label.strip() in toc_group_by_label
+                or not isinstance(children, list)
+                or not children
+                or not all(isinstance(child, str) and child.strip() for child in children)
+            ):
+                errors.append(f"{canonical_id}: toc-heading navigation group is invalid")
+                return
+            toc_group_by_label[label.strip()] = [child.strip() for child in children]
+        ordered_group_labels = [
+            str(item.get("label")).strip()
+            for item in ordered
+            if isinstance(item, dict) and item.get("kind") == "navigation-group"
+        ]
+        if ordered_group_labels != list(toc_group_by_label):
+            errors.append(
+                f"{canonical_id}: toc-heading navigation groups differ from exact TOC order"
+            )
+        toc_expected_children: list[str] = []
+        for label in ordered_group_labels:
+            toc_expected_children.extend(toc_group_by_label[label])
+        for child_id in toc_expected_children:
+            child = pages.get(child_id)
+            if child is None or _canonical_parent(child[1].get("parent")) != canonical_id:
+                errors.append(f"{canonical_id}: toc-heading child is not direct: {child_id}")
+                continue
+            if _text(child[1].get("title")) in toc_group_by_label:
+                errors.append(
+                    f"{canonical_id}: toc-heading duplicate-title wrapper is forbidden: {child_id}"
+                )
+        pattern = re.compile(
+            rf"(?ms){re.escape(BOOK_READER_NAVIGATION_START)}\n(?P<body>.*?)"
+            rf"{re.escape(BOOK_READER_NAVIGATION_END)}"
+        )
+        managed = "\n".join(match.group("body") for match in pattern.finditer(body))
+        actual_labels = [
+            match.group("label").strip() for match in _MANAGED_MAP_H2.finditer(managed)
+        ]
+        if actual_labels != toc_labels:
+            errors.append(
+                f"{canonical_id}: toc-heading projection is stale: "
+                f"expected={toc_labels!r}, actual={actual_labels!r}"
+            )
+        actual_children = [
+            _normalized_wikilink_target(match.group("target"))
+            for match in _MANAGED_MAP_LINK.finditer(managed)
+        ]
+        if actual_children != toc_expected_children:
+            errors.append(
+                f"{canonical_id}: toc-heading direct links are stale: "
+                f"expected={toc_expected_children!r}, actual={actual_children!r}"
+            )
         return
     group_by_label: dict[str, list[str]] = {}
     seen_children: set[str] = set()

@@ -11,7 +11,7 @@ import sys
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from woon_core import __version__
 from woon_core.calendar.cli import run_calendar
@@ -65,6 +65,7 @@ from woon_core.knowledge.codex_source_archive import (
 from woon_core.knowledge.codex_source_archive import record_codex_source_bundle
 from woon_core.knowledge.compiled_wiki import (
     BookCoverageManifestUpdate,
+    BookCoverageScopeRevision,
     CompiledWikiTransaction,
     StagedBookAsset,
     VerifiedBookPage,
@@ -1828,6 +1829,8 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
         required_fields.add("staged_assets")
     if isinstance(payload, dict) and "retirement_image_replacements" in payload:
         required_fields.add("retirement_image_replacements")
+    if isinstance(payload, dict) and "retirement_content_relocations" in payload:
+        required_fields.add("retirement_content_relocations")
     require_current_book_contract(payload, "book-promote-retire")
     if not isinstance(payload, dict) or set(payload) != required_fields:
         raise WoonError("book-promote-retire input fields are invalid")
@@ -1877,7 +1880,15 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
     retirement_image_replacements = _parse_retirement_image_replacements(
         payload.get("retirement_image_replacements")
     )
+    retirement_content_relocations = _parse_retirement_content_relocations(
+        payload.get("retirement_content_relocations")
+    )
     _, service = build_knowledge_service(vault)
+    retirement_options: dict[str, Any] = {
+        "retirement_image_replacements": retirement_image_replacements,
+    }
+    if retirement_content_relocations:
+        retirement_options["retirement_content_relocations"] = retirement_content_relocations
     if apply:
         report = service.apply_verified_book_update(
             tuple(pages),
@@ -1886,7 +1897,7 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
             body_sha256,
             coverage_manifest,
             staged_assets,
-            retirement_image_replacements=retirement_image_replacements,
+            **retirement_options,
         )
         print(json.dumps(asdict(report), ensure_ascii=False, indent=2), file=output)
     else:
@@ -1897,7 +1908,7 @@ def _run_atomic_book_update(arguments: list[str], output: TextIO) -> None:
             body_sha256,
             coverage_manifest,
             staged_assets,
-            retirement_image_replacements=retirement_image_replacements,
+            **retirement_options,
         )
         print(json.dumps(asdict(preflight_report), ensure_ascii=False, indent=2), file=output)
 
@@ -1934,6 +1945,34 @@ def _parse_retirement_image_replacements(raw: object) -> dict[str, dict[str, str
                 "book-promote-retire retirement image replacement page must not be empty"
             )
         parsed[page_id.strip()] = page_replacements
+    return parsed
+
+
+def _parse_retirement_content_relocations(raw: object) -> dict[str, tuple[str, ...]]:
+    """Parse exact one-to-many source-element relocation declarations."""
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise WoonError("book-promote-retire retirement_content_relocations must be an object")
+    parsed: dict[str, tuple[str, ...]] = {}
+    for page_id, successors in raw.items():
+        if (
+            not isinstance(page_id, str)
+            or not page_id.strip()
+            or not isinstance(successors, list)
+            or not successors
+            or any(not isinstance(item, str) or not item.strip() for item in successors)
+        ):
+            raise WoonError(
+                "book-promote-retire retirement_content_relocations fields are invalid"
+            )
+        normalized = tuple(item.strip() for item in successors)
+        if len(normalized) != len(set(normalized)):
+            raise WoonError(
+                "book-promote-retire retirement content successors must be unique"
+            )
+        parsed[page_id.strip()] = normalized
     return parsed
 
 
@@ -2012,8 +2051,10 @@ def _run_book_rights_restoration(arguments: list[str], output: TextIO) -> None:
         expected_fields.add("staged_assets")
     if set(payload) != expected_fields:
         raise WoonError("book-rights-restore input fields are invalid")
-    if payload.get("workflow_phase") != "source-landed":
-        raise WoonError("book-rights-restore must begin at source-landed")
+    if payload.get("workflow_phase") not in {"toc-indexed", "source-landed"}:
+        raise WoonError(
+            "book-rights-restore must begin at toc-indexed or source-landed"
+        )
     if payload.get("translation_required") is not False:
         raise WoonError("book-rights-restore for a Korean source requires translation false")
     raw_pages = payload.get("pages")
@@ -2072,11 +2113,18 @@ def _parse_book_coverage_manifest_update(
         "base_expected_sha256",
         "scope_root_id",
     }
-    expected_fields = scope_fields if mode == "merge-scope" else replace_fields
-    if mode not in {"replace", "merge-scope"} or set(raw) != expected_fields:
+    materialize_fields = replace_fields | {"scopes"}
+    expected_fields = (
+        scope_fields
+        if mode == "merge-scope"
+        else materialize_fields
+        if mode == "materialize-scopes"
+        else replace_fields
+    )
+    if mode not in {"replace", "merge-scope", "materialize-scopes"} or set(raw) != expected_fields:
         raise WoonError(
             "book promotion coverage_manifest fields are invalid; explicitly use replace "
-            "or merge-scope with that mode's exact fields"
+            "or merge-scope/materialize-scopes with that mode's exact fields"
         )
     relative_path = raw.get("relative_path")
     expected_sha256 = raw.get("expected_sha256")
@@ -2164,6 +2212,59 @@ def _parse_book_coverage_manifest_update(
             base_relative_path=base_relative_path,
             base_expected_sha256=base_expected_sha256,
             scope_root_id=scope_root_id.strip(),
+        )
+    if mode == "materialize-scopes":
+        raw_scopes = raw.get("scopes")
+        if not isinstance(raw_scopes, list) or not raw_scopes:
+            raise WoonError(
+                "book promotion materialize-scopes requires a non-empty scopes array"
+            )
+        scopes: list[BookCoverageScopeRevision] = []
+        for index, item in enumerate(raw_scopes):
+            if not isinstance(item, dict) or set(item) != {
+                "relative_path",
+                "expected_sha256",
+                "root_id",
+            }:
+                raise WoonError(
+                    f"book promotion materialize-scopes scopes[{index}] fields are invalid"
+                )
+            values = tuple(item.get(key) for key in ("relative_path", "expected_sha256", "root_id"))
+            if not all(isinstance(value, str) and value.strip() for value in values):
+                raise WoonError(
+                    f"book promotion materialize-scopes scopes[{index}] values are required"
+                )
+            scope_relative, scope_sha256, scope_root = values
+            assert isinstance(scope_relative, str)
+            assert isinstance(scope_sha256, str)
+            assert isinstance(scope_root, str)
+            scope_path = Path(scope_relative)
+            if (
+                "\\" in scope_relative
+                or scope_path.is_absolute()
+                or scope_path.as_posix() != scope_relative
+                or scope_path.parts[:2] != ("catalog", "book-coverage-scopes")
+                or len(scope_path.parts) != 4
+                or scope_path.suffix != ".json"
+                or ".." in scope_path.parts
+                or re.fullmatch(r"[0-9a-f]{64}", scope_sha256) is None
+            ):
+                raise WoonError(
+                    f"book promotion materialize-scopes scopes[{index}] path or hash is invalid"
+                )
+            scopes.append(
+                BookCoverageScopeRevision(
+                    relative_path=scope_relative,
+                    expected_sha256=scope_sha256,
+                    root_id=scope_root.strip(),
+                )
+            )
+        return BookCoverageManifestUpdate(
+            mode="materialize-scopes",
+            relative_path=relative_path,
+            expected_sha256=expected_sha256,
+            replacement=replacement,
+            materialized_scopes=tuple(scopes),
         )
     return BookCoverageManifestUpdate(
         mode="replace",

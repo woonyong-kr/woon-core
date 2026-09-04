@@ -22,6 +22,7 @@ from woon_core.knowledge.adapters import (
 from woon_core.knowledge.book_coverage import audit_book_coverage
 from woon_core.knowledge.compiled_wiki import (
     BookCoverageManifestUpdate,
+    BookCoverageScopeRevision,
     CompilationAudit,
     CompiledWiki,
     CompiledWikiSettings,
@@ -30,6 +31,7 @@ from woon_core.knowledge.compiled_wiki import (
     VerifiedBookPage,
     VerifiedBookUpdateReport,
     _contains_mermaid_color_directive,
+    _materialize_book_coverage_scopes,
     _navigation_only_body,
     _normalize_compiled_display_body,
     _relocate_retirement_image_targets,
@@ -503,6 +505,42 @@ def atomic_book_leaf_record(
     )
 
 
+def add_source_free_toc_leaf(compiler: CompiledWiki) -> str:
+    """Add one compiled navigation shell with no source or claim records."""
+
+    root_id = "books/atomic-book"
+    page_id = f"{root_id}/section-shell"
+    sources, claims, pages, curations, _ = compiler._load_inputs()
+    frontmatter = verified_book_frontmatter(page_id, "1.1 빈 목차 절", root_id)
+    frontmatter.update(
+        {
+            "content_state": "toc-only",
+            "source_ids": [],
+            "node_kind": "detail",
+            "view_mode": "article",
+        }
+    )
+    pages[page_id] = {
+        "page_id": page_id,
+        "output_path": f"{page_id}.md",
+        "title": "1.1 빈 목차 절",
+        "frontmatter": frontmatter,
+        "source_ids": [],
+        "claim_ids": [],
+        "render": {"kind": "toc-only"},
+    }
+    curations[page_id] = {
+        "page_id": page_id,
+        "current_use": "원문 절의 목차 위치만 보존한다.",
+        "basis": "manual-review",
+        "status": "confirmed",
+    }
+    pages[root_id]["frontmatter"]["navigation_groups"][0]["children"].append(page_id)
+    compiler._write_inputs(sources, claims, pages, curations)
+    compiler.compile(force=True)
+    return page_id
+
+
 def atomic_book_new_coverage_update(
     vault: Path,
     *,
@@ -551,6 +589,56 @@ def atomic_book_scoped_coverage_update(
         target,
         base_path,
         base_bytes,
+    )
+
+
+def atomic_book_materialized_coverage_update(
+    vault: Path,
+) -> tuple[BookCoverageManifestUpdate, Path, Path, bytes, bytes]:
+    """Create one byte-pinned scope and its exact full-manifest materialization."""
+
+    scoped, scope_path, base_path, base_bytes = atomic_book_scoped_coverage_update(vault)
+    empty_assets: list[dict[str, object]] = []
+    empty_asset_evidence = {
+        "expected_asset_count": 0,
+        "inventory_sha256": hashlib.sha256(b"[]").hexdigest(),
+    }
+    base = json.loads(base_bytes)
+    base["source_asset_inventory"] = empty_assets
+    base["source_asset_inventory_evidence"] = empty_asset_evidence
+    base_bytes = (json.dumps(base, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    base_path.write_bytes(base_bytes)
+    scoped.replacement["source_asset_inventory"] = empty_assets
+    scoped.replacement["source_asset_inventory_evidence"] = empty_asset_evidence
+    scoped.replacement["coverage_scope"]["base_sha256"] = hashlib.sha256(base_bytes).hexdigest()
+    scope_path.parent.mkdir(parents=True, exist_ok=True)
+    scope_bytes = (
+        json.dumps(scoped.replacement, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    scope_path.write_bytes(scope_bytes)
+    replacement = _materialize_book_coverage_scopes(
+        base,
+        (scoped.replacement,),
+        ("books/atomic-book/chapter-01",),
+    )
+    return (
+        BookCoverageManifestUpdate(
+            mode="materialize-scopes",
+            relative_path="catalog/book-coverage/atomic-book.json",
+            expected_sha256=hashlib.sha256(base_bytes).hexdigest(),
+            replacement=replacement,
+            materialized_scopes=(
+                BookCoverageScopeRevision(
+                    relative_path="catalog/book-coverage-scopes/atomic-book/chapter-01.json",
+                    expected_sha256=hashlib.sha256(scope_bytes).hexdigest(),
+                    root_id="books/atomic-book/chapter-01",
+                ),
+            ),
+        ),
+        base_path,
+        scope_path,
+        base_bytes,
+        scope_bytes,
     )
 
 
@@ -633,15 +721,9 @@ def rights_restore_scope_fixture(
     compiler = CompiledWiki(compiled_settings(vault))
     compiler.migrate()
 
-    sources_payload = yaml.safe_load(
-        compiler._settings.sources_path.read_text(encoding="utf-8")
-    )
-    claims_payload = yaml.safe_load(
-        compiler._settings.claims_path.read_text(encoding="utf-8")
-    )
-    pages_payload = yaml.safe_load(
-        compiler._settings.pages_path.read_text(encoding="utf-8")
-    )
+    sources_payload = yaml.safe_load(compiler._settings.sources_path.read_text(encoding="utf-8"))
+    claims_payload = yaml.safe_load(compiler._settings.claims_path.read_text(encoding="utf-8"))
+    pages_payload = yaml.safe_load(compiler._settings.pages_path.read_text(encoding="utf-8"))
     sources_by_id = {item["source_id"]: item for item in sources_payload["sources"]}
     pages_by_id = {item["page_id"]: item for item in pages_payload["pages"]}
     for page_id in (book_id, chapter_id):
@@ -708,9 +790,7 @@ def rights_restore_scope_fixture(
         frontmatter={
             **copy.deepcopy(pages_by_id[chapter_id]["frontmatter"]),
             "book_toc_only": True,
-            "navigation_groups": [
-                {"label": "첫 주제", "children": [f"{chapter_id}/1-1"]}
-            ],
+            "navigation_groups": [{"label": "첫 주제", "children": [f"{chapter_id}/1-1"]}],
         },
     )
     leaf = VerifiedBookPage(
@@ -748,9 +828,7 @@ def test_book_rights_restore_preflight_and_apply_reject_same_omission_before_mut
         )
 
     assert str(apply_error.value) == str(preflight_error.value)
-    assert "must replace every surviving rights page: books/example" in str(
-        preflight_error.value
-    )
+    assert "must replace every surviving rights page: books/example" in str(preflight_error.value)
     assert compiler.snapshot_inputs() == inputs_before
     assert compiler.snapshot_outputs() == outputs_before
 
@@ -848,6 +926,13 @@ def test_normal_full_replacement_allows_only_legacy_rights_toc_normalization(
             **copy.deepcopy(root.frontmatter),
             "book_toc_only": True,
             "content_state": "toc-only",
+            "ordered_reader_sections": [
+                {"kind": "toc-heading", "label": "A.1 첫째 절"},
+                {"kind": "navigation-group", "label": "A.2 둘째 절"},
+            ],
+            "navigation_groups": [
+                {"label": "A.2 둘째 절", "children": [chapter.page_id]}
+            ],
         },
     )
 
@@ -862,6 +947,113 @@ def test_normal_full_replacement_allows_only_legacy_rights_toc_normalization(
         "source-landed",
         allow_legacy_toc_normalization=True,
     )
+
+    invalid_heading = replace(
+        normalized_root,
+        frontmatter={
+            **copy.deepcopy(normalized_root.frontmatter),
+            "ordered_reader_sections": [{"kind": "source-body", "label": "A.1 첫째 절"}],
+        },
+    )
+    with pytest.raises(WoonError, match="carry-forward changed its body"):
+        compiler.validate_book_workflow_pages(
+            (invalid_heading, chapter),
+            "toc-indexed",
+            allow_legacy_toc_normalization=True,
+        )
+
+
+def test_toc_indexed_rights_restore_allows_only_legacy_appendix_toc_normalization(
+    tmp_path: Path,
+) -> None:
+    compiler, _, _, _ = rights_restore_scope_fixture(tmp_path)
+    root, _ = legacy_rights_toc_records(compiler)
+    sources, _, pages, _, _ = compiler._load_inputs()
+    appendix_id = "books/example/appendix-a"
+    current_page = copy.deepcopy(pages[root.page_id])
+    current_page["page_id"] = appendix_id
+    current_page["title"] = "부록 A"
+    candidate = replace(
+        root,
+        page_id=appendix_id,
+        title="부록 A",
+        body="",
+        frontmatter={
+            **copy.deepcopy(root.frontmatter),
+            "book_toc_only": True,
+            "content_state": "toc-only",
+            "ordered_reader_sections": [
+                {"kind": "toc-heading", "label": "A.1 첫째 절"}
+            ],
+        },
+    )
+    appendix_pages = {appendix_id: current_page}
+
+    carry_forward = compiler._validate_book_rights_restore_records(
+        (candidate,),
+        sources,
+        appendix_pages,
+        expected_book_id="books/example",
+        allow_legacy_toc_normalization=True,
+    )
+
+    # A validated legacy rights shell must be rewritten as the explicit empty
+    # toc-only page instead of preserving its old placeholder body.
+    assert carry_forward == set()
+
+    with pytest.raises(WoonError, match="carry-forward changed its body"):
+        compiler._validate_book_rights_restore_records(
+            (replace(candidate, body="임의로 바꾼 본문이다.\n"),),
+            sources,
+            appendix_pages,
+            expected_book_id="books/example",
+            allow_legacy_toc_normalization=True,
+        )
+
+
+def test_rights_restore_writer_enables_legacy_toc_normalization_only_at_toc_indexed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler, root, _, _ = rights_restore_scope_fixture(tmp_path)
+    observed: list[bool] = []
+
+    class ValidationReached(RuntimeError):
+        pass
+
+    def capture_validation(*args: object, **kwargs: object) -> set[str]:
+        del args
+        observed.append(bool(kwargs.get("allow_legacy_toc_normalization")))
+        raise ValidationReached
+
+    monkeypatch.setattr(
+        compiler,
+        "_validate_book_rights_restore_records",
+        capture_validation,
+    )
+    for phase, expected in (("toc-indexed", True), ("source-landed", False)):
+        coverage = BookCoverageManifestUpdate(
+            mode="replace",
+            relative_path=f"catalog/book-coverage/{phase}.json",
+            expected_sha256=None,
+            replacement={
+                "schema_version": 3,
+                "book_id": "books/example",
+                "workflow_phase": phase,
+                "translation_required": False,
+            },
+        )
+
+        with pytest.raises(ValidationReached):
+            compiler.apply_verified_book_update(
+                (root,),
+                {},
+                {},
+                coverage,
+                rights_restore_book_id="books/example",
+            )
+
+        assert observed[-1] is expected
 
 
 @pytest.mark.parametrize(
@@ -1496,9 +1688,7 @@ def test_verified_book_asset_preflight_rejects_tampered_staging_bytes(
     intended = b"original source image"
     digest = hashlib.sha256(intended).hexdigest()
     source_locator = "source://atomic-book#images/figure.png"
-    relative = (
-        "wiki/private/_sources/knowledge/local-only/atomic-book/images/figure.png"
-    )
+    relative = "wiki/private/_sources/knowledge/local-only/atomic-book/images/figure.png"
     coverage_update.replacement["source_asset_inventory"] = [
         {
             "asset_id": f"asset:{digest}",
@@ -1535,9 +1725,7 @@ def scan_crop_asset_fixture(
 
     compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
     coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
-    pdf_relative = (
-        "wiki/private/_sources/knowledge/local-only/atomic-book/Atomic Book.pdf"
-    )
+    pdf_relative = "wiki/private/_sources/knowledge/local-only/atomic-book/Atomic Book.pdf"
     pdf_path = tmp_path / pdf_relative
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     writer = PdfWriter()
@@ -1560,8 +1748,7 @@ def scan_crop_asset_fixture(
     page_locator = "source://atomic-book/Atomic%20Book.pdf#PDF-page-1"
     source_locator = f"{page_locator}:crop-10,10,200,200"
     archive_relative = (
-        "wiki/private/_sources/knowledge/local-only/"
-        "atomic-book/images/chapter-01/figure-1-1.png"
+        "wiki/private/_sources/knowledge/local-only/atomic-book/images/chapter-01/figure-1-1.png"
     )
     coverage_update.replacement["source_asset_inventory"] = [
         {
@@ -1713,10 +1900,7 @@ def test_verified_book_asset_landing_rolls_back_new_and_preserves_existing_bytes
         content = f"source-{name}".encode()
         digest = hashlib.sha256(content).hexdigest()
         source_locator = f"source://atomic-book#images/{name}"
-        relative = (
-            "wiki/private/_sources/knowledge/local-only/"
-            f"atomic-book/images/{name}"
-        )
+        relative = f"wiki/private/_sources/knowledge/local-only/atomic-book/images/{name}"
         staging = tmp_path / f"staged-source-assets/{name}"
         staging.parent.mkdir(exist_ok=True)
         staging.write_bytes(content)
@@ -1755,9 +1939,7 @@ def test_verified_book_asset_landing_rolls_back_new_and_preserves_existing_bytes
     monkeypatch.setattr(compiler, "apply_verified_book_update", fail_after_asset_install)
 
     with pytest.raises(RuntimeError, match="injected book transaction failure"):
-        service.apply_verified_book_update(
-            (record,), {}, {}, {}, coverage_update, tuple(assets)
-        )
+        service.apply_verified_book_update((record,), {}, {}, {}, coverage_update, tuple(assets))
 
     assert not destinations[0].exists()
     assert destinations[1].read_bytes() == existing_bytes
@@ -2100,10 +2282,12 @@ def test_verified_book_preflight_runs_cloned_writer_and_cleans_temporary_vault(
         *,
         rights_restore_book_id: str | None = None,
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> VerifiedBookUpdateReport:
         del pages, replacements, retirement_body_sha256, coverage_manifest
         assert rights_restore_book_id is None
         assert retirement_image_replacements is None
+        assert retirement_content_relocations is None
         assert self.vault != compiler.vault
         dry_vaults.append(self.vault)
         (self.vault / "dry-run-writer-ran").write_text("yes", encoding="utf-8")
@@ -2578,6 +2762,177 @@ def test_atomic_verified_book_update_restores_inputs_outputs_and_index_on_failur
     assert compiler.audit().complete
 
 
+def test_atomic_materialized_scope_update_restores_consumed_scope_on_index_failure(
+    tmp_path: Path,
+) -> None:
+    compiler, service, index, record, wrapper_revision, wrapper_body_sha256 = (
+        atomic_book_service(tmp_path)
+    )
+    update, base_path, scope_path, base_bytes, scope_bytes = (
+        atomic_book_materialized_coverage_update(tmp_path)
+    )
+    wrapper_id = "books/atomic-book/part-01"
+    input_before = compiler.snapshot_inputs(extra_paths=(base_path, scope_path))
+    output_before = compiler.snapshot_outputs()
+    generation_before = index.generation()
+    index.fail_next = True
+
+    with pytest.raises(RuntimeError, match="injected index failure"):
+        service.apply_verified_book_update(
+            (record,),
+            {wrapper_id: "books/atomic-book"},
+            {wrapper_id: wrapper_revision},
+            {wrapper_id: wrapper_body_sha256},
+            update,
+        )
+
+    assert compiler.snapshot_inputs(extra_paths=(base_path, scope_path)) == input_before
+    assert compiler.snapshot_outputs() == output_before
+    assert base_path.read_bytes() == base_bytes
+    assert scope_path.read_bytes() == scope_bytes
+    assert index.generation() == generation_before
+    assert service.get(wrapper_id) is not None
+
+
+def test_merge_scope_rejects_materialized_scope_api_field(tmp_path: Path) -> None:
+    compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
+    scoped, _, _, _ = atomic_book_scoped_coverage_update(tmp_path)
+    poisoned = replace(
+        scoped,
+        materialized_scopes=(
+            BookCoverageScopeRevision(
+                relative_path="catalog/book-coverage-scopes/atomic-book/chapter-01.json",
+                expected_sha256="a" * 64,
+                root_id="books/atomic-book/chapter-01",
+            ),
+        ),
+    )
+
+    with pytest.raises(WoonError, match="must not declare materialized scopes"):
+        compiler._validated_coverage_manifest_update(poisoned)
+
+
+def test_materialize_scopes_rejects_duplicate_scope_paths(tmp_path: Path) -> None:
+    compiler, _, _, _, _, _ = atomic_book_service(tmp_path)
+    update, _, _, _, _ = atomic_book_materialized_coverage_update(tmp_path)
+    first = update.materialized_scopes[0]
+    duplicate_path = replace(first, root_id="books/atomic-book/chapter-02")
+    poisoned = replace(update, materialized_scopes=(first, duplicate_path))
+
+    with pytest.raises(WoonError, match="scope paths must be unique"):
+        compiler._validated_coverage_manifest_update(poisoned)
+
+
+def test_materialize_scopes_inherits_omitted_archive_and_preserves_absent_semantics(
+    tmp_path: Path,
+) -> None:
+    scoped, _, _, base_bytes = atomic_book_scoped_coverage_update(tmp_path)
+    base = json.loads(base_bytes)
+    scope = copy.deepcopy(scoped.replacement)
+    root_id = "books/atomic-book/chapter-01"
+    base["source_archive"] = {
+        "relative_path": "wiki/private/_sources/books/atomic-book.pdf",
+        "sha256": "a" * 64,
+    }
+
+    # Model a toc-indexed fragment created before source/archive materialization:
+    # it owns structure and nodes but intentionally omits semantic and asset fields.
+    scope.pop("source_archive", None)
+    scope["workflow_phase"] = "toc-indexed"
+    scope.pop("source_elements")
+    scope.pop("source_element_assignments")
+    scope.pop("source_asset_inventory", None)
+    for assignment in base["source_element_assignments"]:
+        assignment["owner_id"] = "books/atomic-book/chapter-02"
+
+    merged = _materialize_book_coverage_scopes(base, (scope,), (root_id,))
+
+    assert merged["source_archive"] == base["source_archive"]
+    assert merged.get("workflow_phase") == base.get("workflow_phase")
+    assert merged["source_elements"] == base["source_elements"]
+    assert merged["source_element_assignments"] == base["source_element_assignments"]
+
+
+def test_materialize_scopes_rejects_omitted_semantics_for_populated_root(
+    tmp_path: Path,
+) -> None:
+    scoped, _, _, base_bytes = atomic_book_scoped_coverage_update(tmp_path)
+    base = json.loads(base_bytes)
+    scope = copy.deepcopy(scoped.replacement)
+    scope.pop("source_elements")
+    scope.pop("source_element_assignments")
+
+    with pytest.raises(WoonError, match="omitted semantic inventory for a populated root"):
+        _materialize_book_coverage_scopes(
+            base,
+            (scope,),
+            ("books/atomic-book/chapter-01",),
+        )
+
+
+def test_source_landed_progression_allows_declared_retirement_relocation() -> None:
+    retired_id = "books/example/chapter-01"
+    leaf_id = f"{retired_id}/1-1"
+    current = {
+        "schema_version": 3,
+        "workflow_phase": "source-landed",
+        "translation_required": False,
+        "edition": {"label": "1판", "source_sha256": "a" * 64},
+        "source_archive": {"relative_path": "book.pdf", "sha256": "a" * 64},
+        "phase_evidence": {"source-landed": {"sha256": "b" * 64}},
+        "retired_source_section_wrappers": [],
+        "nodes": [{"canonical_id": retired_id}],
+        "source_structure_elements": [{"structure_id": "structure:1"}],
+        "source_structure_assignments": [
+            {
+                "structure_id": "structure:1",
+                "disposition": "canonical-node",
+                "canonical_id": retired_id,
+            }
+        ],
+        "source_elements": [{"element_id": "claim:1"}],
+        "source_element_assignments": [
+            {"element_id": "claim:1", "owner_id": retired_id}
+        ],
+        "source_asset_inventory": [],
+        "source_structure_inventory_evidence": {"sha256": "c" * 64},
+        "source_element_inventory_evidence": {"sha256": "d" * 64},
+        "source_asset_inventory_evidence": {
+            "expected_asset_count": 0,
+            "inventory_sha256": hashlib.sha256(b"[]").hexdigest(),
+        },
+        "toc_evidence": [],
+        "toc_node_count": 1,
+        "toc_leaf_count": 1,
+    }
+    replacement = copy.deepcopy(current)
+    replacement["nodes"] = [{"canonical_id": leaf_id}]
+    replacement["source_structure_assignments"][0] = {
+        "structure_id": "structure:1",
+        "disposition": "navigation-group-heading",
+        "owner_id": "books/example",
+    }
+    replacement["source_element_assignments"][0]["owner_id"] = leaf_id
+    replacement["source_structure_inventory_evidence"] = {"sha256": "e" * 64}
+    replacement["source_element_inventory_evidence"] = {"sha256": "f" * 64}
+
+    with pytest.raises(WoonError, match="cannot delete existing canonical_id"):
+        compiled_wiki_module._validate_book_workflow_progression(
+            current,
+            replacement,
+            "book coverage manifest",
+            allow_source_landed_expansion=True,
+        )
+
+    compiled_wiki_module._validate_book_workflow_progression(
+        current,
+        replacement,
+        "book coverage manifest",
+        allow_source_landed_expansion=True,
+        allowed_retired_ids={retired_id},
+    )
+
+
 def test_atomic_verified_book_update_restores_compiler_state_on_final_audit_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2818,6 +3173,61 @@ def test_atomic_verified_book_update_refuses_to_retire_reader_content(
     assert compiler.snapshot_outputs() == output_before
 
 
+def test_retirement_content_relocation_accepts_exact_one_to_many_source_split(
+    tmp_path: Path,
+) -> None:
+    compiler, _, _, root_record, _, _ = atomic_book_service(tmp_path)
+    update, path, _ = atomic_book_coverage_update(tmp_path)
+    current = json.loads(path.read_text(encoding="utf-8"))
+    original_element = current["source_elements"][0]
+    second_element = dict(original_element)
+    second_element["element_id"] = "claim:" + "b" * 64
+    second_element["source_locator"] = "source://atomic-book#chapter-01-paragraph-02"
+    current["source_elements"].append(second_element)
+    second_assignment = dict(current["source_element_assignments"][0])
+    second_assignment["element_id"] = second_element["element_id"]
+    second_assignment["delivery_span"] = "둘째 절로 이동할 원문이다."
+    second_assignment["delivery_span_sha256"] = hashlib.sha256(
+        second_assignment["delivery_span"].encode("utf-8")
+    ).hexdigest()
+    current["source_element_assignments"].append(second_assignment)
+    current_bytes = (json.dumps(current, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    path.write_bytes(current_bytes)
+
+    first_id = "books/atomic-book/chapter-01/1-1"
+    second_id = "books/atomic-book/chapter-01/1-2"
+    replacement = copy.deepcopy(current)
+    replacement["source_element_assignments"][0]["owner_id"] = first_id
+    replacement["source_element_assignments"][1]["owner_id"] = second_id
+    split_update = replace(
+        update,
+        expected_sha256=hashlib.sha256(current_bytes).hexdigest(),
+        replacement=replacement,
+    )
+    records = (
+        replace(root_record, page_id=first_id, expected_revision=None),
+        replace(root_record, page_id=second_id, expected_revision=None),
+    )
+
+    relocated = compiler._validate_retirement_content_relocations(
+        records,
+        {"books/atomic-book/chapter-01": first_id},
+        split_update,
+        {"books/atomic-book/chapter-01": (first_id, second_id)},
+    )
+
+    assert relocated == {"books/atomic-book/chapter-01"}
+
+    replacement["source_element_assignments"][1]["delivery_span"] = "변조된 전달"
+    with pytest.raises(WoonError, match="changed source delivery evidence"):
+        compiler._validate_retirement_content_relocations(
+            records,
+            {"books/atomic-book/chapter-01": first_id},
+            split_update,
+            {"books/atomic-book/chapter-01": (first_id, second_id)},
+        )
+
+
 def test_atomic_verified_book_update_preserves_reviewed_reader_body_in_replacement(
     tmp_path: Path,
 ) -> None:
@@ -2879,6 +3289,64 @@ def test_atomic_verified_book_update_hashes_body_after_generated_views_are_remov
     assert report.retired_page_ids == (wrapper_id,)
     assert reader_body.strip() in service.get(leaf_id).body
     assert compiler.audit().complete
+
+
+def test_atomic_verified_book_update_accepts_source_free_toc_only_leaf_shell(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, wrapper_revision, wrapper_body_sha256 = atomic_book_service(
+        tmp_path
+    )
+    shell_id = add_source_free_toc_leaf(compiler)
+    service.reindex()
+    root_id = "books/atomic-book"
+    wrapper_id = f"{root_id}/part-01"
+    shell = service.get(shell_id)
+    root = service.get(root_id)
+    assert shell is not None
+    assert root is not None
+    assert shell.body == ""
+    shell_body_sha256 = hashlib.sha256(shell.body.encode("utf-8")).hexdigest()
+
+    report = service.apply_verified_book_update(
+        (replace(record, expected_revision=root.revision),),
+        {wrapper_id: root_id, shell_id: root_id},
+        {wrapper_id: wrapper_revision, shell_id: shell.revision},
+        {wrapper_id: wrapper_body_sha256, shell_id: shell_body_sha256},
+    )
+
+    assert report.retired_page_ids == (wrapper_id, shell_id)
+    with pytest.raises(WoonError, match="canonical document not found"):
+        service.get(wrapper_id)
+    with pytest.raises(WoonError, match="canonical document not found"):
+        service.get(shell_id)
+    assert compiler.audit().complete
+
+
+def test_source_free_toc_only_leaf_retirement_rejects_authored_prose(
+    tmp_path: Path,
+) -> None:
+    compiler, service, _, record, _, _ = atomic_book_service(tmp_path)
+    shell_id = add_source_free_toc_leaf(compiler)
+    shell_path = tmp_path / "wiki" / f"{shell_id}.md"
+    shell_path.write_text(
+        shell_path.read_text(encoding="utf-8") + "\n이 문장은 보존해야 하는 독자 본문이다.\n",
+        encoding="utf-8",
+    )
+    shell = service.get(shell_id)
+    root = service.get("books/atomic-book")
+    assert shell is not None
+    assert root is not None
+    body_sha256 = hashlib.sha256(_retirement_body(shell.body).encode("utf-8")).hexdigest()
+
+    with pytest.raises(WoonError, match="contains authored reader content"):
+        service.preflight_verified_book_update(
+            (replace(record, expected_revision=root.revision),),
+            {shell_id: "books/atomic-book"},
+            {shell_id: shell.revision},
+            {shell_id: body_sha256},
+            None,
+        )
 
 
 def test_retirement_body_excludes_previous_next_navigation() -> None:

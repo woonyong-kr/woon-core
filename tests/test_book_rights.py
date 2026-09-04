@@ -24,6 +24,7 @@ from woon_core.knowledge.compiled_wiki import (
     StagedBookAsset,
     VerifiedBookPage,
     _flatten_navigation_groups,
+    _inactive_revision_error,
     _validate_rights_toc_body,
 )
 from woon_core.knowledge.service import KnowledgeService
@@ -284,6 +285,178 @@ def test_book_rights_restore_rejects_source_free_non_toc_page() -> None:
         )
 
 
+def test_book_rights_restore_skips_explicit_source_free_toc_page_only_when_allowed() -> None:
+    page_id = f"{BOOK_ID}/chapter-01/1-1"
+    record = VerifiedBookPage(
+        page_id=page_id,
+        title="1.1 목차 항목",
+        body="",
+        statement="검증된 목차를 탐색한다.",
+        current_use="원문 정리 전에 목차를 탐색한다.",
+        source_locator="source://example#toc=1.1",
+        source_sha256=DIGEST,
+        frontmatter={"content_state": "toc-only"},
+        expected_revision=None,
+    )
+    pages = {
+        page_id: {
+            "source_ids": [],
+            "claim_ids": [],
+            "render": {"kind": "toc-only"},
+        }
+    }
+
+    CompiledWiki._retire_book_rights_decisions(
+        BOOK_ID,
+        (record,),
+        {},
+        {},
+        pages,
+        restored_page_ids={page_id},
+        allow_source_free_toc_only=True,
+    )
+
+    assert pages[page_id]["source_ids"] == []
+    assert pages[page_id]["claim_ids"] == []
+
+
+def test_toc_indexed_rights_restore_terminates_rights_records_without_self_cycle() -> None:
+    page_id = f"{BOOK_ID}/appendix-a"
+    rights_source = f"source://book-rights/{BOOK_ID}/notice/appendix-a"
+    rights_claim = f"claim://book-rights/{BOOK_ID}/notice/appendix-a"
+    sources = {
+        rights_source: {
+            "source_id": rights_source,
+            "kind": "book-rights-decision",
+            "lifecycle": "compiled",
+        }
+    }
+    claims = {
+        rights_claim: {
+            "claim_id": rights_claim,
+            "kind": "book-rights-decision",
+            "status": "accepted",
+            "source_ids": [rights_source],
+        }
+    }
+    pages = {
+        page_id: {
+            "source_ids": [rights_source],
+            "claim_ids": [rights_claim],
+            "render": {"kind": "toc-only"},
+            "frontmatter": {"source_ids": [rights_source]},
+        }
+    }
+    record = VerifiedBookPage(
+        page_id=page_id,
+        title="부록 A",
+        body="",
+        statement="검증된 부록 목차를 탐색한다.",
+        current_use="원문 정리 전에 부록 목차를 탐색한다.",
+        source_locator="source://example#appendix-a",
+        source_sha256=DIGEST,
+        frontmatter={"content_state": "toc-only"},
+        expected_revision=None,
+    )
+
+    CompiledWiki._retire_book_rights_decisions(
+        BOOK_ID,
+        (record,),
+        sources,
+        claims,
+        pages,
+        restored_page_ids={page_id},
+        allow_source_free_toc_only=True,
+    )
+
+    assert pages[page_id]["source_ids"] == []
+    assert pages[page_id]["claim_ids"] == []
+    assert pages[page_id]["frontmatter"] == {"source_ids": []}
+    assert sources[rights_source]["lifecycle"] == "archived"
+    assert "superseded_by" not in sources[rights_source]
+    assert claims[rights_claim]["status"] == "superseded"
+    assert "superseded_by" not in claims[rights_claim]
+    assert (
+        _inactive_revision_error(
+            rights_source,
+            sources[rights_source],
+            sources,
+            set(),
+            state_key="lifecycle",
+            inactive_state="archived",
+            record_label="source",
+        )
+        is None
+    )
+
+    cyclic_source = {**sources[rights_source], "superseded_by": rights_source}
+    assert _inactive_revision_error(
+        rights_source,
+        cyclic_source,
+        {rights_source: cyclic_source},
+        set(),
+        state_key="lifecycle",
+        inactive_state="archived",
+        record_label="source",
+    ) == "source supersession chain contains a cycle"
+
+    ordinary_source = {"kind": "book", "lifecycle": "archived"}
+    assert _inactive_revision_error(
+        "source://ordinary",
+        ordinary_source,
+        {"source://ordinary": ordinary_source},
+        set(),
+        state_key="lifecycle",
+        inactive_state="archived",
+        record_label="source",
+    ) == "inactive source has no superseded_by"
+
+
+@pytest.mark.parametrize(
+    "page",
+    (
+        {"source_ids": [], "claim_ids": [], "render": {"kind": "source-body"}},
+        {
+            "source_ids": [],
+            "claim_ids": ["claim://unexpected"],
+            "render": {"kind": "toc-only"},
+        },
+    ),
+)
+def test_book_rights_restore_rejects_other_source_free_pages(
+    page: dict[str, object],
+) -> None:
+    page_id = f"{BOOK_ID}/chapter-01/1-1"
+    record = VerifiedBookPage(
+        page_id=page_id,
+        title="1.1 목차 항목",
+        body="",
+        statement="검증된 목차를 탐색한다.",
+        current_use="원문 정리 전에 목차를 탐색한다.",
+        source_locator="source://example#toc=1.1",
+        source_sha256=DIGEST,
+        frontmatter={"content_state": "toc-only"},
+        expected_revision=None,
+    )
+
+    with pytest.raises(
+        WoonError,
+        match=(
+            "page source_ids must be a non-empty string list|"
+            "replacement page has no current source"
+        ),
+    ):
+        CompiledWiki._retire_book_rights_decisions(
+            BOOK_ID,
+            (record,),
+            {},
+            {"claim://unexpected": {"claim_id": "claim://unexpected"}},
+            {page_id: page},
+            restored_page_ids={page_id},
+            allow_source_free_toc_only=True,
+        )
+
+
 def test_load_book_rights_demotion_rejects_archive_escape(tmp_path: Path) -> None:
     value = payload()
     rights = dict(value["rights_evidence"])  # type: ignore[arg-type]
@@ -471,7 +644,7 @@ def test_book_rights_restore_rolls_back_intake_and_coverage_on_writer_failure(
         replacement={
             "schema_version": 3,
             "book_id": BOOK_ID,
-            "workflow_phase": "source-landed",
+            "workflow_phase": "toc-indexed",
             "translation_required": False,
             "edition": {"source_sha256": source_hash},
         },
@@ -479,12 +652,12 @@ def test_book_rights_restore_rolls_back_intake_and_coverage_on_writer_failure(
     page = VerifiedBookPage(
         page_id=BOOK_ID,
         title="Example",
-        body="원문 본문이다.\n",
-        statement="원문을 보존한다.",
-        current_use="책을 읽을 때 사용한다.",
+        body="",
+        statement="검증된 목차를 탐색한다.",
+        current_use="원문을 정리하기 전에 목차를 탐색한다.",
         source_locator="source://example#page=1",
         source_sha256=source_hash,
-        frontmatter={"access": "local-only"},
+        frontmatter={"access": "local-only", "content_state": "toc-only"},
         expected_revision=None,
     )
 
@@ -568,6 +741,22 @@ def test_book_rights_restore_rolls_back_intake_and_coverage_on_writer_failure(
         cast(object, SimpleNamespace()),  # history is not used by this transaction
         compiled_wiki=compiler,
     )
+
+    invalid_coverage = BookCoverageManifestUpdate(
+        mode=coverage.mode,
+        relative_path=coverage.relative_path,
+        expected_sha256=coverage.expected_sha256,
+        replacement={**coverage.replacement, "source_elements": []},
+    )
+    with pytest.raises(
+        WoonError,
+        match="toc-indexed coverage must not claim source archive, asset, or semantic",
+    ):
+        service.preflight_book_rights_restoration(
+            request,
+            (page,),
+            invalid_coverage,
+        )
 
     with pytest.raises(RuntimeError, match="injected restore writer failure"):
         service.preflight_book_rights_restoration(request, (page,), coverage)

@@ -23,6 +23,7 @@ from woon_core.knowledge.book_contract import (
 from woon_core.knowledge.book_rights import BookRightsRestorationReport
 from woon_core.knowledge.compiled_wiki import (
     BookCoverageManifestUpdate,
+    BookCoverageScopeRevision,
     CompileReport,
     CuratedRevisionReport,
     RevisionReconciliationReport,
@@ -810,6 +811,7 @@ def test_book_promotion_coverage_parser_accepts_new_manifest_with_null_revision(
         },
         vault,
     )
+
     assert update == BookCoverageManifestUpdate(
         mode="replace",
         relative_path="catalog/book-coverage/new-book.json",
@@ -862,6 +864,78 @@ def test_book_promotion_coverage_parser_accepts_explicit_merge_scope(
         scope_root_id=scope_root_id,
     )
 
+
+def test_book_promotion_coverage_parser_accepts_materialize_scopes(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    base_relative_path = "catalog/book-coverage/kotlin.json"
+    base_path = vault / base_relative_path
+    base_path.parent.mkdir(parents=True)
+    base_bytes = b'{"book_id":"books/kotlin","nodes":[]}\n'
+    base_path.write_bytes(base_bytes)
+    base_sha256 = hashlib.sha256(base_bytes).hexdigest()
+    scope_relative_path = "catalog/book-coverage-scopes/kotlin/chapter-02.json"
+
+    update = cli._parse_book_coverage_manifest_update(  # noqa: SLF001
+        {
+            "mode": "materialize-scopes",
+            "relative_path": base_relative_path,
+            "expected_sha256": base_sha256,
+            "replacement": {"book_id": "books/kotlin", "nodes": []},
+            "scopes": [
+                {
+                    "relative_path": scope_relative_path,
+                    "expected_sha256": "b" * 64,
+                    "root_id": "books/kotlin/chapter-02",
+                }
+            ],
+        },
+        vault,
+    )
+
+    assert update == BookCoverageManifestUpdate(
+        mode="materialize-scopes",
+        relative_path=base_relative_path,
+        expected_sha256=base_sha256,
+        replacement={"book_id": "books/kotlin", "nodes": []},
+        materialized_scopes=(
+            BookCoverageScopeRevision(
+                relative_path=scope_relative_path,
+                expected_sha256="b" * 64,
+                root_id="books/kotlin/chapter-02",
+            ),
+        ),
+    )
+
+
+def test_book_promotion_coverage_parser_rejects_unsafe_materialized_scope(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    base_relative_path = "catalog/book-coverage/kotlin.json"
+    base_path = vault / base_relative_path
+    base_path.parent.mkdir(parents=True)
+    base_bytes = b'{}\n'
+    base_path.write_bytes(base_bytes)
+
+    with pytest.raises(WoonError, match="path or hash is invalid"):
+        cli._parse_book_coverage_manifest_update(  # noqa: SLF001
+            {
+                "mode": "materialize-scopes",
+                "relative_path": base_relative_path,
+                "expected_sha256": hashlib.sha256(base_bytes).hexdigest(),
+                "replacement": {},
+                "scopes": [
+                    {
+                        "relative_path": "../chapter-02.json",
+                        "expected_sha256": "b" * 64,
+                        "root_id": "books/kotlin/chapter-02",
+                    }
+                ],
+            },
+            vault,
+        )
 
 def test_book_promotion_coverage_parser_rejects_existing_manifest_with_null_revision(
     tmp_path: Path,
@@ -1330,6 +1404,9 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
                 "retire_replacements": {"books/kotlin/part-01": "books/kotlin"},
                 "retirement_expected_revisions": {"books/kotlin/part-01": "part-revision"},
                 "retirement_body_sha256": {"books/kotlin/part-01": "b" * 64},
+                "retirement_content_relocations": {
+                    "books/kotlin/part-01": ["books/kotlin"]
+                },
                 "retirement_image_replacements": {
                     "books/kotlin/part-01": {
                         "wiki/private/_sources/knowledge/local-only/kotlin/images/old.png": (
@@ -1376,6 +1453,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
             BookCoverageManifestUpdate | None,
             tuple[StagedBookAsset, ...],
             dict[str, dict[str, str]],
+            dict[str, tuple[str, ...]],
         ]
     ] = []
 
@@ -1389,6 +1467,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
             coverage_manifest: BookCoverageManifestUpdate | None,
             staged_assets: tuple[StagedBookAsset, ...],
             retirement_image_replacements: dict[str, dict[str, str]],
+            retirement_content_relocations: dict[str, tuple[str, ...]],
         ) -> None:
             calls.append(
                 (
@@ -1399,6 +1478,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
                     coverage_manifest,
                     staged_assets,
                     retirement_image_replacements,
+                    retirement_content_relocations,
                 )
             )
 
@@ -1412,6 +1492,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
             staged_assets: tuple[StagedBookAsset, ...],
             *,
             retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+            retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
         ) -> VerifiedBookUpdateReport:
             self._capture(
                 pages,
@@ -1421,6 +1502,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
                 coverage_manifest,
                 staged_assets,
                 retirement_image_replacements or {},
+                retirement_content_relocations or {},
             )
             return VerifiedBookUpdateReport(
                 curated=1,
@@ -1442,6 +1524,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
             staged_assets: tuple[StagedBookAsset, ...],
             *,
             retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+            retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
         ) -> VerifiedBookPreflightReport:
             self._capture(
                 pages,
@@ -1451,6 +1534,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
                 coverage_manifest,
                 staged_assets,
                 retirement_image_replacements or {},
+                retirement_content_relocations or {},
             )
             return VerifiedBookPreflightReport(
                 ready=True,
@@ -1507,6 +1591,7 @@ def test_knowledge_book_promote_retire_uses_one_atomic_service_call(
             )
         }
     }
+    assert calls[0][7] == {"books/kotlin/part-01": ("books/kotlin",)}
     if apply:
         assert '"retired": 1' in output.getvalue()
     else:
@@ -1530,16 +1615,20 @@ def test_knowledge_book_rights_restore_uses_one_atomic_private_service_call(
             {
                 "apply": True,
                 **book_promotion_contract_fields(),
+                "workflow_phase": "toc-indexed",
                 "pages": [
                     {
                         "page_id": "personal/book",
                         "title": "Book",
-                        "body": "원문 본문이다.\n",
-                        "statement": "책 원문을 보존한다.",
-                        "current_use": "책을 읽을 때 사용한다.",
+                        "body": "",
+                        "statement": "검증된 목차를 탐색한다.",
+                        "current_use": "원문을 정리하기 전에 목차를 탐색한다.",
                         "source_locator": "source://book#page=1",
                         "source_sha256": source_hash,
-                        "frontmatter": {"access": "local-only"},
+                        "frontmatter": {
+                            "access": "local-only",
+                            "content_state": "toc-only",
+                        },
                         "expected_revision": None,
                     }
                 ],
@@ -1550,7 +1639,7 @@ def test_knowledge_book_rights_restore_uses_one_atomic_private_service_call(
                     "replacement": {
                         "schema_version": 3,
                         "book_id": "personal/book",
-                        "workflow_phase": "source-landed",
+                        "workflow_phase": "toc-indexed",
                         "translation_required": False,
                         "edition": {"source_sha256": source_hash},
                     },
@@ -1632,6 +1721,29 @@ def test_knowledge_book_rights_restore_uses_one_atomic_private_service_call(
 
     assert len(calls) == 1
     assert '"rights_status": "user-authorized-private"' in output.getvalue()
+
+    invalid_payload = json.loads(input_path.read_text(encoding="utf-8"))
+    invalid_payload["workflow_phase"] = "translated"
+    invalid_payload["coverage_manifest"]["replacement"]["workflow_phase"] = "translated"
+    input_path.write_text(json.dumps(invalid_payload), encoding="utf-8")
+
+    with pytest.raises(
+        WoonError,
+        match="book-rights-restore must begin at toc-indexed or source-landed",
+    ):
+        run(
+            [
+                "knowledge",
+                "book-rights-restore",
+                "--input",
+                str(input_path),
+                "--vault",
+                str(vault),
+            ],
+            StringIO(),
+        )
+
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(

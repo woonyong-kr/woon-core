@@ -29,6 +29,7 @@ from woon_core.io import atomic_write
 from woon_core.knowledge.book_contract import (
     BOOK_WORKFLOW_PHASES,
     book_reader_workflow_prose_violation,
+    book_workflow_evidence_phases,
     book_workflow_phase_index,
 )
 from woon_core.knowledge.book_coverage import (
@@ -169,14 +170,26 @@ class VerifiedBookPage:
 
 
 @dataclass(frozen=True, slots=True)
+class BookCoverageScopeRevision:
+    """One byte-pinned verified scope consumed by full-manifest materialization."""
+
+    relative_path: str
+    expected_sha256: str
+    root_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class BookCoverageManifestUpdate:
-    """One optimistic full replacement or verified-scope fragment update.
+    """One optimistic full replacement, scope update, or scope materialization.
 
     ``replace`` rewrites one schema-v2 full-book manifest. ``merge-scope``
     leaves the pre-existing full-book manifest byte-for-byte unchanged and
     writes one schema-v2 fragment below ``catalog/book-coverage-scopes``.  The
     base path and both hashes are pinned so a scoped review cannot be applied
     to a different table of contents or overwrite a newer scope review.
+    ``materialize-scopes`` consumes byte-pinned, disjoint verified fragments
+    into the full manifest and retires those exact fragment revisions in the
+    same rollback-safe compiler transaction.
     """
 
     relative_path: str
@@ -186,6 +199,7 @@ class BookCoverageManifestUpdate:
     base_relative_path: str | None = None
     base_expected_sha256: str | None = None
     scope_root_id: str | None = None
+    materialized_scopes: tuple[BookCoverageScopeRevision, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +273,16 @@ class CompiledWikiTransaction:
     claims_upsert: tuple[dict[str, Any], ...]
     pages_upsert: tuple[dict[str, Any], ...]
     curations_upsert: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyPageAdoption:
+    """Read-only proof that one existing legacy Markdown page can be adopted safely."""
+
+    page_id: str
+    output_path: str
+    raw_sha256: str
+    archive_path: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -855,6 +879,7 @@ class CompiledWiki:
         *,
         rights_restore_book_id: str | None = None,
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> VerifiedBookUpdateReport:
         """Promote pages and retire obsolete wrappers in one compiler transaction.
 
@@ -877,13 +902,19 @@ class CompiledWiki:
             )
         coverage_path: Path | None = None
         coverage_bytes: bytes | None = None
+        materialized_scope_paths: tuple[Path, ...] = ()
         coverage_errors_before: set[str] = set()
         coverage_book_id = ""
         if coverage_manifest is not None:
             coverage_path, coverage_bytes = self._validated_coverage_manifest_update(
-                coverage_manifest
+                coverage_manifest,
+                retirement_content_relocations=retirement_content_relocations,
             )
-            if coverage_manifest.mode == "replace":
+            if coverage_manifest.mode == "materialize-scopes":
+                materialized_scope_paths = self._validated_materialized_scope_paths(
+                    coverage_manifest
+                )
+            if coverage_manifest.mode in {"replace", "materialize-scopes"}:
                 coverage_errors_before = set(audit_book_coverage(self._settings.vault).errors)
             replacement_book_id = coverage_manifest.replacement.get("book_id")
             if isinstance(replacement_book_id, str):
@@ -892,17 +923,26 @@ class CompiledWiki:
         carry_forward_ids: set[str] = set()
         active_records = records
         if rights_restore_book_id is not None:
+            allow_rights_toc_normalization = (
+                coverage_manifest is not None
+                and coverage_manifest.mode == "replace"
+                and coverage_manifest.replacement.get("workflow_phase") == "toc-indexed"
+            )
             carry_forward_ids = self._validate_book_rights_restore_records(
                 records,
                 sources,
                 pages,
                 expected_book_id=rights_restore_book_id,
+                allow_legacy_toc_normalization=allow_rights_toc_normalization,
             )
             active_records = tuple(
                 record for record in records if record.page_id not in carry_forward_ids
             )
         input_snapshot = self.snapshot_inputs(
-            extra_paths=(coverage_path,) if coverage_path is not None else ()
+            extra_paths=(
+                *((coverage_path,) if coverage_path is not None else ()),
+                *materialized_scope_paths,
+            )
         )
         output_snapshot = self.snapshot_outputs(
             extra_relative_paths=tuple(f"{record.page_id}.md" for record in records)
@@ -939,6 +979,7 @@ class CompiledWiki:
             pages,
             coverage_manifest=coverage_manifest,
             retirement_image_replacements=retirement_image_replacements,
+            retirement_content_relocations=retirement_content_relocations,
         )
 
         # Validate against the current topology before promotion rewrites a
@@ -988,6 +1029,7 @@ class CompiledWiki:
                     claims,
                     pages,
                     restored_page_ids={record.page_id for record in active_records},
+                    allow_source_free_toc_only=allow_rights_toc_normalization,
                 )
             unknown = retiring.difference(pages)
             if unknown:
@@ -1053,6 +1095,8 @@ class CompiledWiki:
             self._write_inputs(sources, claims, pages, curations)
             if coverage_path is not None and coverage_bytes is not None:
                 atomic_write(coverage_path, coverage_bytes)
+            for scope_path in materialized_scope_paths:
+                scope_path.unlink()
             compile_report = self.compile(page_ids=tuple(sorted(affected)))
             for output_path in retired_outputs:
                 output_path.unlink(missing_ok=True)
@@ -1153,6 +1197,7 @@ class CompiledWiki:
         *,
         rights_restore_book_id: str | None = None,
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> VerifiedBookUpdateReport:
         """Execute the exact writer and post-write audits in an isolated Vault clone."""
 
@@ -1193,8 +1238,7 @@ class CompiledWiki:
                 / self._settings.sources_path.relative_to(self._settings.vault),
                 claims_path=dry_vault
                 / self._settings.claims_path.relative_to(self._settings.vault),
-                pages_path=dry_vault
-                / self._settings.pages_path.relative_to(self._settings.vault),
+                pages_path=dry_vault / self._settings.pages_path.relative_to(self._settings.vault),
                 curation_path=dry_vault
                 / self._settings.curation_path.relative_to(self._settings.vault),
                 relations_path=dry_vault
@@ -1213,6 +1257,7 @@ class CompiledWiki:
                 coverage_manifest,
                 rights_restore_book_id=rights_restore_book_id,
                 retirement_image_replacements=retirement_image_replacements,
+                retirement_content_relocations=retirement_content_relocations,
             )
 
     def _copy_dry_run_source_file(self, relative: str, dry_vault: Path) -> None:
@@ -1237,6 +1282,7 @@ class CompiledWiki:
         pages: dict[str, dict[str, Any]],
         *,
         restored_page_ids: set[str] | None = None,
+        allow_source_free_toc_only: bool = False,
     ) -> None:
         """Remove obsolete blocked-rights decisions from restored current pages."""
 
@@ -1267,30 +1313,48 @@ class CompiledWiki:
             )
         for page_id in sorted(restored_ids):
             page = pages[page_id]
+            render = page.get("render")
+            rights_sources = [item for item in page["source_ids"] if item.startswith(source_prefix)]
+            rights_claims = [item for item in page["claim_ids"] if item.startswith(claim_prefix)]
+            if (
+                allow_source_free_toc_only
+                and isinstance(render, dict)
+                and render.get("kind") == "toc-only"
+            ):
+                remaining_sources = [
+                    item for item in page["source_ids"] if item not in rights_sources
+                ]
+                remaining_claims = [item for item in page["claim_ids"] if item not in rights_claims]
+                if not remaining_sources and not remaining_claims:
+                    page["source_ids"] = []
+                    page["claim_ids"] = []
+                    frontmatter = page.get("frontmatter")
+                    if isinstance(frontmatter, dict):
+                        frontmatter["source_ids"] = []
+                    for source_id in rights_sources:
+                        sources[source_id]["lifecycle"] = "archived"
+                        sources[source_id].pop("superseded_by", None)
+                    for claim_id in rights_claims:
+                        claims[claim_id]["status"] = "superseded"
+                        claims[claim_id].pop("superseded_by", None)
+                    continue
+                page["source_ids"] = remaining_sources
+                page["claim_ids"] = remaining_claims
+                frontmatter = page.get("frontmatter")
+                if isinstance(frontmatter, dict):
+                    frontmatter["source_ids"] = remaining_sources
             current_source_id = _current_source_id(
                 page, [sources[item] for item in page["source_ids"]]
             )
-            current_claim_id = _current_claim_id(
-                page, [claims[item] for item in page["claim_ids"]]
-            )
-            rights_sources = [
-                item for item in page["source_ids"] if item.startswith(source_prefix)
-            ]
-            rights_claims = [
-                item for item in page["claim_ids"] if item.startswith(claim_prefix)
-            ]
-            page["source_ids"] = [
-                item for item in page["source_ids"] if item not in rights_sources
-            ]
+            current_claim_id = _current_claim_id(page, [claims[item] for item in page["claim_ids"]])
+            page["source_ids"] = [item for item in page["source_ids"] if item not in rights_sources]
             page["claim_ids"] = [item for item in page["claim_ids"] if item not in rights_claims]
             for source_id in rights_sources:
                 sources[source_id].update(
                     {"lifecycle": "archived", "superseded_by": current_source_id}
                 )
             for claim_id in rights_claims:
-                claims[claim_id].update(
-                    {"status": "superseded", "superseded_by": current_claim_id}
-                )
+                claims[claim_id].update({"status": "superseded", "superseded_by": current_claim_id})
 
     def validate_verified_book_retirement_content(
         self,
@@ -1300,13 +1364,15 @@ class CompiledWiki:
         coverage_manifest: BookCoverageManifestUpdate | None = None,
         *,
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Fail a preflight if retiring reader prose is not copied exactly.
 
-        This is intentionally the same strict check used by the writer.  A
-        coverage manifest's relocated-span claim is not a substitute for the
-        current wrapper body: the complete normalized reader body must occur in
-        the promoted survivor before the wrapper may be removed.
+        This is intentionally the same strict check used by the writer. A
+        single replacement must contain the complete normalized reader body.
+        A declared one-to-many split may replace that check only when a full
+        coverage replacement proves owner-only relocation of every immutable
+        source-element assignment.
         """
 
         sources, _, pages, _, _ = self._load_inputs()
@@ -1318,6 +1384,7 @@ class CompiledWiki:
             pages,
             coverage_manifest=coverage_manifest,
             retirement_image_replacements=retirement_image_replacements,
+            retirement_content_relocations=retirement_content_relocations,
             validate_image_assets=False,
         )
 
@@ -1386,9 +1453,7 @@ class CompiledWiki:
         if snapshot.quarantine_path.exists():
             shutil.rmtree(snapshot.quarantine_path)
 
-    def apply_book_rights_demotion(
-        self, request: BookRightsDemotion
-    ) -> BookRightsDemotionReport:
+    def apply_book_rights_demotion(self, request: BookRightsDemotion) -> BookRightsDemotionReport:
         """Atomically replace restricted reader bodies with TOC-only page projections."""
 
         rights_source_ids, rights_claim_ids = self._validate_book_rights_demotion(request)
@@ -1559,9 +1624,7 @@ class CompiledWiki:
                 intake_path,
                 (json.dumps(intake, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
             )
-            self.compile(
-                page_ids=tuple(sorted(survivors.union(relation_updated_ids)))
-            )
+            self.compile(page_ids=tuple(sorted(survivors.union(relation_updated_ids))))
             for page_id in retiring:
                 _inside(
                     self._settings.output_root,
@@ -1577,8 +1640,7 @@ class CompiledWiki:
             )
             if tree_report.issues:
                 raise WoonError(
-                    "book rights demotion could not refresh its Wiki tree: "
-                    + tree_report.issues[0]
+                    "book rights demotion could not refresh its Wiki tree: " + tree_report.issues[0]
                 )
             tree_changed_paths = tuple(
                 path
@@ -1596,9 +1658,7 @@ class CompiledWiki:
             if not intake_audit.complete:
                 raise WoonError("book rights demotion left stale intake: " + intake_audit.errors[0])
             coverage_audit = audit_book_coverage(self._settings.vault)
-            target_errors = [
-                error for error in coverage_audit.errors if request.book_id in error
-            ]
+            target_errors = [error for error in coverage_audit.errors if request.book_id in error]
             if target_errors:
                 raise WoonError("book rights demotion left stale coverage: " + target_errors[0])
             if request.book_id not in coverage_audit.pending_books:
@@ -1661,9 +1721,7 @@ class CompiledWiki:
             body = request.survivor_bodies[page_id]
             frontmatter = pages[page_id].get("frontmatter", {})
             current_groups = (
-                frontmatter.get("navigation_groups", [])
-                if isinstance(frontmatter, dict)
-                else []
+                frontmatter.get("navigation_groups", []) if isinstance(frontmatter, dict) else []
             )
             after_groups = expected_navigation.get(page_id, current_groups)
             retired_descendants = [
@@ -1680,8 +1738,8 @@ class CompiledWiki:
                 _validate_rights_toc_body(body, page_id, retiring)
                 body_lines = body.splitlines()
                 for child_id in retired_descendants:
-                    child_groups = pages[child_id].get("frontmatter", {}).get(
-                        "navigation_groups", []
+                    child_groups = (
+                        pages[child_id].get("frontmatter", {}).get("navigation_groups", [])
                     )
                     prefix = "##" if child_groups else "-"
                     row = f"{prefix} {pages[child_id]['title']}"
@@ -1757,8 +1815,7 @@ class CompiledWiki:
             )
         if shared_claim_ids:
             raise WoonError(
-                "book rights demotion claim is shared outside scope: "
-                + sorted(shared_claim_ids)[0]
+                "book rights demotion claim is shared outside scope: " + sorted(shared_claim_ids)[0]
             )
         for source_id, digest in request.expected_source_body_sha256.items():
             source = sources.get(source_id)
@@ -1934,6 +1991,7 @@ class CompiledWiki:
         *,
         coverage_manifest: BookCoverageManifestUpdate | None,
         retirement_image_replacements: dict[str, dict[str, str]] | None,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None,
         validate_image_assets: bool = True,
     ) -> None:
         """Validate optimistic body hashes and exact prose relocation."""
@@ -1948,17 +2006,32 @@ class CompiledWiki:
             )
         if image_replacements and validate_image_assets:
             self._validate_retirement_image_assets(image_replacements, coverage_manifest)
+        relocated_pages = self._validate_retirement_content_relocations(
+            records,
+            replacements,
+            coverage_manifest,
+            retirement_content_relocations or {},
+        )
         for page_id in sorted(replacements):
             page = pages.get(page_id)
             if page is None:
                 raise WoonError(f"compiled Wiki page spec not found: {page_id}")
-            source_id = _current_source_id(page, self._page_sources(page, sources))
-            body = str(sources[source_id].get("body", ""))
-            normalized_body = _retirement_body(body)
+            if _is_explicit_source_free_toc_page(page):
+                normalized_body = self._source_free_toc_leaf_retirement_body(
+                    page_id,
+                    page,
+                    pages,
+                )
+            else:
+                source_id = _current_source_id(page, self._page_sources(page, sources))
+                body = str(sources[source_id].get("body", ""))
+                normalized_body = _retirement_body(body)
             actual_body_sha256 = _sha256_text(normalized_body)
             if actual_body_sha256 != retirement_body_sha256[page_id]:
                 raise WoonError(f"verified book retirement body changed after review: {page_id}")
             if _navigation_only_body(normalized_body):
+                continue
+            if page_id in relocated_pages:
                 continue
             replacement_id = replacements[page_id]
             replacement = promoted_by_id.get(replacement_id)
@@ -1977,6 +2050,154 @@ class CompiledWiki:
                     "verified book retirement reader content is not preserved in "
                     f"replacement: {page_id}"
                 )
+
+    def _validate_retirement_content_relocations(
+        self,
+        records: tuple[VerifiedBookPage, ...],
+        replacements: dict[str, str],
+        coverage_manifest: BookCoverageManifestUpdate | None,
+        relocations: dict[str, tuple[str, ...]],
+    ) -> set[str]:
+        """Verify one-to-many chapter splits through immutable source assignments."""
+
+        if not relocations:
+            return set()
+        unknown = set(relocations).difference(replacements)
+        if unknown:
+            raise WoonError(
+                f"retirement content relocation page is not retired: {sorted(unknown)[0]}"
+            )
+        if coverage_manifest is None or coverage_manifest.mode != "replace":
+            raise WoonError(
+                "retirement content relocations require a full replacement coverage manifest"
+            )
+        promoted_ids = {record.page_id for record in records}
+        for retired_id, successor_ids in relocations.items():
+            if not successor_ids or len(successor_ids) != len(set(successor_ids)):
+                raise WoonError(
+                    "retirement content relocation successors must be non-empty and unique: "
+                    f"{retired_id}"
+                )
+            missing = set(successor_ids).difference(promoted_ids)
+            if missing:
+                raise WoonError(
+                    "retirement content relocation successor must be promoted: "
+                    f"{sorted(missing)[0]}"
+                )
+
+        current_path = _inside(
+            self._settings.vault,
+            coverage_manifest.relative_path,
+            "book coverage manifest",
+        )
+        if not current_path.is_file():
+            raise WoonError("retirement content relocation requires current full coverage")
+        try:
+            current = json.loads(current_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise WoonError("current book coverage manifest is invalid") from error
+        replacement = coverage_manifest.replacement
+        if current.get("source_elements") != replacement.get("source_elements"):
+            raise WoonError(
+                "retirement content relocation must preserve the source element inventory"
+            )
+
+        current_assignments = _assignment_map(current.get("source_element_assignments"))
+        replacement_assignments = _assignment_map(replacement.get("source_element_assignments"))
+        if set(current_assignments) != set(replacement_assignments):
+            raise WoonError(
+                "retirement content relocation must preserve every source element assignment"
+            )
+        for element_id, current_assignment in current_assignments.items():
+            updated_assignment = replacement_assignments[element_id]
+            retired_id = str(current_assignment.get("owner_id", "")).strip()
+            if retired_id not in relocations:
+                if updated_assignment != current_assignment:
+                    raise WoonError(
+                        "retirement content relocation changed an unrelated source assignment: "
+                        f"{element_id}"
+                    )
+                continue
+            current_without_owner = dict(current_assignment)
+            updated_without_owner = dict(updated_assignment)
+            current_without_owner.pop("owner_id", None)
+            updated_without_owner.pop("owner_id", None)
+            if current_without_owner != updated_without_owner:
+                raise WoonError(
+                    f"retirement content relocation changed source delivery evidence: {element_id}"
+                )
+            updated_owner = str(updated_assignment.get("owner_id", "")).strip()
+            if updated_owner not in relocations[retired_id]:
+                raise WoonError(
+                    "retirement content relocation assigned a source element outside its "
+                    f"declared successors: {element_id}"
+                )
+        for retired_id, successor_ids in relocations.items():
+            owned = {
+                element_id
+                for element_id, assignment in current_assignments.items()
+                if str(assignment.get("owner_id", "")).strip() == retired_id
+            }
+            if not owned:
+                raise WoonError(
+                    f"retirement content relocation has no source elements: {retired_id}"
+                )
+            used = {
+                str(replacement_assignments[element_id].get("owner_id", "")).strip()
+                for element_id in owned
+            }
+            unused = set(successor_ids).difference(used)
+            if unused:
+                raise WoonError(
+                    "retirement content relocation successor receives no source elements: "
+                    f"{sorted(unused)[0]}"
+                )
+        return set(relocations)
+
+    def _source_free_toc_leaf_retirement_body(
+        self,
+        page_id: str,
+        page: dict[str, Any],
+        pages: dict[str, dict[str, Any]],
+    ) -> str:
+        """Read one generated source-free TOC leaf without weakening prose checks."""
+
+        frontmatter = page.get("frontmatter")
+        if (
+            not isinstance(frontmatter, dict)
+            or frontmatter.get("content_state") != "toc-only"
+            or frontmatter.get("source_ids") != []
+            or page.get("claim_ids") != []
+        ):
+            raise WoonError(
+                f"source-free book retirement is not an explicit toc-only page: {page_id}"
+            )
+        if _navigation_group_children(frontmatter) or any(
+            candidate_id != page_id
+            and isinstance(candidate.get("frontmatter"), dict)
+            and _canonical_parent_id(candidate["frontmatter"].get("parent")) == page_id
+            for candidate_id, candidate in pages.items()
+        ):
+            raise WoonError(f"source-free toc-only retirement must be a leaf: {page_id}")
+
+        relative = Path(_required_string(page, "output_path"))
+        output_path = _inside(self._settings.output_root, relative.as_posix(), "page output_path")
+        if not output_path.is_file():
+            raise WoonError(f"source-free toc-only retirement output is missing: {page_id}")
+        _, title, body = _parse_markdown(
+            output_path.read_text(encoding="utf-8"),
+            relative,
+        )
+        if title != _required_string(page, "title"):
+            raise WoonError(f"source-free toc-only retirement title changed: {page_id}")
+        normalized_body = _retirement_body(body)
+        if not normalized_body.strip():
+            normalized_body = ""
+        if not _navigation_only_body(normalized_body):
+            raise WoonError(
+                f"source-free toc-only retirement contains authored reader content: {page_id}"
+            )
+        return normalized_body
 
     def _validate_retirement_image_assets(
         self,
@@ -2031,8 +2252,7 @@ class CompiledWiki:
                     or _sha256_bytes(old_path.read_bytes()) != old_sha256
                 ):
                     raise WoonError(
-                        "retirement image current archive hash does not match: "
-                        f"{old_target}"
+                        f"retirement image current archive hash does not match: {old_target}"
                     )
                 new_path = self._book_asset_destination(new_target)
                 if (
@@ -2041,15 +2261,31 @@ class CompiledWiki:
                     or _sha256_bytes(new_path.read_bytes()) != new_sha256
                 ):
                     raise WoonError(
-                        "retirement image replacement archive hash does not match: "
-                        f"{new_target}"
+                        f"retirement image replacement archive hash does not match: {new_target}"
                     )
 
-    def validate_book_coverage_manifest_update(self, update: BookCoverageManifestUpdate) -> Path:
+    def validate_book_coverage_manifest_update(
+        self,
+        update: BookCoverageManifestUpdate,
+        *,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
+    ) -> Path:
         """Validate one coverage replacement and return its canonical local path."""
 
-        path, _ = self._validated_coverage_manifest_update(update)
+        path, _ = self._validated_coverage_manifest_update(
+            update,
+            retirement_content_relocations=retirement_content_relocations,
+        )
         return path
+
+    def materialized_book_coverage_scope_paths(
+        self, update: BookCoverageManifestUpdate
+    ) -> tuple[Path, ...]:
+        """Return byte-pinned scope revisions consumed by this update, if any."""
+
+        if update.mode != "materialize-scopes":
+            return ()
+        return self._validated_materialized_scope_paths(update)
 
     def validate_staged_book_assets(
         self,
@@ -2172,9 +2408,7 @@ class CompiledWiki:
                 render_dpi,
             ).items():
                 rendered_pages[(source_path, page_number, render_dpi)] = rendered
-        for asset, source_path, page_number, render_dpi, crop_box, page_sha256 in (
-            scan_crop_checks
-        ):
+        for asset, source_path, page_number, render_dpi, crop_box, page_sha256 in scan_crop_checks:
             rendered_page = rendered_pages[(source_path, page_number, render_dpi)]
             if _sha256_bytes(rendered_page) != page_sha256:
                 raise WoonError("staged book scan crop rendered page hash does not match")
@@ -2277,9 +2511,7 @@ class CompiledWiki:
             not isinstance(crop_box, list)
             or len(crop_box) != 4
             or any(
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 0
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
                 for value in crop_box
             )
             or crop_box[2] <= crop_box[0]
@@ -2297,11 +2529,7 @@ class CompiledWiki:
         ] != [float(value) for value in crop_box]:
             raise WoonError("staged book scan crop locator and crop box do not match")
         render_dpi = crop.get("render_dpi")
-        if (
-            not isinstance(render_dpi, int)
-            or isinstance(render_dpi, bool)
-            or render_dpi <= 0
-        ):
+        if not isinstance(render_dpi, int) or isinstance(render_dpi, bool) or render_dpi <= 0:
             raise WoonError("staged book scan crop render DPI is invalid")
         source_page_sha256 = crop.get("source_page_sha256")
         if re.fullmatch(r"[0-9a-f]{64}", str(source_page_sha256)) is None:
@@ -2366,8 +2594,7 @@ class CompiledWiki:
             or "\\" in relative
             or candidate.is_absolute()
             or candidate.as_posix() != relative
-            or candidate.parts[:5]
-            != ("wiki", "private", "_sources", "knowledge", "local-only")
+            or candidate.parts[:5] != ("wiki", "private", "_sources", "knowledge", "local-only")
             or "images" not in candidate.parts[5:]
             or ".." in candidate.parts
         ):
@@ -2421,9 +2648,7 @@ class CompiledWiki:
         for record in records:
             page = pages.get(record.page_id)
             if page is None:
-                raise WoonError(
-                    f"concept-linked book page must already exist: {record.page_id}"
-                )
+                raise WoonError(f"concept-linked book page must already exist: {record.page_id}")
             render = page.get("render")
             if _verified_book_toc_only(record.frontmatter):
                 if not isinstance(render, dict) or render.get("kind") != "toc-only":
@@ -2438,9 +2663,7 @@ class CompiledWiki:
             source_id = _required_string(render, "source_id")
             source = sources.get(source_id)
             if source is None:
-                raise WoonError(
-                    f"concept-linked book page source does not exist: {record.page_id}"
-                )
+                raise WoonError(f"concept-linked book page source does not exist: {record.page_id}")
             is_toc_only = _verified_book_toc_only(record.frontmatter)
             is_navigation_map = bool(record.frontmatter.get("navigation_groups"))
             candidate_body = _curated_body(
@@ -2504,9 +2727,7 @@ class CompiledWiki:
                 )
             unexpected = touched_books.difference({expected_book_id})
             if unexpected:
-                raise WoonError(
-                    "book rights restore cannot mix books: " f"{sorted(unexpected)[0]}"
-                )
+                raise WoonError(f"book rights restore cannot mix books: {sorted(unexpected)[0]}")
 
         carry_forward_ids: set[str] = set()
         explicit_survivors = replacement_survivor_ids or set()
@@ -2526,16 +2747,13 @@ class CompiledWiki:
             }
             changed_scope_ids: set[str] = set()
             for new_id in new_ids:
-                ancestors = {
-                    page_id
-                    for page_id in live_ids
-                    if new_id.startswith(page_id + "/")
-                }
+                ancestors = {page_id for page_id in live_ids if new_id.startswith(page_id + "/")}
                 if ancestors:
                     changed_scope_ids.add(max(ancestors, key=len))
             changed_scope_ids.update(explicit_survivors.intersection(live_ids))
 
             book_carry_forward = live_ids.difference(changed_scope_ids)
+            normalized_toc_ids: set[str] = set()
             for page_id in sorted(book_carry_forward):
                 record = records_by_id[page_id]
                 page = pages[page_id]
@@ -2549,18 +2767,12 @@ class CompiledWiki:
                     source_id = _required_string(render, "source_id")
                     source = sources.get(source_id)
                     if source is None:
-                        raise WoonError(
-                            f"book carry-forward source does not exist: {page_id}"
-                        )
+                        raise WoonError(f"book carry-forward source does not exist: {page_id}")
                     current_body = str(source.get("body", ""))
                 else:
-                    raise WoonError(
-                        f"book carry-forward page render is unsupported: {page_id}"
-                    )
+                    raise WoonError(f"book carry-forward page render is unsupported: {page_id}")
                 if record.title != page.get("title"):
-                    raise WoonError(
-                        f"book rights carry-forward changed its title: {page_id}"
-                    )
+                    raise WoonError(f"book rights carry-forward changed its title: {page_id}")
                 legacy_toc_normalization = (
                     allow_legacy_toc_normalization
                     and _is_legacy_rights_toc_normalization(
@@ -2574,13 +2786,13 @@ class CompiledWiki:
                 )
                 if not legacy_toc_normalization:
                     if record.body != current_body:
-                        raise WoonError(
-                            f"book rights carry-forward changed its body: {page_id}"
-                        )
+                        raise WoonError(f"book rights carry-forward changed its body: {page_id}")
                     if record.frontmatter != page.get("frontmatter"):
                         raise WoonError(
                             f"book rights carry-forward changed its frontmatter: {page_id}"
                         )
+                else:
+                    normalized_toc_ids.add(page_id)
                 output_path = _inside(
                     self._settings.output_root,
                     _required_string(page, "output_path"),
@@ -2596,24 +2808,34 @@ class CompiledWiki:
                         "book rights carry-forward changed after review; reload before writing: "
                         f"{page_id}"
                     )
-            carry_forward_ids.update(book_carry_forward)
+            carry_forward_ids.update(book_carry_forward.difference(normalized_toc_ids))
 
         return carry_forward_ids
 
     def _validated_coverage_manifest_update(
-        self, update: BookCoverageManifestUpdate
+        self,
+        update: BookCoverageManifestUpdate,
+        *,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> tuple[Path, bytes]:
-        if update.mode not in {"replace", "merge-scope"}:
-            raise WoonError("book coverage manifest mode must be replace or merge-scope")
+        if update.mode not in {"replace", "merge-scope", "materialize-scopes"}:
+            raise WoonError(
+                "book coverage manifest mode must be replace, merge-scope, or materialize-scopes"
+            )
         if update.mode == "merge-scope":
             return self._validated_scoped_coverage_manifest_update(update)
-        if any(
-            value is not None
-            for value in (
-                update.base_relative_path,
-                update.base_expected_sha256,
-                update.scope_root_id,
+        if update.mode == "materialize-scopes":
+            return self._validated_materialized_coverage_manifest_update(update)
+        if (
+            any(
+                value is not None
+                for value in (
+                    update.base_relative_path,
+                    update.base_expected_sha256,
+                    update.scope_root_id,
+                )
             )
+            or update.materialized_scopes
         ):
             raise WoonError("replace coverage update must not declare scoped merge fields")
         relative = update.relative_path
@@ -2665,6 +2887,7 @@ class CompiledWiki:
             update.replacement,
             "book coverage manifest",
             allow_source_landed_expansion=True,
+            allowed_retired_ids=set((retirement_content_relocations or {}).keys()),
         )
         try:
             replacement_bytes = (
@@ -2680,10 +2903,190 @@ class CompiledWiki:
             raise WoonError("book coverage manifest replacement must be JSON") from error
         return path, replacement_bytes
 
+    def _validated_materialized_coverage_manifest_update(
+        self, update: BookCoverageManifestUpdate
+    ) -> tuple[Path, bytes]:
+        """Validate exact promotion of pinned scope fragments into their full base."""
+
+        if any(
+            value is not None
+            for value in (
+                update.base_relative_path,
+                update.base_expected_sha256,
+                update.scope_root_id,
+            )
+        ):
+            raise WoonError(
+                "materialize-scopes coverage update must not declare merge-scope fields"
+            )
+        path = self._validated_full_coverage_path(update)
+        scope_paths = self._validated_materialized_scope_paths(update)
+        current_bytes = path.read_bytes()
+        try:
+            base = json.loads(current_bytes)
+            scopes = [json.loads(scope_path.read_bytes()) for scope_path in scope_paths]
+        except json.JSONDecodeError as error:  # pragma: no cover - path validators parse first
+            raise WoonError("materialize-scopes coverage JSON is invalid") from error
+        if not isinstance(base, dict) or not all(isinstance(scope, dict) for scope in scopes):
+            raise WoonError("materialize-scopes coverage manifests must be objects")
+        expected = _materialize_book_coverage_scopes(
+            base,
+            tuple(scopes),
+            tuple(scope.root_id for scope in update.materialized_scopes),
+        )
+        replacement = update.replacement
+        if not isinstance(replacement, dict):
+            raise WoonError("book coverage manifest replacement must be an object")
+        if set(replacement) != set(base):
+            raise WoonError(
+                "materialize-scopes replacement fields must exactly match the full manifest"
+            )
+        immutable_fields = set(base).difference(
+            {
+                "nodes",
+                "source_structure_elements",
+                "source_structure_assignments",
+                "source_structure_inventory_evidence",
+                "source_elements",
+                "source_element_assignments",
+                "source_element_inventory_evidence",
+                "source_asset_inventory",
+                "source_asset_inventory_evidence",
+                "toc_node_count",
+                "toc_leaf_count",
+                "retired_source_section_wrappers",
+            }
+        )
+        for field in immutable_fields:
+            if replacement.get(field) != base.get(field):
+                raise WoonError(f"materialize-scopes replacement changed immutable field: {field}")
+        exact_fields = {
+            "nodes",
+            "source_structure_elements",
+            "source_structure_assignments",
+            "source_elements",
+            "source_element_assignments",
+            "source_asset_inventory",
+            "toc_node_count",
+            "toc_leaf_count",
+            "retired_source_section_wrappers",
+        }
+        for field in exact_fields:
+            if replacement.get(field) != expected.get(field):
+                raise WoonError(
+                    f"materialize-scopes replacement is not the exact scope merge: {field}"
+                )
+        _validate_source_asset_inventory_evidence(
+            replacement.get("source_asset_inventory"),
+            replacement.get("source_asset_inventory_evidence"),
+            "materialize-scopes book coverage manifest",
+        )
+        try:
+            replacement_bytes = (
+                json.dumps(replacement, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise WoonError("book coverage manifest replacement must be JSON") from error
+        return path, replacement_bytes
+
+    def _validated_full_coverage_path(self, update: BookCoverageManifestUpdate) -> Path:
+        """Validate one existing byte-pinned full coverage manifest path."""
+
+        relative = update.relative_path
+        candidate = Path(relative)
+        if (
+            not relative
+            or "\\" in relative
+            or candidate.is_absolute()
+            or candidate.as_posix() != relative
+            or candidate.parts[:2] != ("catalog", "book-coverage")
+            or len(candidate.parts) != 3
+            or candidate.suffix != ".json"
+            or ".." in candidate.parts
+        ):
+            raise WoonError(
+                "materialize-scopes path must be one JSON file under catalog/book-coverage"
+            )
+        path = _inside(self._settings.vault, relative, "book coverage manifest path")
+        current = self._settings.vault
+        for part in candidate.parts:
+            current = current / part
+            if current.is_symlink():
+                raise WoonError("book coverage manifest path must not use symlinks")
+        if not path.is_file():
+            raise WoonError("materialize-scopes base manifest must be an existing regular file")
+        if (
+            not isinstance(update.expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", update.expected_sha256) is None
+            or _sha256_bytes(path.read_bytes()) != update.expected_sha256
+        ):
+            raise WoonError("materialize-scopes base manifest changed after review")
+        return path
+
+    def _validated_materialized_scope_paths(
+        self, update: BookCoverageManifestUpdate
+    ) -> tuple[Path, ...]:
+        """Resolve verified scope files that will be consumed atomically."""
+
+        if not update.materialized_scopes:
+            raise WoonError("materialize-scopes requires at least one pinned scope")
+        base_hash = update.expected_sha256
+        if not isinstance(base_hash, str):  # pragma: no cover - full path validator owns detail
+            raise WoonError("materialize-scopes requires a pinned base hash")
+        base_stem = Path(update.relative_path).stem
+        roots = [scope.root_id for scope in update.materialized_scopes]
+        if len(set(roots)) != len(roots):
+            raise WoonError("materialize-scopes scope roots must be unique")
+        relative_paths = [scope.relative_path for scope in update.materialized_scopes]
+        if len(set(relative_paths)) != len(relative_paths):
+            raise WoonError("materialize-scopes scope paths must be unique")
+        for index, root_id in enumerate(roots):
+            for other in roots[index + 1 :]:
+                if root_id.startswith(other + "/") or other.startswith(root_id + "/"):
+                    raise WoonError("materialize-scopes scope roots must not overlap")
+        paths: list[Path] = []
+        for scope in update.materialized_scopes:
+            relative = Path(scope.relative_path)
+            if (
+                "\\" in scope.relative_path
+                or relative.is_absolute()
+                or relative.as_posix() != scope.relative_path
+                or relative.parts[:3] != ("catalog", "book-coverage-scopes", base_stem)
+                or len(relative.parts) != 4
+                or relative.suffix != ".json"
+                or ".." in relative.parts
+            ):
+                raise WoonError("materialize-scopes scope path is not canonical")
+            path = _inside(self._settings.vault, scope.relative_path, "book coverage scope path")
+            if path.is_symlink() or not path.is_file():
+                raise WoonError("materialize-scopes scope file is missing or unsafe")
+            content = path.read_bytes()
+            if (
+                re.fullmatch(r"[0-9a-f]{64}", scope.expected_sha256) is None
+                or _sha256_bytes(content) != scope.expected_sha256
+            ):
+                raise WoonError("materialize-scopes scope changed after review")
+            try:
+                payload = json.loads(content)
+            except json.JSONDecodeError as error:
+                raise WoonError("materialize-scopes scope is invalid JSON") from error
+            expected_scope = {
+                "root_id": scope.root_id,
+                "base_relative_path": update.relative_path,
+                "base_sha256": base_hash,
+            }
+            if not isinstance(payload, dict) or payload.get("coverage_scope") != expected_scope:
+                raise WoonError("materialize-scopes scope does not exactly pin its base and root")
+            paths.append(path)
+        return tuple(paths)
+
     def _validated_scoped_coverage_manifest_update(
         self, update: BookCoverageManifestUpdate
     ) -> tuple[Path, bytes]:
         """Validate a staged scope while proving the full manifest is unchanged."""
+
+        if update.materialized_scopes:
+            raise WoonError("merge-scope coverage update must not declare materialized scopes")
 
         target = Path(update.relative_path)
         if (
@@ -3141,8 +3544,7 @@ class CompiledWiki:
         sources: dict[str, dict[str, Any]],
     ) -> None:
         used_elsewhere = any(
-            other_page_id != page_id
-            and prior_source_id in _book_rights_scan_source_ids(other_page)
+            other_page_id != page_id and prior_source_id in _book_rights_scan_source_ids(other_page)
             for other_page_id, other_page in pages.items()
         )
         if not used_elsewhere:
@@ -3207,14 +3609,10 @@ class CompiledWiki:
 
         sources, claims, pages, curations, _ = self._load_inputs()
         referenced_sources = {
-            source_id
-            for page in pages.values()
-            for source_id in _book_rights_scan_source_ids(page)
+            source_id for page in pages.values() for source_id in _book_rights_scan_source_ids(page)
         }
         referenced_claims = {
-            claim_id
-            for page in pages.values()
-            for claim_id in _book_rights_scan_claim_ids(page)
+            claim_id for page in pages.values() for claim_id in _book_rights_scan_claim_ids(page)
         }
         active_sources_by_locator: dict[str, set[str]] = {}
         for source_id in referenced_sources:
@@ -3490,6 +3888,94 @@ class CompiledWiki:
             unchanged=compile_report.unchanged,
             page_ids=page_ids,
         )
+
+    def preflight_legacy_page_adoptions(
+        self,
+        transaction: CompiledWikiTransaction,
+        adoptions: tuple[LegacyPageAdoption, ...],
+    ) -> tuple[str, ...]:
+        """Fail closed unless a proposed legacy adoption preserves the current raw page.
+
+        This is deliberately read-only: it proves an existing Markdown page can be
+        represented by a new ``legacy-wiki`` source/spec without moving, deleting,
+        or overwriting that page. Applying such an adoption needs a separate
+        explicitly reviewed writer path.
+        """
+
+        sources, claims, pages, curations, _ = self._load_inputs()
+        proposed = {str(page["page_id"]): page for page in transaction.pages_upsert}
+        if len(proposed) != len(transaction.pages_upsert):
+            raise WoonError("legacy adoption preflight contains duplicate page IDs")
+        checked: list[str] = []
+        for adoption in adoptions:
+            page_id = _required_string({"page_id": adoption.page_id}, "page_id")
+            if page_id in pages or page_id not in proposed:
+                raise WoonError("legacy adoption must target exactly one new page spec")
+            page = proposed[page_id]
+            if page.get("legacy_output_adoption") is not True:
+                raise WoonError("legacy adoption page spec must opt in explicitly")
+            output_path = _required_string(page, "output_path")
+            if output_path != adoption.output_path:
+                raise WoonError("legacy adoption output_path differs from page spec")
+            raw_path = _inside(self._settings.output_root, output_path, "legacy output_path")
+            if not raw_path.is_file():
+                raise WoonError("legacy adoption requires its existing raw Markdown output")
+            raw_bytes = raw_path.read_bytes()
+            if _sha256_bytes(raw_bytes) != adoption.raw_sha256:
+                raise WoonError("legacy adoption raw SHA-256 changed after review")
+            archive_path = _inside(
+                self._settings.vault, adoption.archive_path, "legacy archive_path"
+            )
+            if not str(archive_path.relative_to(self._settings.vault.resolve())).startswith(
+                "wiki/private/_sources/"
+            ):
+                raise WoonError("legacy adoption archive must stay below wiki/private/_sources")
+            if archive_path.exists():
+                raise WoonError("legacy adoption archive path already exists")
+            frontmatter, title, body = _parse_markdown(raw_bytes.decode("utf-8"), Path(output_path))
+            normalized_frontmatter = json.dumps(
+                frontmatter, ensure_ascii=False, sort_keys=True, default=str
+            )
+            proposed_frontmatter = json.dumps(
+                page.get("frontmatter"), ensure_ascii=False, sort_keys=True, default=str
+            )
+            if page.get("title") != title or proposed_frontmatter != normalized_frontmatter:
+                raise WoonError(
+                    "legacy adoption page spec does not losslessly match raw frontmatter"
+                )
+            render = page.get("render")
+            if not isinstance(render, dict) or render.get("kind") != "source-body":
+                raise WoonError("legacy adoption must render the preserved source body")
+            source_id = _required_string(render, "source_id")
+            source = next(
+                (item for item in transaction.sources_upsert if item.get("source_id") == source_id),
+                None,
+            )
+            if source is None or source.get("kind") != "legacy-wiki":
+                raise WoonError("legacy adoption requires one new legacy-wiki source")
+            if source.get("original_sha256") != adoption.raw_sha256:
+                raise WoonError("legacy adoption source does not pin raw SHA-256")
+            if source.get("locator") != adoption.archive_path:
+                raise WoonError("legacy adoption source locator must be the immutable raw archive")
+            if source.get("body") != body or source.get("normalized_sha256") != _sha256_text(
+                _normalize(body)
+            ):
+                raise WoonError("legacy adoption source body differs from raw Markdown")
+            claim_id = next(iter(_string_list(page.get("claim_ids"), "page claim_ids")), "")
+            claim = next(
+                (item for item in transaction.claims_upsert if item.get("claim_id") == claim_id),
+                None,
+            )
+            if (
+                claim is None
+                or claim.get("kind") != "legacy-document"
+                or claim.get("source_ids") != [source_id]
+            ):
+                raise WoonError("legacy adoption requires one matching legacy claim")
+            if _required_string(frontmatter, "canonical_id") != page_id:
+                raise WoonError("legacy adoption canonical_id differs from page ID")
+            checked.append(page_id)
+        return tuple(sorted(checked))
 
     def snapshot_inputs(self, *, extra_paths: tuple[Path, ...] = ()) -> dict[Path, bytes | None]:
         """Capture small compiler catalogs before a transactional canonical mutation."""
@@ -3918,7 +4404,19 @@ def _validate_page(
     access = str(frontmatter.get("access", "local-only"))
     if access == "public" and any(str(source.get("privacy")) != "public" for source in sources):
         raise WoonError("public compiled page requires public source provenance")
-    if not page_id.endswith(output_path.removesuffix(".md")) and not page_id.startswith("wiki/"):
+    legacy_output_adoption = page.get("legacy_output_adoption") is True
+    if legacy_output_adoption and (
+        frontmatter.get("canonical_id") != page_id
+        or kind != "source-body"
+        or len(sources) != 1
+        or sources[0].get("kind") != "legacy-wiki"
+    ):
+        raise WoonError("legacy output adoption must keep one matching legacy canonical source")
+    if (
+        not legacy_output_adoption
+        and not page_id.endswith(output_path.removesuffix(".md"))
+        and not page_id.startswith("wiki/")
+    ):
         raise WoonError("page_id must identify a Wiki output")
 
 
@@ -3945,7 +4443,8 @@ def _validate_source(source: dict[str, Any]) -> None:
     if lifecycle not in {"captured", "compiled", "archived"}:
         raise WoonError("source lifecycle is invalid")
     if lifecycle == "archived":
-        _required_string(source, "superseded_by")
+        if source.get("kind") != "book-rights-decision" or "superseded_by" in source:
+            _required_string(source, "superseded_by")
     elif "superseded_by" in source:
         raise WoonError("only archived source may declare superseded_by")
     if source.get("kind") != "legacy-wiki":
@@ -4064,7 +4563,8 @@ def _validate_claim_record(claim: dict[str, Any]) -> None:
     if status not in {"accepted", "superseded"}:
         raise WoonError("claim status is invalid")
     if status == "superseded":
-        _required_string(claim, "superseded_by")
+        if claim.get("kind") != "book-rights-decision" or "superseded_by" in claim:
+            _required_string(claim, "superseded_by")
     elif "superseded_by" in claim:
         raise WoonError("only superseded claim may declare superseded_by")
     _string_list(claim.get("source_ids"), "claim source_ids")
@@ -4162,8 +4662,6 @@ def _is_legacy_rights_toc_normalization(
         return False
     if record.frontmatter.get("content_state") != "toc-only":
         return False
-    if record.frontmatter.get("navigation_groups"):
-        return False
     direct_content = record.frontmatter.get("has_direct_content")
     if direct_content is not None and direct_content is not False:
         return False
@@ -4187,6 +4685,61 @@ def _is_legacy_rights_toc_normalization(
             return False
         if candidate_frontmatter.pop(key, None) != expected:
             return False
+    candidate_ordered = candidate_frontmatter.pop("ordered_reader_sections", None)
+    previous_ordered = previous_frontmatter.pop("ordered_reader_sections", None)
+    candidate_groups = candidate_frontmatter.pop("navigation_groups", None)
+    previous_groups = previous_frontmatter.pop("navigation_groups", None)
+    if candidate_ordered is not None:
+        if (
+            not isinstance(candidate_ordered, list)
+            or not candidate_ordered
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"kind", "label"}
+                or item.get("kind") not in {"toc-heading", "navigation-group"}
+                or not isinstance(item.get("label"), str)
+                or not item["label"].strip()
+                for item in candidate_ordered
+            )
+            or not any(item.get("kind") == "toc-heading" for item in candidate_ordered)
+            or len({item["label"].strip() for item in candidate_ordered}) != len(candidate_ordered)
+        ):
+            return False
+        if previous_ordered not in (None, ()) and previous_ordered != candidate_ordered:
+            return False
+    elif previous_ordered is not None:
+        return False
+    if candidate_groups is not None:
+        if not isinstance(candidate_groups, list):
+            return False
+        group_labels: list[str] = []
+        for group in candidate_groups:
+            if not isinstance(group, dict) or set(group) != {"label", "children"}:
+                return False
+            label = group.get("label")
+            children = group.get("children")
+            if (
+                not isinstance(label, str)
+                or not label.strip()
+                or label.strip() in group_labels
+                or not isinstance(children, list)
+                or not children
+                or not all(isinstance(child, str) and child.strip() for child in children)
+                or any(child.strip() not in records_by_id for child in children)
+            ):
+                return False
+            group_labels.append(label.strip())
+        ordered_group_labels = [
+            item["label"].strip()
+            for item in candidate_ordered or []
+            if isinstance(item, dict) and item.get("kind") == "navigation-group"
+        ]
+        if group_labels != ordered_group_labels:
+            return False
+        if previous_groups not in (None, ()) and previous_groups != candidate_groups:
+            return False
+    elif previous_groups is not None:
+        return False
     if candidate_frontmatter != previous_frontmatter:
         return False
 
@@ -4209,9 +4762,7 @@ def _is_legacy_rights_toc_normalization(
         return False
     if any(source.get("original_sha256") != record.source_sha256 for source in rights_sources):
         return False
-    return not any(
-        source_id.startswith("source://verified-book/") for source_id in page_source_ids
-    )
+    return not any(source_id.startswith("source://verified-book/") for source_id in page_source_ids)
 
 
 def _validate_toc_only_navigation(page_id: str, navigation_groups: object) -> None:
@@ -4262,16 +4813,11 @@ def _asset_inventory_by_path(manifest: object) -> dict[str, dict[str, Any]]:
             or "\\" in relative
             or ".." in relative_path.parts
             or relative_path.as_posix() != relative
-            or relative_path.parts[:5]
-            != ("wiki", "private", "_sources", "knowledge", "local-only")
+            or relative_path.parts[:5] != ("wiki", "private", "_sources", "knowledge", "local-only")
         ):
-            raise WoonError(
-                f"retirement image coverage archive path is invalid: {relative}"
-            )
+            raise WoonError(f"retirement image coverage archive path is invalid: {relative}")
         if relative in indexed:
-            raise WoonError(
-                f"retirement image coverage archive path is duplicated: {relative}"
-            )
+            raise WoonError(f"retirement image coverage archive path is duplicated: {relative}")
         indexed[relative] = item
     return indexed
 
@@ -4295,12 +4841,9 @@ def _relocate_retirement_image_targets(body: str, replacements: dict[str, str]) 
                 or "\\" in value
                 or ".." in path.parts
                 or path.as_posix() != value
-                or path.parts[:5]
-                != ("wiki", "private", "_sources", "knowledge", "local-only")
+                or path.parts[:5] != ("wiki", "private", "_sources", "knowledge", "local-only")
             ):
-                raise WoonError(
-                    f"retirement image {label} target is invalid: {value}"
-                )
+                raise WoonError(f"retirement image {label} target is invalid: {value}")
         if old_target == new_target:
             raise WoonError("retirement image replacement must change its target")
         pattern = re.compile(rf"(!\[[^\]\n]*\]\(){re.escape(old_target)}(\))")
@@ -4404,6 +4947,8 @@ def _inactive_revision_error(
         return f"{record_label} has no page spec"
     successor = record.get("superseded_by")
     if not isinstance(successor, str) or not successor:
+        if record.get("kind") == "book-rights-decision":
+            return None
         return f"inactive {record_label} has no superseded_by"
     seen = {record_id}
     current = successor
@@ -4704,9 +5249,7 @@ def _book_rights_ids(
     claim_ids: dict[str, str] = {}
     for page_id in request.survivor_ids:
         page_suffix = _sha256_text(page_id)[:16]
-        source_ids[page_id] = (
-            f"source://book-rights/{request.book_id}/{suffix}/{page_suffix}"
-        )
+        source_ids[page_id] = f"source://book-rights/{request.book_id}/{suffix}/{page_suffix}"
         claim_ids[page_id] = f"claim://book-rights/{request.book_id}/{suffix}/{page_suffix}"
     return source_ids, claim_ids
 
@@ -4811,9 +5354,7 @@ def _validate_rights_toc_body(body: str, page_id: str, retiring: set[str]) -> No
             continue
         if re.fullmatch(r"##\s+\S.*", stripped):
             if group_open and not group_has_bullet:
-                raise WoonError(
-                    f"book rights TOC keyword has no plain-text bullet: {page_id}"
-                )
+                raise WoonError(f"book rights TOC keyword has no plain-text bullet: {page_id}")
             group_open = True
             group_has_bullet = False
             continue
@@ -4821,8 +5362,7 @@ def _validate_rights_toc_body(body: str, page_id: str, retiring: set[str]) -> No
             group_has_bullet = True
             continue
         raise WoonError(
-            "book rights TOC body must contain only H2 keywords and plain-text bullets: "
-            f"{page_id}"
+            f"book rights TOC body must contain only H2 keywords and plain-text bullets: {page_id}"
         )
     if not group_open or not group_has_bullet:
         raise WoonError(f"book rights TOC body requires H2 keywords with bullets: {page_id}")
@@ -4918,9 +5458,7 @@ def _redirect_frontmatter_relations(
     return changed
 
 
-def _remove_retired_frontmatter_relations(
-    frontmatter: dict[str, Any], retiring: set[str]
-) -> bool:
+def _remove_retired_frontmatter_relations(frontmatter: dict[str, Any], retiring: set[str]) -> bool:
     """Remove relation-array references that cannot be redirected safely."""
 
     changed = False
@@ -5065,6 +5603,24 @@ def _required_string(record: dict[str, Any], key: str) -> str:
     return value.strip()
 
 
+def _assignment_map(value: object) -> dict[str, dict[str, Any]]:
+    """Index an exact-once source-element assignment array fail closed."""
+
+    if not isinstance(value, list):
+        raise WoonError("source_element_assignments must be an array")
+    result: dict[str, dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise WoonError("source_element_assignments entries must be objects")
+        element_id = item.get("element_id")
+        if not isinstance(element_id, str) or not element_id.strip():
+            raise WoonError("source element assignment requires element_id")
+        if element_id in result:
+            raise WoonError(f"source element assignment is duplicated: {element_id}")
+        result[element_id] = item
+    return result
+
+
 def _string_list(value: object, field: str) -> list[str]:
     if (
         not isinstance(value, list)
@@ -5175,8 +5731,7 @@ def _render_pdf_pages_png(
         missing = page_numbers.difference(outputs)
         if missing:
             raise WoonError(
-                "staged book scan crop PDF render produced no PNG for page "
-                f"{min(missing)}"
+                f"staged book scan crop PDF render produced no PNG for page {min(missing)}"
             )
         return outputs
 
@@ -5214,6 +5769,7 @@ def _validate_book_workflow_progression(
     label: str,
     *,
     allow_source_landed_expansion: bool = False,
+    allowed_retired_ids: set[str] | None = None,
 ) -> None:
     """Reject phase rollback and loss of immutable source/translation coverage."""
 
@@ -5230,16 +5786,14 @@ def _validate_book_workflow_progression(
     phase = replacement.get("workflow_phase")
     phase_rank = book_workflow_phase_index(phase)
     if phase_rank < 0:
-        raise WoonError(
-            f"{label} workflow_phase must be one of: {', '.join(BOOK_WORKFLOW_PHASES)}"
-        )
+        raise WoonError(f"{label} workflow_phase must be one of: {', '.join(BOOK_WORKFLOW_PHASES)}")
     translation_required = replacement.get("translation_required")
     if not isinstance(translation_required, bool):
         raise WoonError(f"{label} translation_required must be true or false")
 
     if current is None or current.get("schema_version") != BOOK_COVERAGE_SCHEMA_VERSION:
-        if phase != "source-landed":
-            raise WoonError(f"{label} must begin at workflow_phase=source-landed")
+        if phase not in {"toc-indexed", "source-landed"}:
+            raise WoonError(f"{label} must begin at workflow_phase=source-landed or toc-indexed")
         return
 
     current_phase = current.get("workflow_phase")
@@ -5253,11 +5807,28 @@ def _validate_book_workflow_progression(
     if current.get("translation_required") is not translation_required:
         raise WoonError(f"{label} translation_required cannot change after source landing")
 
+    if current_phase == "toc-indexed":
+        if phase == "toc-indexed":
+            if replacement != current:
+                raise WoonError(f"{label} toc-indexed evidence cannot change after verification")
+            return
+        if phase != "source-landed":
+            raise WoonError(f"{label} toc-indexed must advance through source-landed")
+        for field in (
+            "edition",
+            "toc_evidence",
+            "source_structure_inventory_evidence",
+            "source_structure_elements",
+        ):
+            if replacement.get(field) != current.get(field):
+                raise WoonError(f"{label} verified TOC {field} cannot change during source landing")
+        return
+
     current_evidence = current.get("phase_evidence")
     replacement_evidence = replacement.get("phase_evidence")
     if not isinstance(current_evidence, dict) or not isinstance(replacement_evidence, dict):
         raise WoonError(f"{label} phase_evidence must be preserved across updates")
-    for reached_phase in BOOK_WORKFLOW_PHASES[: current_rank + 1]:
+    for reached_phase in book_workflow_evidence_phases(current_phase):
         if replacement_evidence.get(reached_phase) != current_evidence.get(reached_phase):
             raise WoonError(
                 f"{label} phase evidence cannot change after {reached_phase} is verified"
@@ -5283,14 +5854,11 @@ def _validate_book_workflow_progression(
             "source_asset_inventory_evidence",
         }
         count_fields = {"toc_node_count", "toc_leaf_count"}
-        mutable_fields = (
-            extensible_fields | refreshable_evidence_fields | count_fields
-        )
+        mutable_fields = extensible_fields | refreshable_evidence_fields | count_fields
         for field in set(current) | set(replacement):
             if field not in mutable_fields and replacement.get(field) != current.get(field):
-                raise WoonError(
-                    f"{label} immutable {field} cannot change during source landing"
-                )
+                raise WoonError(f"{label} immutable {field} cannot change during source landing")
+        retired_ids = allowed_retired_ids or set()
         for field, identity_field in (
             ("nodes", "canonical_id"),
             ("source_structure_elements", "structure_id"),
@@ -5299,12 +5867,36 @@ def _validate_book_workflow_progression(
             ("source_asset_inventory", "asset_id"),
             ("source_element_assignments", "element_id"),
         ):
+            flexible_identities: set[str] = set()
+            allow_missing_flexible = False
+            current_items = current.get(field)
+            if retired_ids and isinstance(current_items, list):
+                if field == "nodes":
+                    flexible_identities = {
+                        str(item.get("canonical_id", ""))
+                        for item in current_items
+                        if isinstance(item, dict)
+                        and str(item.get("canonical_id", "")) in retired_ids
+                    }
+                    allow_missing_flexible = True
+                elif field in {
+                    "source_structure_assignments",
+                    "source_element_assignments",
+                }:
+                    flexible_identities = {
+                        str(item.get(identity_field, ""))
+                        for item in current_items
+                        if isinstance(item, dict)
+                        and _coverage_assignment_owner(item) in retired_ids
+                    }
             _validate_ordered_supersequence(
                 current.get(field),
                 replacement.get(field),
                 field=field,
                 identity_field=identity_field,
                 label=label,
+                flexible_identities=flexible_identities,
+                allow_missing_flexible=allow_missing_flexible,
             )
         _validate_source_asset_inventory_evidence(
             replacement.get("source_asset_inventory"),
@@ -5333,9 +5925,270 @@ def _validate_book_workflow_progression(
         and replacement.get("source_element_assignments")
         != current.get("source_element_assignments")
     ):
-        raise WoonError(
-            f"{label} translated reader delivery cannot decrease or be regenerated"
+        raise WoonError(f"{label} translated reader delivery cannot decrease or be regenerated")
+
+
+def _materialize_book_coverage_scopes(
+    base: dict[str, Any],
+    scopes: tuple[dict[str, Any], ...],
+    roots: tuple[str, ...],
+) -> dict[str, Any]:
+    """Return the exact full manifest represented by pinned verified scopes.
+
+    A scope replaces only its canonical subtree and the source inventories owned
+    by that subtree. This intentionally differs from ordinary source-landed
+    expansion: already retired wrapper/terminal leaf identities must disappear
+    instead of being retained as stale coverage.
+    """
+
+    if len(scopes) != len(roots) or not scopes:
+        raise WoonError("materialize-scopes requires one manifest per scope root")
+    merged = copy.deepcopy(base)
+    for scope, root_id in zip(scopes, roots, strict=True):
+        if scope.get("book_id") != base.get("book_id"):
+            raise WoonError("materialize-scopes scope book_id does not match its base")
+        for field in ("schema_version", "edition", "translation_required"):
+            if scope.get(field) != base.get(field):
+                raise WoonError(f"materialize-scopes scope changed base identity field: {field}")
+        # Older toc-indexed schema-v3 fragments inherit the archive identity
+        # from their pinned base and keep a local workflow phase.  Treating an
+        # omitted archive or a lower local phase as a changed full-manifest
+        # identity made those otherwise valid scopes impossible to consume.
+        if "source_archive" in scope and scope.get("source_archive") != base.get("source_archive"):
+            raise WoonError("materialize-scopes scope changed base identity field: source_archive")
+        merged["nodes"] = _materialize_scope_nodes(merged.get("nodes"), scope.get("nodes"), root_id)
+        (
+            merged["source_structure_elements"],
+            merged["source_structure_assignments"],
+            _,
+        ) = _materialize_scope_inventory(
+            merged.get("source_structure_elements"),
+            merged.get("source_structure_assignments"),
+            scope.get("source_structure_elements"),
+            scope.get("source_structure_assignments"),
+            root_id=root_id,
+            identity_field="structure_id",
         )
+        semantic_fields = ("source_elements", "source_element_assignments")
+        semantic_presence = tuple(field in scope for field in semantic_fields)
+        if any(semantic_presence) and not all(semantic_presence):
+            raise WoonError(
+                "materialize-scopes scope semantic inventory fields must be both present or absent"
+            )
+        removed_element_ids: set[str] = set()
+        if all(semantic_presence):
+            (
+                merged["source_elements"],
+                merged["source_element_assignments"],
+                removed_element_ids,
+            ) = _materialize_scope_inventory(
+                merged.get("source_elements"),
+                merged.get("source_element_assignments"),
+                scope.get("source_elements"),
+                scope.get("source_element_assignments"),
+                root_id=root_id,
+                identity_field="element_id",
+                allow_new_scope=True,
+            )
+        else:
+            base_semantic_assignments = _indexed_manifest_records(
+                merged.get("source_element_assignments"),
+                "element_id",
+                "base source element assignments",
+            )
+            if any(
+                _coverage_owner_in_scope(_coverage_assignment_owner(item), root_id)
+                for item in base_semantic_assignments.values()
+            ):
+                raise WoonError(
+                    "materialize-scopes scope omitted semantic inventory for a populated root"
+                )
+        # The just-replaced assignment list no longer contains removed IDs, so
+        # read the prior source manifest to identify only their old image paths.
+        prior_assignments = _indexed_manifest_records(
+            base.get("source_element_assignments"),
+            "element_id",
+            "base source element assignments",
+        )
+        old_image_paths = {
+            str(prior_assignments[element_id]["image_target"])
+            for element_id in removed_element_ids
+            if element_id in prior_assignments and "image_target" in prior_assignments[element_id]
+        }
+        if "source_asset_inventory" in scope:
+            merged["source_asset_inventory"] = _materialize_scope_assets(
+                merged.get("source_asset_inventory"),
+                scope.get("source_asset_inventory"),
+                old_image_paths,
+            )
+        wrappers = merged.get("retired_source_section_wrappers")
+        scope_wrappers = scope.get("retired_source_section_wrappers")
+        if not isinstance(wrappers, list) or not isinstance(scope_wrappers, list):
+            raise WoonError("materialize-scopes wrapper inventories must be arrays")
+        seen_wrappers: set[bytes] = set()
+        combined_wrappers: list[Any] = []
+        for item in (*wrappers, *scope_wrappers):
+            encoded = json.dumps(
+                item, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            if encoded not in seen_wrappers:
+                seen_wrappers.add(encoded)
+                combined_wrappers.append(copy.deepcopy(item))
+        merged["retired_source_section_wrappers"] = combined_wrappers
+        base = copy.deepcopy(merged)
+
+    nodes = merged.get("nodes")
+    if not isinstance(nodes, list):  # pragma: no cover - helper validates each pass
+        raise WoonError("materialize-scopes nodes must be an array")
+    merged.pop("coverage_scope", None)
+    merged["toc_node_count"] = len(nodes)
+    merged["toc_leaf_count"] = sum(
+        isinstance(node, dict) and node.get("leaf") is True for node in nodes
+    )
+    return merged
+
+
+def _materialize_scope_nodes(
+    base_nodes: Any, scope_nodes: Any, root_id: str
+) -> list[dict[str, Any]]:
+    if not isinstance(base_nodes, list) or not isinstance(scope_nodes, list) or not scope_nodes:
+        raise WoonError("materialize-scopes nodes must be non-empty arrays")
+    base_ids = [
+        str(node.get("canonical_id", "")) if isinstance(node, dict) else "" for node in base_nodes
+    ]
+    scope_ids = [
+        str(node.get("canonical_id", "")) if isinstance(node, dict) else "" for node in scope_nodes
+    ]
+    if not all(base_ids) or len(set(base_ids)) != len(base_ids):
+        raise WoonError("materialize-scopes base nodes must have unique canonical IDs")
+    if (
+        not all(scope_ids)
+        or len(set(scope_ids)) != len(scope_ids)
+        or root_id not in scope_ids
+        or any(not _coverage_owner_in_scope(node_id, root_id) for node_id in scope_ids)
+    ):
+        raise WoonError("materialize-scopes scope nodes do not match their root")
+    positions = [
+        index
+        for index, node_id in enumerate(base_ids)
+        if _coverage_owner_in_scope(node_id, root_id)
+    ]
+    if not positions:
+        raise WoonError(f"materialize-scopes root is absent from full nodes: {root_id}")
+    first = positions[0]
+    kept = [
+        node
+        for node, node_id in zip(base_nodes, base_ids, strict=True)
+        if not _coverage_owner_in_scope(node_id, root_id)
+    ]
+    return kept[:first] + copy.deepcopy(scope_nodes) + kept[first:]
+
+
+def _materialize_scope_inventory(
+    base_items: Any,
+    base_assignments: Any,
+    scope_items: Any,
+    scope_assignments: Any,
+    *,
+    root_id: str,
+    identity_field: str,
+    allow_new_scope: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    base_by_id = _indexed_manifest_records(
+        base_items, identity_field, f"base {identity_field} inventory"
+    )
+    base_assignment_by_id = _indexed_manifest_records(
+        base_assignments, identity_field, f"base {identity_field} assignments"
+    )
+    scope_by_id = _indexed_manifest_records(
+        scope_items, identity_field, f"scope {identity_field} inventory"
+    )
+    scope_assignment_by_id = _indexed_manifest_records(
+        scope_assignments, identity_field, f"scope {identity_field} assignments"
+    )
+    if set(base_by_id) != set(base_assignment_by_id):
+        raise WoonError(f"materialize-scopes base {identity_field} assignments are incomplete")
+    if set(scope_by_id) != set(scope_assignment_by_id) or not scope_by_id:
+        raise WoonError(f"materialize-scopes scope {identity_field} assignments are incomplete")
+    if any(
+        not _coverage_owner_in_scope(_coverage_assignment_owner(item), root_id)
+        for item in scope_assignment_by_id.values()
+    ):
+        raise WoonError(f"materialize-scopes scope {identity_field} owner is outside its root")
+    removed_ids = {
+        identity
+        for identity, assignment in base_assignment_by_id.items()
+        if _coverage_owner_in_scope(_coverage_assignment_owner(assignment), root_id)
+    }
+    if not removed_ids and not allow_new_scope:
+        raise WoonError(f"materialize-scopes base has no {identity_field} for {root_id}")
+    base_list = list(base_items)
+    assignment_list = list(base_assignments)
+    positions = [
+        index for index, item in enumerate(base_list) if str(item[identity_field]) in removed_ids
+    ]
+    first = positions[0] if positions else len(base_list)
+    kept_items = [item for item in base_list if str(item[identity_field]) not in removed_ids]
+    kept_assignments = [
+        item for item in assignment_list if str(item[identity_field]) not in removed_ids
+    ]
+    return (
+        kept_items[:first] + copy.deepcopy(list(scope_items)) + kept_items[first:],
+        kept_assignments[:first]
+        + copy.deepcopy(list(scope_assignments))
+        + kept_assignments[first:],
+        removed_ids,
+    )
+
+
+def _materialize_scope_assets(
+    base_assets: Any, scope_assets: Any, removed_paths: set[str]
+) -> list[dict[str, Any]]:
+    base_by_id = _indexed_manifest_records(base_assets, "asset_id", "base source asset inventory")
+    scope_by_id = _indexed_manifest_records(
+        scope_assets, "asset_id", "scope source asset inventory"
+    )
+    del base_by_id, scope_by_id
+    base_list = list(base_assets)
+    positions = [
+        index
+        for index, item in enumerate(base_list)
+        if str(item.get("archive_relative_path", "")) in removed_paths
+    ]
+    first = positions[0] if positions else len(base_list)
+    kept = [
+        item
+        for item in base_list
+        if str(item.get("archive_relative_path", "")) not in removed_paths
+    ]
+    result = kept[:first] + copy.deepcopy(list(scope_assets)) + kept[first:]
+    paths = [str(item.get("archive_relative_path", "")) for item in result]
+    ids = [str(item.get("asset_id", "")) for item in result]
+    if not all(paths) or len(set(paths)) != len(paths) or len(set(ids)) != len(ids):
+        raise WoonError("materialize-scopes produced duplicate source assets")
+    return result
+
+
+def _indexed_manifest_records(items: Any, key: str, label: str) -> dict[str, dict[str, Any]]:
+    if not isinstance(items, list):
+        raise WoonError(f"materialize-scopes {label} must be an array")
+    result: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(items):
+        identity = item.get(key) if isinstance(item, dict) else None
+        if not isinstance(identity, str) or not identity or identity in result:
+            raise WoonError(f"materialize-scopes {label}[{index}] must have a unique {key}")
+        result[identity] = item
+    return result
+
+
+def _coverage_assignment_owner(assignment: dict[str, Any]) -> str:
+    if assignment.get("disposition") == "canonical-node":
+        return str(assignment.get("canonical_id", ""))
+    return str(assignment.get("owner_id", ""))
+
+
+def _coverage_owner_in_scope(owner_id: str, root_id: str) -> bool:
+    return owner_id == root_id or owner_id.startswith(root_id + "/")
 
 
 def _validate_ordered_supersequence(
@@ -5345,6 +6198,8 @@ def _validate_ordered_supersequence(
     field: str,
     identity_field: str,
     label: str,
+    flexible_identities: set[str] | None = None,
+    allow_missing_flexible: bool = False,
 ) -> None:
     """Allow insertion while preserving every existing identified object and its order."""
 
@@ -5356,13 +6211,9 @@ def _validate_ordered_supersequence(
         for index, item in enumerate(items):
             identity = item.get(identity_field) if isinstance(item, dict) else None
             if not isinstance(identity, str) or not identity:
-                raise WoonError(
-                    f"{label} {field}[{index}] must have a non-empty {identity_field}"
-                )
+                raise WoonError(f"{label} {field}[{index}] must have a non-empty {identity_field}")
             if identity in result:
-                raise WoonError(
-                    f"{label} {field} contains duplicate {identity_field}: {identity}"
-                )
+                raise WoonError(f"{label} {field} contains duplicate {identity_field}: {identity}")
             try:
                 canonical = json.dumps(
                     item,
@@ -5371,30 +6222,29 @@ def _validate_ordered_supersequence(
                     sort_keys=True,
                 ).encode("utf-8")
             except (TypeError, ValueError) as error:
-                raise WoonError(
-                    f"{label} {version} {field}[{index}] must be JSON"
-                ) from error
+                raise WoonError(f"{label} {version} {field}[{index}] must be JSON") from error
             result[identity] = (index, canonical)
         return result
 
     current_by_id = indexed(current, "current")
     replacement_by_id = indexed(replacement, "replacement")
+    flexible = flexible_identities or set()
     previous_index = -1
     for identity, (_, current_bytes) in current_by_id.items():
         replacement_item = replacement_by_id.get(identity)
+        if identity in flexible:
+            if replacement_item is None and not allow_missing_flexible:
+                raise WoonError(
+                    f"{label} {field} cannot delete relocated {identity_field}: {identity}"
+                )
+            continue
         if replacement_item is None:
-            raise WoonError(
-                f"{label} {field} cannot delete existing {identity_field}: {identity}"
-            )
+            raise WoonError(f"{label} {field} cannot delete existing {identity_field}: {identity}")
         replacement_index, replacement_bytes = replacement_item
         if replacement_bytes != current_bytes:
-            raise WoonError(
-                f"{label} {field} cannot change existing {identity_field}: {identity}"
-            )
+            raise WoonError(f"{label} {field} cannot change existing {identity_field}: {identity}")
         if replacement_index <= previous_index:
-            raise WoonError(
-                f"{label} {field} cannot reorder existing {identity_field}: {identity}"
-            )
+            raise WoonError(f"{label} {field} cannot reorder existing {identity_field}: {identity}")
         previous_index = replacement_index
 
 
@@ -5410,9 +6260,7 @@ def _validate_source_asset_inventory_evidence(
             f"{label} source_asset_inventory_evidence must describe the replacement inventory"
         )
     if evidence.get("expected_asset_count") != len(inventory):
-        raise WoonError(
-            f"{label} source_asset_inventory_evidence expected_asset_count is stale"
-        )
+        raise WoonError(f"{label} source_asset_inventory_evidence expected_asset_count is stale")
     inventory_sha256 = hashlib.sha256(
         json.dumps(
             inventory,
@@ -5422,9 +6270,7 @@ def _validate_source_asset_inventory_evidence(
         ).encode("utf-8")
     ).hexdigest()
     if evidence.get("inventory_sha256") != inventory_sha256:
-        raise WoonError(
-            f"{label} source_asset_inventory_evidence inventory_sha256 is stale"
-        )
+        raise WoonError(f"{label} source_asset_inventory_evidence inventory_sha256 is stale")
 
 
 def _source_owner_bindings(manifest: dict[str, Any]) -> tuple[tuple[str, str], ...]:

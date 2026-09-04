@@ -11,16 +11,24 @@ from woon_core.errors import WoonError
 
 BOOK_PROMOTION_PAYLOAD_SCHEMA_VERSION = 7
 BOOK_CONTRACT_VERSION = 7
-LEGACY_BOOK_CONTRACT_SHA256_V7 = (
-    "2b0e8b4a115d1ce7b87a507920d3f44bf1312c91142c3dfc1dd7bfffe2841976"
-)
+LEGACY_BOOK_CONTRACT_SHA256_V7 = "2b0e8b4a115d1ce7b87a507920d3f44bf1312c91142c3dfc1dd7bfffe2841976"
 PRE_IN_PAGE_H2_BOOK_CONTRACT_SHA256_V7 = (
     "de6157ed7d201def786ff722ea7bed0c39620c64ee0040b417eb4de31cce6656"
 )
 PRE_ORDERED_READER_SECTIONS_BOOK_CONTRACT_SHA256_V7 = (
     "719f313ea783890d257b91f6acb296acc729e4ddd1ec2c83241a784dff77616c"
 )
+PRE_TOC_HEADING_BOOK_CONTRACT_SHA256_V7 = (
+    "759850ec72fcf988ee1f3946716b6ce6d2e5809e84cf1ed2f9c3991f6da2fc33"
+)
+PRE_SCOPE_MATERIALIZATION_BOOK_CONTRACT_SHA256_V7 = (
+    "8b7acb08cb3fd2ad71ea337826c348f856f3b6e2738511736eb370032e58ed57"
+)
+PRE_ROOT_SECTION_NAVIGATION_BOOK_CONTRACT_SHA256_V7 = (
+    "dea954d192200fb493e7c0e731cf4971919f6b0ae900fcd82a61041727600e28"
+)
 BOOK_WORKFLOW_PHASES = (
+    "toc-indexed",
     "source-landed",
     "translated",
     "concept-linked",
@@ -32,6 +40,11 @@ BOOK_CONTRACT: dict[str, Any] = {
         "map": "H1-title/H2-source-topic/direct-child-wikilinks",
         "synthetic_wrappers": False,
         "authored_map_prose": False,
+        "book_layouts": [
+            "book-root/chapter-page/section-page",
+            "book-root/chapter-H2/section-page",
+        ],
+        "mixed_depth": "source-section-page/direct-subsection-wikilinks",
     },
     "source_coverage": {
         "structure_inventory": "source_structure_elements",
@@ -40,6 +53,8 @@ BOOK_CONTRACT: dict[str, Any] = {
         "structure_dispositions": {
             "canonical-node": "one-source-structure-per-canonical-node",
             "in-page-h2": "ordered-source-sections-share-one-canonical-source-body-leaf",
+            "toc-heading": "ordered-terminal-toc-sections-share-one-content-free-map-node",
+            "navigation-group-heading": "source-chapter-is-one-book-root-H2-group",
             "metadata-only": "copyright-bibliography-index-only",
         },
         "in_page_heading": "exactly-one-H2-source-title-in-source-order",
@@ -70,12 +85,20 @@ BOOK_CONTRACT: dict[str, Any] = {
         "narrative_example": "prose-evidence",
     },
     "promotion": {
-        "coverage_manifest": "required-explicit-replace-or-merge-scope",
+        "coverage_manifest": (
+            "required-explicit-replace-merge-scope-or-materialize-pinned-scopes"
+        ),
         "staged_scope": ("schema-v3-fragment-with-byte-preserved-base-and-optimistic-hashes"),
         "legacy_scope_audit": "stored-schema-v2-remains-readable",
+        "content_relocation": (
+            "full-replace-exact-source-elements-and-owner-only-assignment-relocation"
+        ),
     },
     "workflow": {
         "phases": list(BOOK_WORKFLOW_PHASES),
+        "toc_indexed": (
+            "verified-toc-order-and-locators-only-without-source-content-or-asset-coverage"
+        ),
         "source_landed": (
             "actual-title-local-only-source-and-source-assets-archived-before-reader-delivery"
         ),
@@ -99,9 +122,7 @@ BOOK_CONTRACT: dict[str, Any] = {
         "workflow_prose_in_reader_body": False,
         "figure_reader_span": "substantive-relationship-not-label-only",
         "reader_language_artifacts": "no-semantic-ledger-or-broken-generated-korean",
-        "textual_callouts": (
-            "circled-digits-1-to-10; negative-dingbat-callouts-rejected"
-        ),
+        "textual_callouts": ("circled-digits-1-to-10; negative-dingbat-callouts-rejected"),
     },
 }
 BOOK_CONTRACT_SHA256 = hashlib.sha256(
@@ -123,9 +144,7 @@ _BOOK_READER_WORKFLOW_PROSE = (
     ),
     (
         "execution verification label",
-        re.compile(
-            r"(?m)^검증 상태:\s*(?:실제 compile·run 결과|미실행 예상 결과)(?:\s.*)?$"
-        ),
+        re.compile(r"(?m)^검증 상태:\s*(?:실제 compile·run 결과|미실행 예상 결과)(?:\s.*)?$"),
     ),
     (
         "generated runnable harness prose",
@@ -156,6 +175,7 @@ def book_reader_workflow_prose_violation(body: str) -> str | None:
         if pattern.search(body):
             return label
     return None
+
 
 PRIVATE_BOOK_RIGHTS_CONTRACT_VERSION = 1
 PRIVATE_BOOK_RIGHTS_CONTRACT: dict[str, Any] = {
@@ -230,6 +250,9 @@ def require_current_book_contract(payload: object, operation: str) -> None:
         LEGACY_BOOK_CONTRACT_SHA256_V7,
         PRE_IN_PAGE_H2_BOOK_CONTRACT_SHA256_V7,
         PRE_ORDERED_READER_SECTIONS_BOOK_CONTRACT_SHA256_V7,
+        PRE_TOC_HEADING_BOOK_CONTRACT_SHA256_V7,
+        PRE_SCOPE_MATERIALIZATION_BOOK_CONTRACT_SHA256_V7,
+        PRE_ROOT_SECTION_NAVIGATION_BOOK_CONTRACT_SHA256_V7,
     }
     if contract.get("sha256") not in compatible_hashes:
         raise WoonError(
@@ -239,8 +262,7 @@ def require_current_book_contract(payload: object, operation: str) -> None:
     workflow_phase = payload.get("workflow_phase")
     if workflow_phase not in BOOK_WORKFLOW_PHASES:
         raise WoonError(
-            f"{operation} workflow_phase must be one of: "
-            f"{', '.join(BOOK_WORKFLOW_PHASES)}"
+            f"{operation} workflow_phase must be one of: {', '.join(BOOK_WORKFLOW_PHASES)}"
         )
     if not isinstance(payload.get("translation_required"), bool):
         raise WoonError(f"{operation} translation_required must be true or false")
@@ -258,9 +280,7 @@ def require_book_workflow_manifest(payload: dict[str, Any], operation: str) -> N
     if replacement.get("workflow_phase") != payload.get("workflow_phase"):
         raise WoonError(f"{operation} workflow_phase must match the coverage replacement")
     if replacement.get("translation_required") is not payload.get("translation_required"):
-        raise WoonError(
-            f"{operation} translation_required must match the coverage replacement"
-        )
+        raise WoonError(f"{operation} translation_required must match the coverage replacement")
 
 
 def book_workflow_phase_index(value: object) -> int:
@@ -270,3 +290,14 @@ def book_workflow_phase_index(value: object) -> int:
         return BOOK_WORKFLOW_PHASES.index(value)
     except ValueError:
         return -1
+
+
+def book_workflow_evidence_phases(value: object) -> tuple[str, ...]:
+    """Return required evidence without retroactively inventing optional TOC staging."""
+
+    rank = book_workflow_phase_index(value)
+    if rank < 0:
+        return ()
+    if value == "toc-indexed":
+        return ("toc-indexed",)
+    return BOOK_WORKFLOW_PHASES[1 : rank + 1]

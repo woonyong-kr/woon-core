@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -30,6 +31,7 @@ from woon_core.knowledge.compiled_wiki import (
     CompileReport,
     CuratedRevision,
     CuratedRevisionReport,
+    LegacyPageAdoption,
     MigrationReport,
     RetiredPageReport,
     RevisionReconciliationReport,
@@ -301,6 +303,50 @@ class KnowledgeService:
                 raise
             return report
 
+    def apply_legacy_page_adoptions(
+        self, transaction: CompiledWikiTransaction, adoptions: tuple[LegacyPageAdoption, ...]
+    ) -> CompiledWikiTransactionReport:
+        """Atomically archive only preflight-pinned raw pages, then compile their takeover."""
+
+        if self._compiled_wiki is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        with self._repository.exclusive():
+            self._compiled_wiki.preflight_legacy_page_adoptions(transaction, adoptions)
+            adopted = {item.page_id for item in adoptions}
+            for page in transaction.pages_upsert:
+                page_id = str(page.get("page_id", ""))
+                current = self._repository.get(page_id)
+                expected = transaction.expected_revisions.get(page_id)
+                if page_id in adopted:
+                    if expected is not None or current is None:
+                        raise WoonError(
+                            "legacy adoption requires an existing raw page and null revision"
+                        )
+                elif current is None or current.revision != expected:
+                    raise WoonError("compiled Wiki transaction changed after it was read")
+            input_snapshot = self._compiled_wiki.snapshot_inputs()
+            output_snapshot = self._compiled_wiki.snapshot_outputs(
+                extra_relative_paths=tuple(
+                    str(page.get("output_path", "")) for page in transaction.pages_upsert
+                )
+            )
+            archives = [self._compiled_wiki.vault / item.archive_path for item in adoptions]
+            try:
+                for item, archive in zip(adoptions, archives, strict=True):
+                    raw = self._compiled_wiki.vault / "wiki" / item.output_path
+                    archive.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(raw, archive)
+                report = self._compiled_wiki.apply_compiled_wiki_transaction(transaction)
+                self._reindex_unlocked()
+                return report
+            except Exception:
+                self._compiled_wiki.restore_inputs(input_snapshot)
+                self._compiled_wiki.restore_outputs(output_snapshot)
+                for archive in archives:
+                    archive.unlink(missing_ok=True)
+                self._reindex_unlocked()
+                raise
+
     def apply_verified_book_update(
         self,
         pages: tuple[VerifiedBookPage, ...],
@@ -311,6 +357,7 @@ class KnowledgeService:
         staged_assets: tuple[StagedBookAsset, ...] = (),
         *,
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> VerifiedBookUpdateReport:
         """Atomically promote pages, retire wrappers, and rebuild search once.
 
@@ -330,6 +377,7 @@ class KnowledgeService:
                 retirement_body_sha256,
                 coverage_manifest,
                 retirement_image_replacements=retirement_image_replacements,
+                retirement_content_relocations=retirement_content_relocations,
             )
             if staged_assets and coverage_manifest is None:
                 raise WoonError("staged book assets require a coverage manifest")
@@ -338,8 +386,16 @@ class KnowledgeService:
                 if coverage_manifest is not None
                 else (0, 0)
             )
+            materialized_scope_paths = (
+                compiler.materialized_book_coverage_scope_paths(coverage_manifest)
+                if coverage_manifest is not None and coverage_manifest.mode == "materialize-scopes"
+                else ()
+            )
             input_snapshot = compiler.snapshot_inputs(
-                extra_paths=(coverage_path,) if coverage_path is not None else ()
+                extra_paths=(
+                    *((coverage_path,) if coverage_path is not None else ()),
+                    *materialized_scope_paths,
+                )
             )
             output_snapshot = compiler.snapshot_outputs(
                 extra_relative_paths=tuple(f"{page.page_id}.md" for page in pages)
@@ -353,6 +409,7 @@ class KnowledgeService:
                     retirement_body_sha256,
                     coverage_manifest,
                     retirement_image_replacements=retirement_image_replacements,
+                    retirement_content_relocations=retirement_content_relocations,
                 )
                 self._reindex_unlocked()
             except BaseException as update_error:
@@ -383,6 +440,7 @@ class KnowledgeService:
         staged_assets: tuple[StagedBookAsset, ...] = (),
         *,
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> VerifiedBookPreflightReport:
         """Validate revisions and coverage hashes without mutating the Vault."""
 
@@ -397,6 +455,7 @@ class KnowledgeService:
                 retirement_body_sha256,
                 coverage_manifest,
                 retirement_image_replacements=retirement_image_replacements,
+                retirement_content_relocations=retirement_content_relocations,
             )
             asset_counts = compiler.validate_staged_book_assets(staged_assets, coverage_manifest)
             compiler.dry_run_verified_book_update(
@@ -406,6 +465,7 @@ class KnowledgeService:
                 coverage_manifest,
                 staged_assets,
                 retirement_image_replacements=retirement_image_replacements,
+                retirement_content_relocations=retirement_content_relocations,
             )
         if coverage_path is None:  # pragma: no cover - public preflight requires coverage
             raise WoonError("verified book preflight requires a coverage manifest")
@@ -443,12 +503,8 @@ class KnowledgeService:
             )
             if coverage_path is None:  # pragma: no cover - restore requires coverage
                 raise WoonError("book rights restore requires a coverage manifest")
-            self._validate_book_rights_restoration(
-                request, pages, coverage_manifest
-            )
-            asset_counts = compiler.validate_staged_book_assets(
-                staged_assets, coverage_manifest
-            )
+            self._validate_book_rights_restoration(request, pages, coverage_manifest)
+            asset_counts = compiler.validate_staged_book_assets(staged_assets, coverage_manifest)
             compiler.dry_run_verified_book_update(
                 pages,
                 {},
@@ -495,11 +551,14 @@ class KnowledgeService:
             intake_path, intake_bytes = self._validate_book_rights_restoration(
                 request, pages, coverage_manifest
             )
-            asset_counts = compiler.validate_staged_book_assets(
-                staged_assets, coverage_manifest
+            asset_counts = compiler.validate_staged_book_assets(staged_assets, coverage_manifest)
+            materialized_scope_paths = (
+                compiler.materialized_book_coverage_scope_paths(coverage_manifest)
+                if coverage_manifest.mode == "materialize-scopes"
+                else ()
             )
             input_snapshot = compiler.snapshot_inputs(
-                extra_paths=(coverage_path, intake_path)
+                extra_paths=(coverage_path, intake_path, *materialized_scope_paths)
             )
             output_snapshot = compiler.snapshot_outputs(
                 extra_relative_paths=tuple(f"{page.page_id}.md" for page in pages)
@@ -557,8 +616,7 @@ class KnowledgeService:
         if compiler is None:  # pragma: no cover - callers guard this
             raise WoonError("compiled Wiki is not enabled for this knowledge vault")
         if any(
-            page.page_id != request.book_id
-            and not page.page_id.startswith(request.book_id + "/")
+            page.page_id != request.book_id and not page.page_id.startswith(request.book_id + "/")
             for page in pages
         ):
             raise WoonError("book rights restore page is outside book_id")
@@ -569,8 +627,24 @@ class KnowledgeService:
         replacement = coverage_manifest.replacement
         if replacement.get("book_id") != request.book_id:
             raise WoonError("book rights restore coverage book_id mismatch")
-        if replacement.get("workflow_phase") != "source-landed":
-            raise WoonError("book rights restore must begin at source-landed")
+        workflow_phase = replacement.get("workflow_phase")
+        if workflow_phase not in {"toc-indexed", "source-landed"}:
+            raise WoonError("book rights restore must begin at toc-indexed or source-landed")
+        if workflow_phase == "toc-indexed":
+            forbidden = {
+                "source_archive",
+                "source_asset_inventory",
+                "source_asset_inventory_evidence",
+                "source_element_inventory_evidence",
+                "source_elements",
+                "source_element_assignments",
+            }
+            present = sorted(forbidden.intersection(replacement))
+            if present:
+                raise WoonError(
+                    "book rights restore toc-indexed coverage must not claim source archive, "
+                    f"asset, or semantic coverage fields: {present!r}"
+                )
         if replacement.get("translation_required") is not False:
             raise WoonError("book rights restore for a Korean source requires translation false")
         edition = replacement.get("edition")
@@ -612,10 +686,14 @@ class KnowledgeService:
         if len(matches) != 1:
             raise WoonError("book rights restore intake bundle is missing or ambiguous")
         bundle = matches[0]
-        if bundle.get("rights_status") not in {
-            "processing-prohibited",
-            "unverified-commercial",
-        } or bundle.get("processing_state") != "blocked-rights":
+        if (
+            bundle.get("rights_status")
+            not in {
+                "processing-prohibited",
+                "unverified-commercial",
+            }
+            or bundle.get("processing_state") != "blocked-rights"
+        ):
             raise WoonError("book rights restore requires one currently blocked intake bundle")
         if (
             bundle.get("rights_status") == "processing-prohibited"
@@ -639,9 +717,10 @@ class KnowledgeService:
             if manifest.get("book_id") != request.book_id:
                 raise WoonError("book rights restore quarantine book_id mismatch")
             prior_rights = manifest.get("rights_evidence")
-            if not isinstance(prior_rights, dict) or prior_rights.get(
-                "source_archive_sha256"
-            ) != authorized_hash:
+            if (
+                not isinstance(prior_rights, dict)
+                or prior_rights.get("source_archive_sha256") != authorized_hash
+            ):
                 raise WoonError("book rights restore quarantine source hash mismatch")
             if manifest_path.parent.parent != archive_path.parent / "rights-quarantine":
                 raise WoonError("book rights restore quarantine is not beside its source archive")
@@ -665,10 +744,9 @@ class KnowledgeService:
                 if entry_path.is_symlink() or not entry_path.is_file():
                     raise WoonError("book rights restore quarantine entry is missing")
                 content = entry_path.read_bytes()
-                if (
-                    hashlib.sha256(content).hexdigest() != entry.get("sha256")
-                    or len(content) != entry.get("bytes")
-                ):
+                if hashlib.sha256(content).hexdigest() != entry.get("sha256") or len(
+                    content
+                ) != entry.get("bytes"):
                     raise WoonError("book rights restore quarantine entry changed")
 
         bundle.pop("private_processing_authorized", None)
@@ -702,9 +780,7 @@ class KnowledgeService:
             self._validate_book_rights_revisions(request)
             return compiler.preflight_book_rights_demotion(request)
 
-    def apply_book_rights_demotion(
-        self, request: BookRightsDemotion
-    ) -> BookRightsDemotionReport:
+    def apply_book_rights_demotion(self, request: BookRightsDemotion) -> BookRightsDemotionReport:
         """Apply and index one rights demotion with byte-exact outer rollback."""
 
         compiler = self._compiled_wiki
@@ -752,6 +828,7 @@ class KnowledgeService:
         *,
         allow_blocked_restore: bool = False,
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
+        retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> Path | None:
         """Validate one request while the repository lock is held."""
 
@@ -778,6 +855,16 @@ class KnowledgeService:
                 "verified book update replacement must be included in promoted pages: "
                 f"{sorted(unverified_survivors)[0]}"
             )
+        relocation_survivors = {
+            survivor
+            for survivors in (retirement_content_relocations or {}).values()
+            for survivor in survivors
+        }.difference(promoted_ids)
+        if relocation_survivors:
+            raise WoonError(
+                "verified book content relocation must target promoted pages: "
+                f"{sorted(relocation_survivors)[0]}"
+            )
         for page in pages:
             current = self._repository.get(page.page_id)
             if current is None:
@@ -803,6 +890,7 @@ class KnowledgeService:
             retirement_body_sha256,
             coverage_manifest,
             retirement_image_replacements=retirement_image_replacements,
+            retirement_content_relocations=retirement_content_relocations,
         )
         workflow_phase = "source-landed"
         if coverage_manifest is not None:
@@ -815,7 +903,7 @@ class KnowledgeService:
             allow_legacy_toc_normalization=(
                 coverage_manifest is not None
                 and coverage_manifest.mode == "replace"
-                and not allow_blocked_restore
+                and (not allow_blocked_restore or workflow_phase == "toc-indexed")
             ),
             replacement_survivor_ids=set(replacements.values()),
         )
@@ -828,11 +916,17 @@ class KnowledgeService:
                     {page.source_sha256 for page in pages},
                     allow_blocked_restore=allow_blocked_restore,
                 )
-        return (
-            self._compiled_wiki.validate_book_coverage_manifest_update(coverage_manifest)
-            if coverage_manifest is not None
-            else None
-        )
+        if coverage_manifest is None:
+            return None
+        # Keep the established validator call shape for ordinary promotions.
+        # The relocation argument is meaningful only for a wrapper retirement;
+        # passing an empty value would unnecessarily break compatible adapters.
+        if retirement_content_relocations:
+            return self._compiled_wiki.validate_book_coverage_manifest_update(
+                coverage_manifest,
+                retirement_content_relocations=retirement_content_relocations,
+            )
+        return self._compiled_wiki.validate_book_coverage_manifest_update(coverage_manifest)
 
     def revise_uncompiled_body(
         self,

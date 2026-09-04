@@ -12,6 +12,8 @@ from woon_core.knowledge.book_contract import (
     LEGACY_BOOK_CONTRACT_SHA256_V7,
     PRE_IN_PAGE_H2_BOOK_CONTRACT_SHA256_V7,
     PRE_ORDERED_READER_SECTIONS_BOOK_CONTRACT_SHA256_V7,
+    PRE_ROOT_SECTION_NAVIGATION_BOOK_CONTRACT_SHA256_V7,
+    PRE_TOC_HEADING_BOOK_CONTRACT_SHA256_V7,
     book_promotion_contract_fields,
     require_current_book_contract,
 )
@@ -23,7 +25,13 @@ from woon_core.knowledge.book_coverage import (
     audit_book_coverage,
     audit_book_coverage_scope,
 )
-from woon_core.knowledge.wiki_tree import CHILDREN_END, CHILDREN_START, split_markdown
+from woon_core.knowledge.wiki_tree import (
+    BOOK_READER_NAVIGATION_END,
+    BOOK_READER_NAVIGATION_START,
+    CHILDREN_END,
+    CHILDREN_START,
+    split_markdown,
+)
 
 
 def test_book_contract_v7_keeps_legacy_payload_read_compatibility() -> None:
@@ -46,6 +54,16 @@ def test_book_contract_v7_keeps_legacy_payload_read_compatibility() -> None:
         PRE_ORDERED_READER_SECTIONS_BOOK_CONTRACT_SHA256_V7
     )
     require_current_book_contract(pre_ordered_reader, "book-promote")
+
+    pre_toc_heading = json.loads(json.dumps(current))
+    pre_toc_heading["book_contract"]["sha256"] = PRE_TOC_HEADING_BOOK_CONTRACT_SHA256_V7
+    require_current_book_contract(pre_toc_heading, "book-promote")
+
+    pre_root_section = json.loads(json.dumps(current))
+    pre_root_section["book_contract"]["sha256"] = (
+        PRE_ROOT_SECTION_NAVIGATION_BOOK_CONTRACT_SHA256_V7
+    )
+    require_current_book_contract(pre_root_section, "book-promote")
 
 
 def _source_element(
@@ -328,9 +346,7 @@ def _upgrade_manifest_to_v7(
 ) -> None:
     source_bytes = b"verified book source"
     source_sha256 = hashlib.sha256(source_bytes).hexdigest()
-    relative_source = (
-        "wiki/private/_sources/knowledge/local-only/kotlin/Kotlin in Action.pdf"
-    )
+    relative_source = "wiki/private/_sources/knowledge/local-only/kotlin/Kotlin in Action.pdf"
     source_path = vault / relative_source
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_bytes(source_bytes)
@@ -393,9 +409,7 @@ def _upgrade_manifest_to_v7(
                     sort_keys=True,
                 ).encode("utf-8")
             ).hexdigest(),
-            "relation_ids": [
-                "books/kotlin/chapter-01|related_to|concepts/kotlin"
-            ],
+            "relation_ids": ["books/kotlin/chapter-01|related_to|concepts/kotlin"],
         }
     if workflow_phase == "understanding-enriched":
         source_coverage_sha256 = hashlib.sha256(
@@ -495,6 +509,102 @@ def test_book_coverage_accepts_explicit_toc_only_non_leaf(tmp_path: Path) -> Non
     assert report.covered_leaf_count == 0
 
 
+def test_book_coverage_accepts_toc_indexed_ordered_headings_without_source_claims(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    target, manifest = _verified_fixture(vault)
+    _write_verified_root_map(vault)
+    _upgrade_manifest_to_v7(vault, manifest)
+    owner = "books/kotlin/chapter-01"
+    (vault / "wiki/books/kotlin/chapter-01.md").write_text(
+        "---\n"
+        "title: books/kotlin/chapter-01\n"
+        f"canonical_id: {owner}\n"
+        "node_kind: entity\n"
+        "parent: '[[wiki/books/kotlin|parent]]'\n"
+        "content_state: toc-only\n"
+        "ordered_reader_sections:\n"
+        "- kind: toc-heading\n"
+        "  label: 1.1 첫째 절\n"
+        "- kind: toc-heading\n"
+        "  label: 1.2 둘째 절\n"
+        "---\n\n"
+        "# books/kotlin/chapter-01\n\n"
+        f"{BOOK_READER_NAVIGATION_START}\n"
+        "## 1.1 첫째 절\n"
+        "## 1.2 둘째 절\n"
+        f"{BOOK_READER_NAVIGATION_END}\n",
+        encoding="utf-8",
+    )
+    manifest["workflow_phase"] = "toc-indexed"
+    manifest["phase_evidence"] = {
+        "toc-indexed": {"locator": "evidence/kotlin-toc.json", "sha256": "1" * 64}
+    }
+    for field in (
+        "source_archive",
+        "source_asset_inventory",
+        "source_asset_inventory_evidence",
+        "source_element_inventory_evidence",
+        "source_elements",
+        "source_element_assignments",
+    ):
+        manifest.pop(field, None)
+    nodes = manifest["nodes"]
+    assert isinstance(nodes, list) and isinstance(nodes[0], dict)
+    nodes[0].update(
+        {
+            "state": "toc-only",
+            "leaf": False,
+            "has_direct_content": False,
+            "reader_language": "ko",
+            "source_prose_verified": False,
+        }
+    )
+    nodes[0].pop("coverage", None)
+    nodes[0].pop("runnable", None)
+    nodes[0].pop("korean_prose_reviewed", None)
+    manifest["toc_leaf_count"] = 0
+    structures = manifest["source_structure_elements"]
+    assignments = manifest["source_structure_assignments"]
+    assert isinstance(structures, list) and isinstance(assignments, list)
+    for source_order, title in enumerate(("1.1 첫째 절", "1.2 둘째 절"), start=1):
+        structure = _source_structure("section", title, f"printed TOC row {source_order}")
+        structures.append(structure)
+        assignments.append(
+            {
+                "structure_id": structure["structure_id"],
+                "disposition": "toc-heading",
+                "owner_id": owner,
+                "heading": f"## {title}",
+                "source_order": source_order,
+            }
+        )
+    target.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = audit_book_coverage(vault)
+
+    assert report.complete, report.errors
+    assert report.covered_leaf_count == 0
+
+    invalid = json.loads(json.dumps(manifest))
+    invalid["source_asset_inventory"] = []
+    target.write_text(json.dumps(invalid), encoding="utf-8")
+    refused = audit_book_coverage(vault)
+    assert any(
+        "must not claim source archive, asset, or semantic coverage" in error
+        for error in refused.errors
+    )
+
+    wrong_order = json.loads(json.dumps(manifest))
+    wrong_assignments = wrong_order["source_structure_assignments"]
+    assert isinstance(wrong_assignments, list) and isinstance(wrong_assignments[-1], dict)
+    wrong_assignments[-1]["source_order"] = 1
+    target.write_text(json.dumps(wrong_order), encoding="utf-8")
+    order_refused = audit_book_coverage(vault)
+    assert any("consecutive toc-only source order" in error for error in order_refused.errors)
+
+
 @pytest.mark.parametrize(
     ("node_change", "body", "message"),
     [
@@ -573,9 +683,7 @@ def test_book_coverage_v7_rejects_remote_runner_for_local_only_source(
         assert isinstance(assignment, dict)
         if assignment.get("delivery") == "run-block":
             assignment["verification_evidence"] = "run-evidence.json"
-            assignment["verification_sha256"] = hashlib.sha256(
-                evidence.read_bytes()
-            ).hexdigest()
+            assignment["verification_sha256"] = hashlib.sha256(evidence.read_bytes()).hexdigest()
     target.write_text(json.dumps(manifest), encoding="utf-8")
 
     remote = audit_book_coverage(vault)
@@ -594,9 +702,7 @@ def test_book_coverage_v7_rejects_remote_runner_for_local_only_source(
     for assignment in assignments:
         assert isinstance(assignment, dict)
         if assignment.get("delivery") == "run-block":
-            assignment["verification_sha256"] = hashlib.sha256(
-                evidence.read_bytes()
-            ).hexdigest()
+            assignment["verification_sha256"] = hashlib.sha256(evidence.read_bytes()).hexdigest()
     target.write_text(json.dumps(manifest), encoding="utf-8")
 
     local = audit_book_coverage(vault)
@@ -699,10 +805,7 @@ def test_book_coverage_v7_rejects_embedded_image_byte_drift(tmp_path: Path) -> N
     _write_verified_root_map(vault)
     _upgrade_manifest_to_v7(vault, manifest)
     asset_bytes = b"archived image bytes"
-    asset_path = (
-        vault
-        / "wiki/private/_sources/knowledge/local-only/kotlin/assets/figure-01.png"
-    )
+    asset_path = vault / "wiki/private/_sources/knowledge/local-only/kotlin/assets/figure-01.png"
     asset_path.parent.mkdir(parents=True, exist_ok=True)
     asset_path.write_bytes(asset_bytes)
     inventory = [
@@ -1145,8 +1248,635 @@ def test_ordered_reader_owner_runs_allow_one_chapter_owner_to_resume() -> None:
     invalid["ordered_reader_sections"][2]["label"] = "3.4 다른 절"
     assert _ordered_reader_owner_runs(invalid, owner) is None
 
+    adjacent_groups = {
+        "navigation_groups": [
+            {"label": "3.3 첫 그룹", "children": [f"{owner}/3-3-1"]},
+            {"label": "3.4 둘째 그룹", "children": [f"{owner}/3-4-1"]},
+        ],
+        "ordered_reader_sections": [
+            {"kind": "source-body", "label": "3.2 직접 절"},
+            {"kind": "navigation-group", "label": "3.3 첫 그룹"},
+            {"kind": "navigation-group", "label": "3.4 둘째 그룹"},
+            {"kind": "source-body", "label": "3.7 요약"},
+        ],
+    }
+    assert _ordered_reader_owner_runs(adjacent_groups, owner) == [
+        owner,
+        f"{owner}/3-3-1",
+        owner,
+        f"{owner}/3-4-1",
+        owner,
+    ]
+
 
 def test_source_structure_allows_exact_ordered_chapter_owner_resume(tmp_path: Path) -> None:
+    owner = "books/llm/chapter-03"
+    first_child = f"{owner}/3-3-1"
+    second_child = f"{owner}/3-4-1"
+    structures = [
+        _source_structure("chapter", "3장", "pages 1-20"),
+        _source_structure("section", "3.1 직접 절", "pages 1-3"),
+        _source_structure("section", "3.3 첫 그룹", "pages 4-9"),
+        _source_structure("subsection", "3.3.1 첫째 깊은 절", "pages 4-9"),
+        _source_structure("section", "3.4 둘째 그룹", "pages 10-17"),
+        _source_structure("subsection", "3.4.1 둘째 깊은 절", "pages 10-17"),
+        _source_structure("section", "3.7 요약", "pages 18-20"),
+    ]
+    manifest = {
+        "source_structure_inventory_evidence": {
+            "locator": "evidence/chapter-03-structure.json",
+            "sha256": "9" * 64,
+            "verified_on": "2026-09-04",
+        },
+        "source_structure_elements": structures,
+        "source_structure_assignments": [
+            {
+                "structure_id": structures[0]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": owner,
+            },
+            {
+                "structure_id": structures[1]["structure_id"],
+                "disposition": "in-page-h2",
+                "owner_id": owner,
+                "heading": "## 3.1 직접 절",
+                "source_order": 1,
+            },
+            {
+                "structure_id": structures[2]["structure_id"],
+                "disposition": "in-page-h2",
+                "owner_id": owner,
+                "heading": "## 3.3 첫 그룹",
+                "source_order": 2,
+            },
+            {
+                "structure_id": structures[3]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": first_child,
+            },
+            {
+                "structure_id": structures[4]["structure_id"],
+                "disposition": "in-page-h2",
+                "owner_id": owner,
+                "heading": "## 3.4 둘째 그룹",
+                "source_order": 3,
+            },
+            {
+                "structure_id": structures[5]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": second_child,
+            },
+            {
+                "structure_id": structures[6]["structure_id"],
+                "disposition": "in-page-h2",
+                "owner_id": owner,
+                "heading": "## 3.7 요약",
+                "source_order": 4,
+            },
+        ],
+    }
+    owner_metadata = {
+        "title": "3장",
+        "navigation_groups": [
+            {"label": "3.3 첫 그룹", "children": [first_child]},
+            {"label": "3.4 둘째 그룹", "children": [second_child]},
+        ],
+        "ordered_reader_sections": [
+            {"kind": "source-body", "label": "3.1 직접 절"},
+            {"kind": "navigation-group", "label": "3.3 첫 그룹"},
+            {"kind": "navigation-group", "label": "3.4 둘째 그룹"},
+            {"kind": "source-body", "label": "3.7 요약"},
+        ],
+    }
+    pages = {
+        owner: (
+            tmp_path / "chapter-03.md",
+            owner_metadata,
+            "# 3장\n\n"
+            "## 3.1 직접 절\n\n본문\n\n"
+            f"{BOOK_READER_NAVIGATION_START}\n"
+            "## 3.3 첫 그룹\n"
+            f"- [[wiki/{first_child}|3.3.1 첫째 깊은 절]]\n"
+            f"{BOOK_READER_NAVIGATION_END}\n\n"
+            f"{BOOK_READER_NAVIGATION_START}\n"
+            "## 3.4 둘째 그룹\n"
+            f"- [[wiki/{second_child}|3.4.1 둘째 깊은 절]]\n"
+            f"{BOOK_READER_NAVIGATION_END}\n\n"
+            "## 3.7 요약\n\n요약\n",
+        ),
+        first_child: (
+            tmp_path / "3-3-1.md",
+            {"title": "3.3.1 첫째 깊은 절", "parent": f"[[wiki/{owner}|3장]]"},
+            "# 첫째 깊은 절\n",
+        ),
+        second_child: (
+            tmp_path / "3-4-1.md",
+            {"title": "3.4.1 둘째 깊은 절", "parent": f"[[wiki/{owner}|3장]]"},
+            "# 둘째 깊은 절\n",
+        ),
+    }
+    errors: list[str] = []
+
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        {owner, first_child, second_child},
+        {owner, first_child, second_child},
+        [owner, first_child, second_child],
+        pages,
+        errors,
+    )
+
+    assert errors == []
+
+    owner_metadata["ordered_reader_sections"] = [
+        {"kind": "source-body", "label": "3.1 직접 절"},
+        {"kind": "navigation-group", "label": "3.3 첫 그룹"},
+        {"kind": "source-body", "label": "3.7 요약"},
+        {"kind": "navigation-group", "label": "3.4 둘째 그룹"},
+    ]
+    stale_errors: list[str] = []
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        {owner, first_child, second_child},
+        {owner, first_child, second_child},
+        [owner, first_child, second_child],
+        pages,
+        stale_errors,
+    )
+    assert any("must be contiguous or match" in error for error in stale_errors)
+    assert any("differs from exact source order" in error for error in stale_errors)
+
+    owner_metadata["ordered_reader_sections"] = [
+        {"kind": "source-body", "label": "3.1 직접 절"},
+        {"kind": "navigation-group", "label": "3.3 첫 그룹"},
+        {"kind": "navigation-group", "label": "3.4 둘째 그룹"},
+        {"kind": "source-body", "label": "3.7 요약"},
+    ]
+    first_child_metadata = pages[first_child][1]
+    first_child_metadata["parent"] = "[[wiki/books/llm|잘못된 부모]]"
+    parent_errors: list[str] = []
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        {owner, first_child, second_child},
+        {owner, first_child, second_child},
+        [owner, first_child, second_child],
+        pages,
+        parent_errors,
+    )
+    assert any("is not a direct canonical child" in error for error in parent_errors)
+    first_child_metadata["parent"] = f"[[wiki/{owner}|3장]]"
+
+    wrapper = f"{owner}/3-3"
+    pages[wrapper] = (
+        tmp_path / "3-3.md",
+        {"title": "3.3 첫 그룹", "parent": f"[[wiki/{owner}|3장]]"},
+        "# 3.3 첫 그룹\n",
+    )
+    wrapper_errors: list[str] = []
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        {owner, first_child, second_child},
+        {owner, first_child, second_child},
+        [owner, first_child, second_child],
+        pages,
+        wrapper_errors,
+    )
+    assert any("duplicate-title wrapper node" in error for error in wrapper_errors)
+    pages.pop(wrapper)
+
+    reordered_manifest = json.loads(json.dumps(manifest))
+    reordered_structures = reordered_manifest["source_structure_elements"]
+    reordered_structures[3], reordered_structures[5] = (
+        reordered_structures[5],
+        reordered_structures[3],
+    )
+    order_errors: list[str] = []
+    _audit_source_structure_contract(
+        "book",
+        reordered_manifest,
+        {owner, first_child, second_child},
+        {owner, first_child, second_child},
+        [owner, first_child, second_child],
+        pages,
+        order_errors,
+    )
+    assert any("differs from exact source order" in error for error in order_errors)
+
+
+def test_source_structure_assigns_chapter_to_book_root_navigation_heading(
+    tmp_path: Path,
+) -> None:
+    book_id = "books/llm"
+    section_ids = (f"{book_id}/chapter-03/3-1", f"{book_id}/chapter-03/3-3")
+    structures = [
+        _source_structure("front-matter", "예제 책", "cover"),
+        _source_structure("chapter", "3장 어텐션 메커니즘 구현하기", "chapter 3"),
+        _source_structure("section", "3.1 긴 시퀀스 모델링", "section 3.1"),
+        _source_structure("section", "3.3 셀프 어텐션", "section 3.3"),
+    ]
+    manifest = {
+        "book_id": book_id,
+        "source_structure_inventory_evidence": {
+            "locator": "evidence/toc.json",
+            "sha256": "a" * 64,
+            "verified_on": "2026-09-04",
+        },
+        "source_structure_elements": structures,
+        "source_structure_assignments": [
+            {
+                "structure_id": structures[0]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": book_id,
+            },
+            {
+                "structure_id": structures[1]["structure_id"],
+                "disposition": "navigation-group-heading",
+                "owner_id": book_id,
+                "label": "3장 어텐션 메커니즘 구현하기",
+                "source_order": 1,
+            },
+            {
+                "structure_id": structures[2]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": section_ids[0],
+            },
+            {
+                "structure_id": structures[3]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": section_ids[1],
+            },
+        ],
+    }
+    root_metadata = {
+        "title": "예제 책",
+        "entity_kind": "book",
+        "navigation_groups": [
+            {
+                "label": "3장 어텐션 메커니즘 구현하기",
+                "children": list(section_ids),
+            }
+        ],
+    }
+    pages = {
+        book_id: (
+            tmp_path / "book.md",
+            root_metadata,
+            "# 예제 책\n\n## 3장 어텐션 메커니즘 구현하기\n",
+        ),
+        section_ids[0]: (
+            tmp_path / "3-1.md",
+            {"title": "3.1 긴 시퀀스 모델링", "parent": "[[wiki/books/llm|예제 책]]"},
+            "# 3.1 긴 시퀀스 모델링\n",
+        ),
+        section_ids[1]: (
+            tmp_path / "3-3.md",
+            {"title": "3.3 셀프 어텐션", "parent": "[[wiki/books/llm|예제 책]]"},
+            "# 3.3 셀프 어텐션\n",
+        ),
+    }
+    errors: list[str] = []
+
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        {book_id, *section_ids},
+        set(section_ids),
+        [book_id, *section_ids],
+        pages,
+        errors,
+    )
+
+    assert errors == []
+
+    manifest["source_structure_assignments"][1]["source_order"] = 2
+    stale_errors: list[str] = []
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        {book_id, *section_ids},
+        set(section_ids),
+        [book_id, *section_ids],
+        pages,
+        stale_errors,
+    )
+    assert any("consecutive book-root chapter order" in error for error in stale_errors)
+
+
+def test_source_structure_accepts_mixed_toc_heading_and_navigation_group_order(
+    tmp_path: Path,
+) -> None:
+    owner = "books/deep/chapter-01"
+    child = f"{owner}/1-2-1"
+    structures = [
+        _source_structure("chapter", "1장", "printed TOC chapter 1"),
+        _source_structure("section", "1.1 얕은 절", "printed TOC row 1"),
+        _source_structure("section", "1.2 깊은 묶음", "printed TOC row 2"),
+        _source_structure("subsection", "1.2.1 깊은 절", "printed TOC row 3"),
+        _source_structure("section", "1.3 마지막 절", "printed TOC row 4"),
+        _source_structure("back-matter", "1장 참고문헌", "printed TOC row 5"),
+    ]
+    manifest = {
+        "source_structure_inventory_evidence": {
+            "locator": "evidence/deep-toc.json",
+            "sha256": "9" * 64,
+            "verified_on": "2026-09-04",
+        },
+        "source_structure_elements": structures,
+        "source_structure_assignments": [
+            {
+                "structure_id": structures[0]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": owner,
+            },
+            *(
+                {
+                    "structure_id": structures[index]["structure_id"],
+                    "disposition": "toc-heading",
+                    "owner_id": owner,
+                    "heading": f"## {structures[index]['title']}",
+                    "source_order": source_order,
+                }
+                for source_order, index in enumerate((1, 2), start=1)
+            ),
+            {
+                "structure_id": structures[3]["structure_id"],
+                "disposition": "canonical-node",
+                "canonical_id": child,
+            },
+            {
+                "structure_id": structures[4]["structure_id"],
+                "disposition": "toc-heading",
+                "owner_id": owner,
+                "heading": "## 1.3 마지막 절",
+                "source_order": 3,
+            },
+            {
+                "structure_id": structures[5]["structure_id"],
+                "disposition": "toc-heading",
+                "owner_id": owner,
+                "heading": "## 1장 참고문헌",
+                "source_order": 4,
+            },
+        ],
+    }
+    owner_metadata = {
+        "title": "1장",
+        "content_state": "toc-only",
+        "navigation_groups": [{"label": "1.2 깊은 묶음", "children": [child]}],
+        "ordered_reader_sections": [
+            {"kind": "toc-heading", "label": "1.1 얕은 절"},
+            {"kind": "navigation-group", "label": "1.2 깊은 묶음"},
+            {"kind": "toc-heading", "label": "1.3 마지막 절"},
+            {"kind": "toc-heading", "label": "1장 참고문헌"},
+        ],
+    }
+    pages = {
+        owner: (
+            tmp_path / "chapter-01.md",
+            owner_metadata,
+            "# 1장\n\n"
+            f"{BOOK_READER_NAVIGATION_START}\n"
+            "## 1.1 얕은 절\n"
+            "## 1.2 깊은 묶음\n"
+            f"- [[wiki/{child}|1.2.1 깊은 절]]\n"
+            "## 1.3 마지막 절\n"
+            "## 1장 참고문헌\n"
+            f"{BOOK_READER_NAVIGATION_END}\n",
+        ),
+        child: (
+            tmp_path / "1-2-1.md",
+            {
+                "title": "1.2.1 깊은 절",
+                "content_state": "toc-only",
+                "parent": f"[[wiki/{owner}|1장]]",
+            },
+            "# 1.2.1 깊은 절\n",
+        ),
+    }
+    errors: list[str] = []
+
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        {owner, child},
+        set(),
+        [owner, child],
+        pages,
+        errors,
+    )
+
+    assert errors == []
+
+    invalid_manifest = json.loads(json.dumps(manifest))
+    invalid_structure = _source_structure(
+        "appendix", "부록처럼 보이는 잘못된 장 항목", "printed TOC row 6"
+    )
+    invalid_manifest["source_structure_elements"].append(invalid_structure)
+    invalid_manifest["source_structure_assignments"].append(
+        {
+            "structure_id": invalid_structure["structure_id"],
+            "disposition": "toc-heading",
+            "owner_id": owner,
+            "heading": "## 부록처럼 보이는 잘못된 장 항목",
+            "source_order": 5,
+        }
+    )
+    invalid_pages = dict(pages)
+    invalid_metadata = json.loads(json.dumps(owner_metadata))
+    invalid_metadata["ordered_reader_sections"].append(
+        {"kind": "toc-heading", "label": "부록처럼 보이는 잘못된 장 항목"}
+    )
+    invalid_body = pages[owner][2].replace(
+        f"{BOOK_READER_NAVIGATION_END}\n",
+        f"## 부록처럼 보이는 잘못된 장 항목\n{BOOK_READER_NAVIGATION_END}\n",
+    )
+    invalid_pages[owner] = (pages[owner][0], invalid_metadata, invalid_body)
+    invalid_errors: list[str] = []
+
+    _audit_source_structure_contract(
+        "book",
+        invalid_manifest,
+        {owner, child},
+        set(),
+        [owner, child],
+        invalid_pages,
+        invalid_errors,
+    )
+
+    assert any(
+        "toc-heading is allowed only for source sections or chapter back matter" in error
+        for error in invalid_errors
+    )
+
+
+def test_source_structure_accepts_multiple_independent_mixed_chapters(
+    tmp_path: Path,
+) -> None:
+    structures: list[dict[str, object]] = []
+    assignments: list[dict[str, object]] = []
+    pages: dict[str, tuple[Path, dict[str, object], str]] = {}
+    node_order: list[str] = []
+    node_ids: set[str] = set()
+
+    for chapter in (1, 2):
+        owner = f"books/deep/chapter-{chapter:02d}"
+        child = f"{owner}/{chapter}-2-1"
+        chapter_structures = [
+            _source_structure(
+                "chapter",
+                f"{chapter}장",
+                f"printed TOC chapter {chapter}",
+            ),
+            _source_structure(
+                "section",
+                f"{chapter}.1 얕은 절",
+                f"printed TOC chapter {chapter} row 1",
+            ),
+            _source_structure(
+                "section",
+                f"{chapter}.2 깊은 묶음",
+                f"printed TOC chapter {chapter} row 2",
+            ),
+            _source_structure(
+                "subsection",
+                f"{chapter}.2.1 깊은 절",
+                f"printed TOC chapter {chapter} row 3",
+            ),
+            _source_structure(
+                "section",
+                f"{chapter}.3 마지막 절",
+                f"printed TOC chapter {chapter} row 4",
+            ),
+        ]
+        structures.extend(chapter_structures)
+        assignments.extend(
+            [
+                {
+                    "structure_id": chapter_structures[0]["structure_id"],
+                    "disposition": "canonical-node",
+                    "canonical_id": owner,
+                },
+                {
+                    "structure_id": chapter_structures[1]["structure_id"],
+                    "disposition": "toc-heading",
+                    "owner_id": owner,
+                    "heading": f"## {chapter}.1 얕은 절",
+                    "source_order": 1,
+                },
+                {
+                    "structure_id": chapter_structures[2]["structure_id"],
+                    "disposition": "toc-heading",
+                    "owner_id": owner,
+                    "heading": f"## {chapter}.2 깊은 묶음",
+                    "source_order": 2,
+                },
+                {
+                    "structure_id": chapter_structures[3]["structure_id"],
+                    "disposition": "canonical-node",
+                    "canonical_id": child,
+                },
+                {
+                    "structure_id": chapter_structures[4]["structure_id"],
+                    "disposition": "toc-heading",
+                    "owner_id": owner,
+                    "heading": f"## {chapter}.3 마지막 절",
+                    "source_order": 3,
+                },
+            ]
+        )
+        metadata: dict[str, object] = {
+            "title": f"{chapter}장",
+            "content_state": "toc-only",
+            "navigation_groups": [
+                {"label": f"{chapter}.2 깊은 묶음", "children": [child]}
+            ],
+            "ordered_reader_sections": [
+                {"kind": "toc-heading", "label": f"{chapter}.1 얕은 절"},
+                {
+                    "kind": "navigation-group",
+                    "label": f"{chapter}.2 깊은 묶음",
+                },
+                {"kind": "toc-heading", "label": f"{chapter}.3 마지막 절"},
+            ],
+        }
+        pages[owner] = (
+            tmp_path / f"chapter-{chapter:02d}.md",
+            metadata,
+            f"# {chapter}장\n\n"
+            f"{BOOK_READER_NAVIGATION_START}\n"
+            f"## {chapter}.1 얕은 절\n"
+            f"## {chapter}.2 깊은 묶음\n"
+            f"- [[wiki/{child}|{chapter}.2.1 깊은 절]]\n"
+            f"## {chapter}.3 마지막 절\n"
+            f"{BOOK_READER_NAVIGATION_END}\n",
+        )
+        pages[child] = (
+            tmp_path / f"{chapter}-2-1.md",
+            {
+                "title": f"{chapter}.2.1 깊은 절",
+                "content_state": "toc-only",
+                "parent": f"[[wiki/{owner}|{chapter}장]]",
+            },
+            f"# {chapter}.2.1 깊은 절\n",
+        )
+        node_order.extend((owner, child))
+        node_ids.update((owner, child))
+
+    manifest = {
+        "source_structure_inventory_evidence": {
+            "locator": "evidence/deep-full-toc.json",
+            "sha256": "9" * 64,
+            "verified_on": "2026-09-04",
+        },
+        "source_structure_elements": structures,
+        "source_structure_assignments": assignments,
+    }
+    errors: list[str] = []
+
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        node_ids,
+        set(),
+        node_order,
+        pages,
+        errors,
+    )
+
+    assert errors == []
+
+    invalid_pages = dict(pages)
+    second_owner = "books/deep/chapter-02"
+    second_path, second_metadata, second_body = invalid_pages[second_owner]
+    invalid_metadata = dict(second_metadata)
+    invalid_metadata.pop("ordered_reader_sections")
+    invalid_pages[second_owner] = (second_path, invalid_metadata, second_body)
+    invalid_errors: list[str] = []
+
+    _audit_source_structure_contract(
+        "book",
+        manifest,
+        node_ids,
+        set(),
+        node_order,
+        invalid_pages,
+        invalid_errors,
+    )
+
+    assert any(
+        "must be contiguous or match ordered_reader_sections exactly: " + second_owner
+        in error
+        for error in invalid_errors
+    )
+
+
+def test_source_structure_rejects_navigation_group_without_parent_h2_source(
+    tmp_path: Path,
+) -> None:
     owner = "books/llm/chapter-03"
     child = f"{owner}/3-3-1"
     structures = [
@@ -1189,7 +1919,7 @@ def test_source_structure_allows_exact_ordered_chapter_owner_resume(tmp_path: Pa
             },
         ],
     }
-    owner_metadata = {
+    metadata = {
         "title": "3장",
         "navigation_groups": [{"label": "3.3 깊은 절", "children": [child]}],
         "ordered_reader_sections": [
@@ -1201,10 +1931,14 @@ def test_source_structure_allows_exact_ordered_chapter_owner_resume(tmp_path: Pa
     pages = {
         owner: (
             tmp_path / "chapter-03.md",
-            owner_metadata,
-            "# 3장\n\n## 3.1 직접 절\n\n본문\n\n## 3.7 요약\n\n요약\n",
+            metadata,
+            "# 3장\n\n## 3.1 직접 절\n\n## 3.3 깊은 절\n\n## 3.7 요약\n",
         ),
-        child: (tmp_path / "3-3-1.md", {"title": "3.3.1 깊은 절"}, "# 깊은 절\n"),
+        child: (
+            tmp_path / "3-3-1.md",
+            {"title": "3.3.1 깊은 절", "parent": f"[[wiki/{owner}|3장]]"},
+            "# 깊은 절\n",
+        ),
     }
     errors: list[str] = []
 
@@ -1218,24 +1952,9 @@ def test_source_structure_allows_exact_ordered_chapter_owner_resume(tmp_path: Pa
         errors,
     )
 
-    assert errors == []
-
-    owner_metadata["ordered_reader_sections"] = [
-        {"kind": "source-body", "label": "3.1 직접 절"},
-        {"kind": "source-body", "label": "3.7 요약"},
-        {"kind": "navigation-group", "label": "3.3 깊은 절"},
-    ]
-    stale_errors: list[str] = []
-    _audit_source_structure_contract(
-        "book",
-        manifest,
-        {owner, child},
-        {owner, child},
-        [owner, child],
-        pages,
-        stale_errors,
+    assert any(
+        "must own exactly one matching source section: 3.3 깊은 절" in error for error in errors
     )
-    assert any("must be contiguous or match" in error for error in stale_errors)
 
 
 def test_ordered_book_reader_ui_validates_interleaved_headings_and_links(
@@ -1386,8 +2105,7 @@ def test_book_coverage_keeps_canonical_node_reuse_forbidden(tmp_path: Path) -> N
 
     assert report.complete is False
     assert any(
-        "multiple structures reuse canonical node" in error
-        for error in report.source.errors
+        "multiple structures reuse canonical node" in error for error in report.source.errors
     )
 
 
@@ -1793,27 +2511,19 @@ def test_book_coverage_accepts_source_pinned_static_code_without_synthetic_harne
     assignments[2]["exception_reason_code"] = "convenience"
     target.write_text(json.dumps(manifest), encoding="utf-8")
     invalid_reason = audit_book_coverage(vault)
-    assert any(
-        "exception_reason_code must be one of" in error
-        for error in invalid_reason.errors
-    )
+    assert any("exception_reason_code must be one of" in error for error in invalid_reason.errors)
 
     assignments[2]["exception_reason_code"] = "dependency"
     assignments[2]["runnable_required"] = True
     target.write_text(json.dumps(manifest), encoding="utf-8")
     runnable_required = audit_book_coverage(vault)
-    assert any(
-        "runnable_required must be false" in error
-        for error in runnable_required.errors
-    )
+    assert any("runnable_required must be false" in error for error in runnable_required.errors)
 
     assignments[2]["runnable_required"] = False
     assignments[2]["static_body_sha256"] = "0" * 64
     target.write_text(json.dumps(manifest), encoding="utf-8")
     stale_body = audit_book_coverage(vault)
-    assert any(
-        "static_body_sha256 does not match" in error for error in stale_body.errors
-    )
+    assert any("static_body_sha256 does not match" in error for error in stale_body.errors)
 
 
 def test_source_landed_english_harness_fidelity_span_uses_source_language() -> None:
@@ -2237,8 +2947,7 @@ def test_book_coverage_rejects_generated_learning_workflow_sections(
 
     assert report.complete is False
     assert any(
-        "reader body contains generated learning workflow prose" in error
-        for error in report.errors
+        "reader body contains generated learning workflow prose" in error for error in report.errors
     )
 
 

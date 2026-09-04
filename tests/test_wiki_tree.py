@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from woon_core.knowledge.wiki_tree import (
+    BOOK_READER_NAVIGATION_END,
+    BOOK_READER_NAVIGATION_START,
     CHILDREN_END,
     CHILDREN_START,
     SOURCE_INDEX_END,
@@ -628,7 +630,7 @@ def test_book_chapter_shows_only_direct_toc_depth_without_latest_descendants(
         extra=(
             "view_mode: linear\n"
             "navigation_groups:\n"
-                "- label: 시작 흐름\n"
+            "- label: 시작 흐름\n"
             "  children:\n"
             "  - books/llm/chapter-01/1-1\n"
         ),
@@ -903,9 +905,7 @@ def test_nested_book_navigation_map_renders_h2_topics_with_direct_links(
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert report.issues == ()
-    nested = report.pages[
-        tmp_path / "wiki/books/software/llm/chapter-03/3-3.md"
-    ].decode("utf-8")
+    nested = report.pages[tmp_path / "wiki/books/software/llm/chapter-03/3-3.md"].decode("utf-8")
     assert (
         "## 3.3.1 단어 단위 토큰화\n"
         "- [[wiki/books/software/llm/chapter-03/3-3/3-3-1|3.3.1 단어 단위 토큰화]]"
@@ -1021,12 +1021,12 @@ def test_book_chapter_interleaves_source_body_and_deep_navigation_in_source_orde
     assert rendered.count("<!-- woon-book-reader-navigation:start -->") == 1
     assert "- [[wiki/books/ai/llm/chapter-03/3-3-1|3.3.1 첫째]]" in rendered
     assert strip_generated_wiki_views(rendered).rstrip().endswith(original_body)
+    assert preserve_generated_wiki_views(rendered, strip_generated_wiki_views(rendered)) == rendered
 
     apply_wiki_tree_refresh(tmp_path, report)
     replay = prepare_wiki_tree_refresh(tmp_path)
     assert replay.issues == ()
     assert replay.changed_count == 0
-
 
 def test_ordered_reader_sections_fail_closed_outside_book_chapter(tmp_path: Path) -> None:
     _write_page(
@@ -1053,6 +1053,329 @@ def test_ordered_reader_sections_fail_closed_outside_book_chapter(tmp_path: Path
         "wiki/README.md: ordered_reader_sections are allowed only on a book chapter"
         in report.issues
     )
+
+
+def test_toc_only_chapter_renders_ordered_terminal_headings_without_links(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai.md",
+        title="AI",
+        canonical_id="books/ai",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("AI",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai/example.md",
+        title="예제 책",
+        canonical_id="books/example",
+        node_kind="entity",
+        parent="[[wiki/books/ai|AI]]",
+        keywords=("예제 책",),
+        extra=(
+            "entity_kind: book\n"
+            "navigation_groups:\n"
+            "- label: 본문\n"
+            "  children:\n"
+            "  - books/example/appendix-a\n"
+        ),
+    )
+    chapter_path = "wiki/books/ai/example/appendix-a.md"
+    _write_page(
+        tmp_path,
+        chapter_path,
+        title="부록 A",
+        canonical_id="books/example/appendix-a",
+        node_kind="topic",
+        parent="[[wiki/books/ai/example|예제 책]]",
+        keywords=("부록 A",),
+        extra=(
+            "content_state: toc-only\n"
+            "ordered_reader_sections:\n"
+            "- kind: toc-heading\n"
+            "  label: A.1 첫째 절\n"
+            "- kind: toc-heading\n"
+            "  label: A.2 둘째 절\n"
+        ),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / chapter_path].decode("utf-8")
+    assert rendered.index("## A.1 첫째 절") < rendered.index("## A.2 둘째 절")
+    assert (
+        "[["
+        not in rendered.split(BOOK_READER_NAVIGATION_START, 1)[1].split(
+            BOOK_READER_NAVIGATION_END, 1
+        )[0]
+    )
+    assert strip_generated_wiki_views(rendered).rstrip().endswith("# 부록 A")
+    assert preserve_generated_wiki_views(rendered, strip_generated_wiki_views(rendered)) == rendered
+
+    apply_wiki_tree_refresh(tmp_path, report)
+    replay = prepare_wiki_tree_refresh(tmp_path)
+    assert replay.issues == ()
+    assert replay.changed_count == 0
+
+    child_id = "books/example/appendix-a/a-2-1"
+    _write_page(
+        tmp_path,
+        "wiki/books/ai/example/appendix-a/a-2-1.md",
+        title="A.2.1 깊은 절",
+        canonical_id=child_id,
+        node_kind="detail",
+        parent="[[wiki/books/ai/example/appendix-a|부록 A]]",
+        keywords=("A.2.1 깊은 절",),
+    )
+    _write_page(
+        tmp_path,
+        chapter_path,
+        title="부록 A",
+        canonical_id="books/example/appendix-a",
+        node_kind="topic",
+        parent="[[wiki/books/ai/example|예제 책]]",
+        keywords=("부록 A",),
+        extra=(
+            "content_state: toc-only\n"
+            "navigation_groups:\n"
+            "- label: A.2 깊은 묶음\n"
+            f"  children:\n  - {child_id}\n"
+            "ordered_reader_sections:\n"
+            "- kind: toc-heading\n"
+            "  label: A.1 첫째 절\n"
+            "- kind: navigation-group\n"
+            "  label: A.2 깊은 묶음\n"
+            "- kind: toc-heading\n"
+            "  label: A.3 셋째 절\n"
+        ),
+    )
+    mixed = prepare_wiki_tree_refresh(tmp_path)
+    assert mixed.issues == ()
+    mixed_body = mixed.pages[tmp_path / chapter_path].decode("utf-8")
+    mixed_labels = ("## A.1 첫째 절", "## A.2 깊은 묶음", "## A.3 셋째 절")
+    assert [mixed_body.index(label) for label in mixed_labels] == sorted(
+        mixed_body.index(label) for label in mixed_labels
+    )
+    assert "- [[wiki/books/ai/example/appendix-a/a-2-1|A.2.1 깊은 절]]" in mixed_body
+
+
+def test_toc_heading_rejects_authored_body_and_mixed_reader_kinds(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai.md",
+        title="AI",
+        canonical_id="books/ai",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("AI",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai/example.md",
+        title="예제 책",
+        canonical_id="books/example",
+        node_kind="entity",
+        parent="[[wiki/books/ai|AI]]",
+        keywords=("예제 책",),
+        extra=(
+            "entity_kind: book\n"
+            "navigation_groups:\n"
+            "- label: 부록\n"
+            "  children:\n"
+            "  - books/example/appendix-a\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai/example/appendix-a.md",
+        title="부록 A",
+        canonical_id="books/example/appendix-a",
+        node_kind="topic",
+        parent="[[wiki/books/ai/example|예제 책]]",
+        keywords=("부록 A",),
+        body="```python\nprint('reader content is forbidden')\n```",
+        extra=(
+            "content_state: toc-only\n"
+            "ordered_reader_sections:\n"
+            "- kind: toc-heading\n"
+            "  label: A.1 첫째 절\n"
+            "- kind: source-body\n"
+            "  label: A.2 둘째 절\n"
+        ),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert any(
+        "toc-heading may combine only with navigation-group" in issue
+        for issue in report.issues
+    )
+
+    _write_page(
+        tmp_path,
+        "wiki/books/ai/example/appendix-a.md",
+        title="부록 A",
+        canonical_id="books/example/appendix-a",
+        node_kind="topic",
+        parent="[[wiki/books/ai/example|예제 책]]",
+        keywords=("부록 A",),
+        body="![금지된 그림](figure.png)",
+        extra=(
+            "content_state: toc-only\n"
+            "ordered_reader_sections:\n"
+            "- kind: toc-heading\n"
+            "  label: A.1 첫째 절\n"
+        ),
+    )
+    body_report = prepare_wiki_tree_refresh(tmp_path)
+    assert any(
+        "must not contain authored prose, code, images, or links" in issue
+        for issue in body_report.issues
+    )
+
+
+def test_book_root_can_index_sections_directly_and_section_can_index_subsections(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
+        title="책",
+        canonical_id="books/README",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("책",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai.md",
+        title="AI",
+        canonical_id="books/ai",
+        node_kind="hub",
+        parent="[[wiki/books/README|책]]",
+        keywords=("AI",),
+    )
+    book_path = "wiki/books/ai/example.md"
+    book_id = "books/example"
+    section_id = f"{book_id}/chapter-03/3-3"
+    direct_id = f"{book_id}/chapter-03/3-1"
+    child_ids = (f"{section_id}/3-3-1", f"{section_id}/3-3-2")
+    _write_page(
+        tmp_path,
+        book_path,
+        title="예제 책",
+        canonical_id=book_id,
+        node_kind="entity",
+        parent="[[wiki/books/ai|AI]]",
+        keywords=("예제 책",),
+        extra=(
+            "entity_kind: book\n"
+            "navigation_groups:\n"
+            "- label: 3장 어텐션 메커니즘 구현하기\n"
+            "  children:\n"
+            f"  - {direct_id}\n"
+            f"  - {section_id}\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/books/ai/example/3-1.md",
+        title="3.1 긴 시퀀스 모델링의 문제점",
+        canonical_id=direct_id,
+        node_kind="detail",
+        parent="[[wiki/books/ai/example|예제 책]]",
+        keywords=("3.1 긴 시퀀스 모델링의 문제점",),
+        body="원문에서 검증한 절 본문이다.",
+    )
+    section_path = "wiki/books/ai/example/3-3.md"
+    _write_page(
+        tmp_path,
+        section_path,
+        title="3.3 셀프 어텐션으로 주의 기울이기",
+        canonical_id=section_id,
+        node_kind="topic",
+        parent="[[wiki/books/ai/example|예제 책]]",
+        keywords=("3.3 셀프 어텐션으로 주의 기울이기",),
+        body="원문에서 검증한 3.3 도입 본문이다.",
+        extra=(
+            "navigation_groups:\n"
+            "- label: 3.3 셀프 어텐션으로 주의 기울이기\n"
+            "  children:\n"
+            f"  - {child_ids[0]}\n"
+            f"  - {child_ids[1]}\n"
+        ),
+    )
+    for index, child_id in enumerate(child_ids, start=1):
+        _write_page(
+            tmp_path,
+            f"wiki/books/ai/example/3-3-{index}.md",
+            title=f"3.3.{index} 하위 절 {index}",
+            canonical_id=child_id,
+            node_kind="detail",
+            parent="[[wiki/books/ai/example/3-3|3.3 셀프 어텐션으로 주의 기울이기]]",
+            keywords=(f"3.3.{index} 하위 절 {index}",),
+            body=f"하위 원문 {index}",
+        )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    root = report.pages[tmp_path / book_path].decode("utf-8")
+    assert "## 3장 어텐션 메커니즘 구현하기" in root
+    assert "[[wiki/books/ai/example/3-1|3.1 긴 시퀀스 모델링의 문제점]]" in root
+    assert "[[wiki/books/ai/example/3-3|3.3 셀프 어텐션으로 주의 기울이기]]" in root
+    section = report.pages[tmp_path / section_path].decode("utf-8")
+    assert section.count("## 3.3 셀프 어텐션으로 주의 기울이기") == 0
+    assert "원문에서 검증한 3.3 도입 본문이다." in section
+    assert "[[wiki/books/ai/example/3-3-1|3.3.1 하위 절 1]]" in section
+    assert "[[wiki/books/ai/example/3-3-2|3.3.2 하위 절 2]]" in section
 
 
 def test_book_map_with_children_requires_source_owned_navigation_groups(
@@ -1382,7 +1705,7 @@ def test_books_are_separate_genre_catalog_with_link_only_book_contents(tmp_path:
             "  children:\n"
             "  - books/llm/chapter-01\n"
         ),
-            body="",
+        body="",
     )
     _write_page(
         tmp_path,
@@ -2208,7 +2531,7 @@ def test_learning_book_projects_every_declared_child_as_visible(tmp_path: Path) 
             "  children:\n"
             "  - books/kotlin/chapter-01\n"
         ),
-            body="",
+        body="",
     )
     _write_page(
         tmp_path,
