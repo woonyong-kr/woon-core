@@ -15,6 +15,7 @@ import yaml
 
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write, exclusive_file_lock
+from woon_core.knowledge.source_boundary import private_source_relative
 
 _EXCLUDED_DIRECTORIES = {
     ".git",
@@ -76,7 +77,7 @@ def _archive_private_source_corpus_locked(
     origin = source.expanduser().resolve()
     name = _safe_name(source_name)
     subject = _wiki_subject(root, wiki_subject)
-    destination_relative = Path("wiki/private/_sources/knowledge/local-only") / name
+    destination_relative = private_source_relative(root, "knowledge", "local-only", name)
     destination = root / destination_relative
     _require_disjoint(origin, root)
 

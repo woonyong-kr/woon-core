@@ -11,7 +11,11 @@ from pathlib import Path
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write
 
+# ``SOURCE_ARCHIVE_RELATIVE`` is the legacy layout.  New code must ask the
+# resolver below for a path rather than concatenate this constant directly.
 SOURCE_ARCHIVE_RELATIVE = Path("wiki/private/_sources")
+PUBLIC_SOURCE_RELATIVE = Path("sources")
+PRIVATE_SOURCE_RELATIVE = Path("private")
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +25,57 @@ class SourceBoundaryMigrationReport:
     byte_count: int
     sources: tuple[tuple[Path, Path], ...]
     manifest: bytes
+
+
+def source_storage_layout(vault: Path) -> str:
+    """Return the only raw-source layout that can currently be written.
+
+    During this migration a Vault may still use the legacy archive.  A mixed
+    tree is deliberately not writable: it requires the hash-complete
+    restructure transaction rather than heuristic locator selection.
+    """
+
+    root = vault.expanduser().resolve()
+    legacy = (root / SOURCE_ARCHIVE_RELATIVE).exists()
+    target = (root / PUBLIC_SOURCE_RELATIVE).exists() or (root / PRIVATE_SOURCE_RELATIVE).exists()
+    if legacy and target:
+        return "mixed"
+    if legacy:
+        return "legacy"
+    if target:
+        return "target"
+    return "empty"
+
+
+def private_source_relative(vault: Path, *parts: str) -> Path:
+    """Resolve a private source locator without silently mixing layouts."""
+
+    layout = source_storage_layout(vault)
+    if layout == "legacy":
+        return SOURCE_ARCHIVE_RELATIVE.joinpath(*parts)
+    if layout in {"target", "empty"}:
+        return PRIVATE_SOURCE_RELATIVE.joinpath(*parts)
+    raise WoonError("raw source layout is mixed; complete source-restructure before writing")
+
+
+def is_private_source_relative(value: str | Path) -> bool:
+    """Accept legacy and target private locators only during the transition."""
+
+    candidate = Path(value)
+    return candidate.is_relative_to(SOURCE_ARCHIVE_RELATIVE) or candidate.is_relative_to(
+        PRIVATE_SOURCE_RELATIVE
+    )
+
+
+def is_raw_source_relative(value: str | Path) -> bool:
+    """Recognize either approved raw-source root while migration is in progress."""
+
+    candidate = Path(value)
+    return (
+        candidate.is_relative_to(SOURCE_ARCHIVE_RELATIVE)
+        or candidate.is_relative_to(PUBLIC_SOURCE_RELATIVE)
+        or candidate.is_relative_to(PRIVATE_SOURCE_RELATIVE)
+    )
 
 
 def prepare_source_boundary_migration(
