@@ -597,6 +597,30 @@ def convert_atomic_wrapper_to_rights_toc_only(compiler: CompiledWiki) -> str:
     return page_id
 
 
+def convert_atomic_leaf_to_source_free_toc_only(compiler: CompiledWiki) -> str:
+    """Replace the fixture leaf with an empty compiler-owned TOC shell."""
+
+    page_id = "books/atomic-book/chapter-01"
+    sources, claims, pages, curations, _ = compiler._load_inputs()
+    page = pages[page_id]
+    for source_id in page["source_ids"]:
+        del sources[source_id]
+    for claim_id in page["claim_ids"]:
+        del claims[claim_id]
+    page["source_ids"] = []
+    page["claim_ids"] = []
+    page["render"] = {"kind": "toc-only"}
+    page["frontmatter"].update(
+        {
+            "content_state": "toc-only",
+            "source_ids": [],
+        }
+    )
+    compiler._write_inputs(sources, claims, pages, curations)
+    compiler.compile(force=True)
+    return page_id
+
+
 def atomic_book_new_coverage_update(
     vault: Path,
     *,
@@ -3556,7 +3580,7 @@ def test_source_free_toc_only_leaf_retirement_rejects_authored_prose(
         )
 
 
-def test_preflight_accepts_empty_reader_body_for_rights_toc_wrapper(
+def test_preflight_allows_empty_rights_toc_wrapper_coverage_node_removal(
     tmp_path: Path,
 ) -> None:
     compiler, service, _, record, _, _ = atomic_book_service(tmp_path)
@@ -3564,9 +3588,28 @@ def test_preflight_accepts_empty_reader_body_for_rights_toc_wrapper(
     service.reindex()
     root = service.get("books/atomic-book")
     wrapper = service.get(wrapper_id)
-    coverage_update, _, _ = atomic_book_coverage_update(tmp_path)
+    coverage_update, coverage_path, _ = atomic_book_coverage_update(tmp_path)
+    current_coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+    current_coverage["nodes"].insert(
+        0,
+        {
+            "canonical_id": wrapper_id,
+            "has_direct_content": False,
+            "kind": "section",
+            "leaf": False,
+            "parent_id": "books/atomic-book",
+            "source_locator": "source://atomic-book#part-01",
+            "state": "toc-only",
+        },
+    )
+    current_coverage["toc_node_count"] = 2
+    current_bytes = (json.dumps(current_coverage, ensure_ascii=False, indent=2) + "\n").encode()
+    coverage_path.write_bytes(current_bytes)
+    coverage_update = replace(
+        coverage_update,
+        expected_sha256=hashlib.sha256(current_bytes).hexdigest(),
+    )
 
-    assert wrapper.body == ""
     report = service.preflight_verified_book_update(
         (replace(record, expected_revision=root.revision),),
         {wrapper_id: "books/atomic-book"},
@@ -3577,6 +3620,110 @@ def test_preflight_accepts_empty_reader_body_for_rights_toc_wrapper(
 
     assert report.ready is True
     assert report.retirement_count == 1
+
+
+@pytest.mark.parametrize("authored_child", (False, True))
+def test_navigation_reparent_accepts_only_empty_source_free_toc_child(
+    tmp_path: Path,
+    authored_child: bool,
+) -> None:
+    compiler, service, _, record, _, _ = atomic_book_service(tmp_path)
+    wrapper_id = convert_atomic_wrapper_to_rights_toc_only(compiler)
+    leaf_id = convert_atomic_leaf_to_source_free_toc_only(compiler)
+    service.reindex()
+    if authored_child:
+        leaf_path = tmp_path / "wiki" / f"{leaf_id}.md"
+        leaf_path.write_text(
+            leaf_path.read_text(encoding="utf-8") + "\n이 문장은 보존해야 하는 독자 본문이다.\n",
+            encoding="utf-8",
+        )
+    group_id = f"{wrapper_id}/1-1"
+    root = service.get("books/atomic-book")
+    leaf = service.get(leaf_id)
+    pages_payload = yaml.safe_load(compiler._settings.pages_path.read_text(encoding="utf-8"))
+    leaf_frontmatter = copy.deepcopy(
+        next(page["frontmatter"] for page in pages_payload["pages"] if page["page_id"] == leaf_id)
+    )
+    leaf_frontmatter["parent"] = f"[[wiki/{group_id}|1.1 실제 절 묶음]]"
+    group_frontmatter = verified_book_frontmatter(
+        group_id,
+        "1.1 실제 절 묶음",
+        "books/atomic-book",
+    )
+    group_frontmatter.update(
+        {
+            "content_state": "toc-only",
+            "source_ids": [],
+            "navigation_groups": [{"label": "1.1 실제 절 묶음", "children": [leaf_id]}],
+        }
+    )
+    group_record = VerifiedBookPage(
+        page_id=group_id,
+        title="1.1 실제 절 묶음",
+        body="",
+        statement="실제 원문 깊이의 하위 절을 묶는다.",
+        current_use="1.1 하위 절을 탐색할 때 사용한다.",
+        source_locator="source://atomic-book#section-1-1",
+        source_sha256="d" * 64,
+        frontmatter=group_frontmatter,
+    )
+    leaf_record = VerifiedBookPage(
+        page_id=leaf_id,
+        title="1장 실제 내용",
+        body="",
+        statement="빈 원문 목차 leaf의 위치를 보존한다.",
+        current_use="실제 원문 leaf를 탐색할 때 사용한다.",
+        source_locator="source://atomic-book#chapter-01",
+        source_sha256="d" * 64,
+        frontmatter=leaf_frontmatter,
+        expected_revision=leaf.revision,
+    )
+    root_record = replace(
+        record,
+        expected_revision=root.revision,
+        frontmatter={
+            **copy.deepcopy(record.frontmatter),
+            "navigation_groups": [{"label": "1부", "children": [group_id]}],
+        },
+    )
+    current_manifest = {
+        "nodes": [
+            {"canonical_id": wrapper_id, "parent_id": "books/atomic-book"},
+            {"canonical_id": leaf_id, "parent_id": wrapper_id},
+        ],
+        "source_element_assignments": [],
+    }
+    replacement_manifest = {
+        "nodes": [
+            {"canonical_id": group_id, "parent_id": "books/atomic-book"},
+            {"canonical_id": leaf_id, "parent_id": group_id},
+        ],
+        "source_element_assignments": [],
+    }
+    records = (root_record, group_record, leaf_record)
+    if authored_child:
+        with pytest.raises(
+            WoonError,
+            match="source-free toc-only retirement contains authored reader content",
+        ):
+            compiler._validated_book_navigation_reparents(
+                records,
+                current_manifest,
+                replacement_manifest,
+                {wrapper_id},
+                {wrapper_id: "books/atomic-book"},
+            )
+        return
+
+    assert compiler._validated_book_navigation_reparents(
+        records,
+        current_manifest,
+        replacement_manifest,
+        {wrapper_id},
+        {wrapper_id: "books/atomic-book"},
+    ) == {
+        leaf_id: (wrapper_id, group_id),
+    }
 
 
 def test_rights_toc_wrapper_retirement_rejects_authored_reader_body(

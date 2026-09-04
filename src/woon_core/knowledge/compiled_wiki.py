@@ -913,6 +913,7 @@ class CompiledWiki:
             coverage_path, coverage_bytes = self._validated_coverage_manifest_update(
                 coverage_manifest,
                 records=records,
+                retirement_replacements=replacements,
                 retirement_content_relocations=retirement_content_relocations,
             )
             if coverage_manifest.mode == "materialize-scopes":
@@ -2406,6 +2407,7 @@ class CompiledWiki:
         update: BookCoverageManifestUpdate,
         *,
         records: tuple[VerifiedBookPage, ...] = (),
+        retirement_replacements: dict[str, str] | None = None,
         retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> Path:
         """Validate one coverage replacement and return its canonical local path."""
@@ -2413,6 +2415,7 @@ class CompiledWiki:
         path, _ = self._validated_coverage_manifest_update(
             update,
             records=records,
+            retirement_replacements=retirement_replacements,
             retirement_content_relocations=retirement_content_relocations,
         )
         return path
@@ -2971,6 +2974,7 @@ class CompiledWiki:
         update: BookCoverageManifestUpdate,
         *,
         records: tuple[VerifiedBookPage, ...] = (),
+        retirement_replacements: dict[str, str] | None = None,
         retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> tuple[Path, bytes]:
         if update.mode not in {"replace", "merge-scope", "materialize-scopes"}:
@@ -3038,11 +3042,27 @@ class CompiledWiki:
         if not isinstance(update.replacement, dict):
             raise WoonError("book coverage manifest replacement must be an object")
         retired_ids = set((retirement_content_relocations or {}).keys())
+        if retirement_replacements:
+            sources, claims, pages, _, _ = self._load_inputs()
+            for page_id in retirement_replacements:
+                page = pages.get(page_id)
+                if (
+                    page is not None
+                    and self._unrendered_rights_toc_wrapper_retirement_body(
+                        page_id,
+                        page,
+                        sources,
+                        claims,
+                    )
+                    is not None
+                ):
+                    retired_ids.add(page_id)
         allowed_node_parent_changes = self._validated_book_navigation_reparents(
             records,
             current_manifest,
             update.replacement,
             retired_ids,
+            retirement_replacements or {},
         )
         _validate_book_workflow_progression(
             current_manifest,
@@ -3072,6 +3092,7 @@ class CompiledWiki:
         current_manifest: dict[str, Any] | None,
         replacement_manifest: dict[str, Any],
         retired_ids: set[str],
+        retirement_replacements: dict[str, str],
     ) -> dict[str, tuple[str, str]]:
         """Pin parent-only leaf moves into new source-free navigation groups."""
 
@@ -3086,7 +3107,16 @@ class CompiledWiki:
         records_by_id = {record.page_id: record for record in records}
         if len(records_by_id) != len(records):
             return {}
-        sources, _, pages, _, _ = self._load_inputs()
+        sources, claims, pages, _, _ = self._load_inputs()
+        current_assignments = current_manifest.get("source_element_assignments")
+        replacement_assignments = replacement_manifest.get("source_element_assignments")
+        source_element_owners = {
+            str(assignment.get("owner_id", ""))
+            for assignments in (current_assignments, replacement_assignments)
+            if isinstance(assignments, list)
+            for assignment in assignments
+            if isinstance(assignment, dict)
+        }
         allowed: dict[str, tuple[str, str]] = {}
         for page_id, current_node in current_nodes.items():
             replacement_node = replacement_nodes.get(page_id)
@@ -3132,17 +3162,58 @@ class CompiledWiki:
             ):
                 continue
             render = current_page.get("render")
-            if not isinstance(render, dict) or render.get("kind") != "source-body":
+            if not isinstance(render, dict):
                 continue
-            source_id = render.get("source_id")
-            source = sources.get(source_id) if isinstance(source_id, str) else None
-            if not isinstance(source, dict):
-                continue
-            if (
-                _curated_body(child_record.body) != _curated_body(str(source.get("body", "")))
-                or child_record.source_locator != source.get("locator")
-                or child_record.source_sha256 != source.get("original_sha256")
-            ):
+            if render.get("kind") == "source-body":
+                source_id = render.get("source_id")
+                source = sources.get(source_id) if isinstance(source_id, str) else None
+                if not isinstance(source, dict):
+                    continue
+                if (
+                    _curated_body(child_record.body) != _curated_body(str(source.get("body", "")))
+                    or child_record.source_locator != source.get("locator")
+                    or child_record.source_sha256 != source.get("original_sha256")
+                ):
+                    continue
+            elif render.get("kind") == "toc-only":
+                retired_parent_page = pages.get(old_parent)
+                replacement_parent_id = retirement_replacements.get(old_parent)
+                replacement_parent_record = records_by_id.get(replacement_parent_id or "")
+                current_child_body = self._unrendered_rights_toc_wrapper_retirement_body(
+                    page_id,
+                    current_page,
+                    sources,
+                    claims,
+                )
+                if current_child_body is None and _is_explicit_source_free_toc_page(current_page):
+                    current_child_body = self._source_free_toc_leaf_retirement_body(
+                        page_id,
+                        current_page,
+                        pages,
+                    )
+                if (
+                    not isinstance(retired_parent_page, dict)
+                    or replacement_parent_id is None
+                    or replacement_parent_record is None
+                    or _canonical_parent_id(parent_frontmatter.get("parent"))
+                    != replacement_parent_id
+                    or new_parent
+                    not in _navigation_group_children(replacement_parent_record.frontmatter)
+                    or self._unrendered_rights_toc_wrapper_retirement_body(
+                        old_parent,
+                        retired_parent_page,
+                        sources,
+                        claims,
+                    )
+                    is None
+                    or current_child_body != ""
+                    or child_record.body.strip()
+                    or not _verified_book_toc_only(child_record.frontmatter)
+                    or child_record.frontmatter.get("source_ids", []) != []
+                    or page_id in source_element_owners
+                ):
+                    continue
+            else:
                 continue
             allowed[page_id] = (old_parent, new_parent)
         return allowed
