@@ -49,13 +49,13 @@ UNGROUPED_NAVIGATION_EXCEPTIONS = {
     "wiki/concepts/README.md",
 }
 PUBLIC_WIKI_HUB_PATH = "wiki/Wiki/README.md"
-# The public branch is a fixed vocabulary.  A content topic may grow below an
-# existing leaf after user approval, but a new *hub* would create another
-# navigation level and must therefore be reviewed before it enters this tree.
-PUBLIC_WIKI_HUB_CHILDREN = {
-    "Wiki": frozenset(
+# Every entry in this outline is a real public page. Repeated labels are scoped
+# by their parent: for example, the concept branch `데이터·저장소` may have
+# children while the same label below `책` is an empty accumulation category.
+PUBLIC_WIKI_KEYWORD_OUTLINE = {
+    "개발 Wiki": frozenset({"홈"}),
+    "홈": frozenset(
         {
-            "홈",
             "컴퓨터 과학 기초",
             "프로그래밍 언어·런타임",
             "프런트엔드·클라이언트",
@@ -67,7 +67,6 @@ PUBLIC_WIKI_HUB_CHILDREN = {
             "플랫폼·전달·운영",
             "AI·머신러닝",
             "프로젝트",
-            "책",
         }
     ),
     "컴퓨터 과학 기초": frozenset({"자료구조", "알고리즘", "계산 복잡도"}),
@@ -185,17 +184,40 @@ PUBLIC_WIKI_HUB_CHILDREN = {
         {"머신러닝 기초", "딥러닝", "대규모 언어 모델", "AI 애플리케이션", "AI 평가·안전성"}
     ),
     "프로젝트": frozenset({"K8s Clue"}),
-    "책": frozenset(
-        {
-            "프로그래밍 언어·설계",
-            "프런트엔드·백엔드",
-            "데이터·저장소",
-            "시스템·플랫폼",
-            "품질·보안·신뢰성",
-            "AI·머신러닝",
-        }
-    ),
 }
+# Every approved keyword is a real page node. The hidden boundary's direct
+# children render as top-level Just the Docs entries; descendants use these
+# exact parent edges to form the expandable sidebar.
+PUBLIC_WIKI_HUB_CHILDREN = dict(PUBLIC_WIKI_KEYWORD_OUTLINE)
+PUBLIC_WIKI_HUB_CHILDREN.pop("개발 Wiki")
+PUBLIC_WIKI_HUB_CHILDREN.pop("홈")
+PUBLIC_WIKI_HUB_CHILDREN["공개 Wiki 경계"] = frozenset(
+    {
+        "홈",
+        "컴퓨터 과학 기초",
+        "프로그래밍 언어·런타임",
+        "프런트엔드·클라이언트",
+        "백엔드·서비스",
+        "데이터·저장소",
+        "컴퓨터 시스템·네트워크",
+        "품질·보안·신뢰성",
+        "소프트웨어 설계·아키텍처",
+        "플랫폼·전달·운영",
+        "AI·머신러닝",
+        "프로젝트",
+        "책",
+    }
+)
+PUBLIC_WIKI_HUB_CHILDREN["책"] = frozenset(
+    {
+        "프로그래밍 언어·설계",
+        "프런트엔드·백엔드",
+        "데이터·저장소",
+        "시스템·플랫폼",
+        "품질·보안·신뢰성",
+        "AI·머신러닝",
+    }
+)
 LIFECYCLE_STATES = {
     "idea",
     "planned",
@@ -247,6 +269,7 @@ class WikiTreeNode:
     ended_on: date | None
     occurred_on: date | None
     include_in_latest: bool
+    reader_navigation: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,7 +410,7 @@ def load_wiki_tree(
     texts: dict[str, str] = {}
     issues: list[str] = []
     canonical: dict[str, str] = {}
-    identities: dict[str, str] = {}
+    identities: dict[tuple[str, str], str] = {}
     book_roots = _book_root_ids(wiki_root)
     for path in iter_wiki_pages(wiki_root):
         relative = path.relative_to(root).as_posix()
@@ -401,6 +424,12 @@ def load_wiki_tree(
         title = _required_text(metadata, "title", relative, issues)
         summary = _required_text(metadata, "summary", relative, issues)
         canonical_id = _required_text(metadata, "canonical_id", relative, issues)
+        identity_scope = _optional_text(
+            metadata.get("identity_scope"), "identity_scope", relative, issues
+        ).casefold()
+        reader_navigation = _optional_text(
+            metadata.get("reader_navigation"), "reader_navigation", relative, issues
+        ).casefold()
         node_kind = _required_text(metadata, "node_kind", relative, issues)
         view_mode = _required_text(metadata, "view_mode", relative, issues)
         entity_kind = _optional_text(metadata.get("entity_kind"), "entity_kind", relative, issues)
@@ -416,7 +445,11 @@ def load_wiki_tree(
             issues.append(f"{relative}: unsupported node_kind {node_kind!r}")
         if node_kind == "entity" and not entity_kind:
             issues.append(f"{relative}: entity requires entity_kind")
-        if node_kind in {"root", "hub"} and _visible_navigation_body(text):
+        if (
+            node_kind in {"root", "hub"}
+            and reader_navigation not in {"inline", "sidebar-only"}
+            and _visible_navigation_body(text)
+        ):
             issues.append(
                 f"{relative}: navigation page body must contain only generated keyword links"
             )
@@ -446,6 +479,8 @@ def load_wiki_tree(
         if not isinstance(include_in_latest, bool):
             issues.append(f"{relative}: include_in_latest must be a boolean")
             include_in_latest = True
+        if reader_navigation not in {"", "inline", "sidebar-only"}:
+            issues.append(f"{relative}: reader_navigation must be inline or sidebar-only")
         issues.extend(
             _temporal_issues(
                 relative,
@@ -472,15 +507,17 @@ def load_wiki_tree(
         book_scoped_identity = any(
             canonical_id.startswith(f"{book_root}/") for book_root in book_roots
         )
+        scope_key = identity_scope or "__global__"
         for identity in () if book_scoped_identity else (title, *aliases, *keywords):
             normalized = normalize_identity(identity)
             if not normalized:
                 continue
-            previous = identities.get(normalized)
+            scoped_identity = (scope_key, normalized)
+            previous = identities.get(scoped_identity)
             if previous is not None and previous != relative:
                 issues.append(f"{relative}: duplicate identity {identity!r} with {previous}")
             else:
-                identities[normalized] = relative
+                identities[scoped_identity] = relative
         nodes.append(
             WikiTreeNode(
                 path=path,
@@ -504,6 +541,7 @@ def load_wiki_tree(
                 ended_on=ended_on,
                 occurred_on=occurred_on,
                 include_in_latest=include_in_latest,
+                reader_navigation=reader_navigation,
             )
         )
     by_path = {node.relative_path: node for node in nodes}
@@ -582,6 +620,7 @@ def render_wiki_tree_view(
         (book_map_kind is not None or node.node_kind in TREE_VIEW_KINDS)
         and (bool(descendants) or bool(node.ordered_reader_sections))
         and not (book_map_kind is None and node.node_kind == "entity" and direct_already_authored)
+        and node.reader_navigation != "sidebar-only"
     )
     if show_tree:
         if book_map_kind is not None and node.ordered_reader_sections:
@@ -597,7 +636,11 @@ def render_wiki_tree_view(
                 direct,
                 children,
                 texts,
-                include_sequence=node.view_mode == "linear" and book_map_kind is None,
+                # ``sequence`` is a hidden, sparse ordering key. A growing
+                # Wiki must not expose it as a fragile 1., 1.2, ... textbook
+                # outline; semantic titles and explicit links own the
+                # reader-facing path instead.
+                include_sequence=False,
                 book_map_kind=book_map_kind,
                 topic_headings=keyword_heading_map,
             ),
@@ -997,13 +1040,11 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
             issues.append(
                 f"{PUBLIC_WIKI_HUB_PATH}: public Wiki hub must be a direct child of Wiki root"
             )
-        if public_hub.node_kind != "hub" or public_hub.title != "Wiki":
+        if public_hub.node_kind != "hub" or public_hub.title != "공개 Wiki 경계":
             issues.append(
-                f"{PUBLIC_WIKI_HUB_PATH}: public Wiki hub must be titled 'Wiki' "
+                f"{PUBLIC_WIKI_HUB_PATH}: public Wiki hub must be titled '공개 Wiki 경계' "
                 "and use node_kind hub"
             )
-        books_parent_path = public_hub.relative_path
-        books_path = _direct_child_path_by_title(children, public_hub.relative_path, "책")
         resources_path = None
         people_path = _direct_child_path_by_title(children, root, "인물")
         issues.extend(_public_hub_vocabulary_issues(children))
@@ -1167,7 +1208,7 @@ def _public_hub_vocabulary_issues(
     """Reject an unapproved navigation level below the fixed public tree."""
 
     issues: list[str] = []
-    pending: list[tuple[str, str]] = [(PUBLIC_WIKI_HUB_PATH, "Wiki")]
+    pending: list[tuple[str, str]] = [(PUBLIC_WIKI_HUB_PATH, "공개 Wiki 경계")]
     while pending:
         parent_path, parent_title = pending.pop()
         allowed = PUBLIC_WIKI_HUB_CHILDREN.get(parent_title)
@@ -1184,13 +1225,19 @@ def _public_hub_vocabulary_issues(
                     issues.append(
                         f"{node.relative_path}: fixed project child must be a project entity"
                     )
-            elif node.node_kind != "hub":
-                issues.append(
-                    f"{node.relative_path}: fixed taxonomy child below {parent_title!r} "
-                    "must use node_kind hub"
-                )
-            else:
+            elif parent_title != "책" and node.title in PUBLIC_WIKI_HUB_CHILDREN:
+                if node.node_kind != "hub":
+                    issues.append(
+                        f"{node.relative_path}: fixed taxonomy branch below {parent_title!r} "
+                        "must use node_kind hub"
+                    )
+                    continue
                 pending.append((node.relative_path, node.title))
+            elif node.node_kind != "topic":
+                issues.append(
+                    f"{node.relative_path}: fixed taxonomy leaf below {parent_title!r} "
+                    "must use node_kind topic"
+                )
     return issues
 
 
@@ -1308,6 +1355,7 @@ def _navigation_group_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -
             supports_groups
             and len(direct) > 1
             and parent.relative_path not in UNGROUPED_NAVIGATION_EXCEPTIONS
+            and parent.reader_navigation != "sidebar-only"
         ) or (book_map_kind is not None and bool(direct))
         if requires_groups and not parent.navigation_groups:
             if book_map_kind is not None:
@@ -1729,17 +1777,15 @@ def _render_subtree(
     rows: list[str] = []
     for child in children.get(relative_path, ()):
         prefix = "  " * depth + "- "
-        sequence = f"{child.sequence:g}. " if child.sequence is not None else ""
         rows.append(
-            f"{prefix}{sequence}"
-            f"[[{_without_suffix(child.relative_path)}|{child.title}]] — {child.summary}"
+            f"{prefix}[[{_without_suffix(child.relative_path)}|{child.title}]] — {child.summary}"
         )
         rows.extend(_render_subtree(child.relative_path, children, depth=depth + 1))
     return rows
 
 
 def _render_keyword_link(
-    node: WikiTreeNode, *, include_sequence: bool = True, label: str | None = None
+    node: WikiTreeNode, *, include_sequence: bool = False, label: str | None = None
 ) -> str:
     sequence = f"{node.sequence:g}. " if include_sequence and node.sequence is not None else ""
     display_label = label or _compact_keyword_label(node.keywords[0])
@@ -1837,7 +1883,7 @@ def _render_navigation_children(
 def _uses_keyword_heading_map(node: WikiTreeNode, nodes: dict[str, WikiTreeNode]) -> bool:
     """Use H2 keyword groups after the new public Wiki boundary is installed."""
 
-    return PUBLIC_WIKI_HUB_PATH in nodes and node.relative_path != "wiki/README.md"
+    return PUBLIC_WIKI_HUB_PATH in nodes and node.relative_path.startswith("wiki/Wiki/")
 
 
 def _render_ordered_book_reader_sections(
@@ -1983,6 +2029,8 @@ def _render_explicit_navigation_groups(
     )
     rows: list[str] = []
     for group in parent.navigation_groups:
+        if topic_headings and rows:
+            rows.append("")
         rows.extend(
             _render_explicit_navigation_group(
                 parent,

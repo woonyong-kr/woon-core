@@ -53,6 +53,65 @@ def test_refresh_preserves_existing_children_before_source_index(tmp_path: Path)
     assert rendered.index("## 하위 키워드") < rendered.index("## 원자료")
 
 
+def test_linear_map_hides_internal_sequence_numbers_from_reader_navigation(
+    tmp_path: Path,
+) -> None:
+    _write_page(
+        tmp_path,
+        "wiki/README.md",
+        title="개발 Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("개발 Wiki",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/learning.md",
+        title="언어 모델",
+        canonical_id="learning",
+        node_kind="hub",
+        parent="[[wiki/README|Wiki]]",
+        keywords=("언어 모델",),
+        view_mode="linear",
+        extra=(
+            "navigation_groups:\n"
+            "- label: 학습 흐름\n"
+            "  children:\n"
+            "  - learning/tokens\n"
+            "  - learning/next-token\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/learning/tokens.md",
+        title="텍스트는 어떻게 숫자가 되는가",
+        canonical_id="learning/tokens",
+        node_kind="topic",
+        parent="[[wiki/learning|언어 모델]]",
+        keywords=("텍스트는 어떻게 숫자가 되는가",),
+    )
+    _write_page(
+        tmp_path,
+        "wiki/learning/next-token.md",
+        title="다음 값은 왜 한 칸 뒤에 놓이는가",
+        canonical_id="learning/next-token",
+        node_kind="topic",
+        parent="[[wiki/learning|언어 모델]]",
+        keywords=("다음 값은 왜 한 칸 뒤에 놓이는가",),
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
+    rendered = report.pages[tmp_path / "wiki/learning.md"].decode("utf-8")
+    assert "[[wiki/learning/tokens|텍스트는 어떻게 숫자가 되는가]]" in rendered
+    assert "[[wiki/learning/next-token|다음 값은 왜 한 칸 뒤에 놓이는가]]" in rendered
+    assert "3. [[" not in rendered
+    assert "4. [[" not in rendered
+    assert "\n\n## " in rendered
+
+
 def test_source_archive_detection_uses_the_vault_relative_boundary(tmp_path: Path) -> None:
     wiki_root = tmp_path / "wiki"
     archived = wiki_root / "private/_sources/knowledge/book/source.md"
@@ -262,9 +321,26 @@ def _write_history(vault: Path, parent_path: str, parent_title: str) -> None:
     )
 
 
-def test_public_wiki_hub_owns_books_while_private_people_stay_at_root(tmp_path: Path) -> None:
+_PUBLIC_DEVELOPER_WIKI_DOMAINS = (
+    ("computer-science-foundations", "컴퓨터 과학 기초"),
+    ("programming-languages-runtime", "프로그래밍 언어·런타임"),
+    ("frontend-client", "프런트엔드·클라이언트"),
+    ("backend-services", "백엔드·서비스"),
+    ("data-storage", "데이터·저장소"),
+    ("systems-networking", "컴퓨터 시스템·네트워크"),
+    ("quality-security-reliability", "품질·보안·신뢰성"),
+    ("software-design-architecture", "소프트웨어 설계·아키텍처"),
+    ("platform-delivery-operations", "플랫폼·전달·운영"),
+    ("ai-machine-learning", "AI·머신러닝"),
+    ("projects", "프로젝트"),
+)
+
+
+def _write_public_developer_wiki_shell(vault: Path) -> str:
+    """Create the hidden boundary and reader-visible public Wiki home."""
+
     _write_page(
-        tmp_path,
+        vault,
         "wiki/README.md",
         title="Vault",
         canonical_id="README",
@@ -273,39 +349,107 @@ def test_public_wiki_hub_owns_books_while_private_people_stay_at_root(tmp_path: 
         keywords=("Vault",),
     )
     _write_page(
-        tmp_path,
+        vault,
         "wiki/Wiki/README.md",
-        title="Wiki",
+        title="공개 Wiki 경계",
         canonical_id="wiki",
         node_kind="hub",
         parent="[[wiki/README|Vault]]",
-        keywords=("Wiki",),
+        keywords=("공개 Wiki 경계",),
+        extra="reader_navigation: sidebar-only\n",
     )
+    home_path = "wiki/Wiki/developer-wiki.md"
+    _write_page(
+        vault,
+        home_path,
+        title="홈",
+        canonical_id="wiki/developer-wiki",
+        node_kind="topic",
+        parent="[[wiki/Wiki/README|공개 Wiki 경계]]",
+        keywords=("홈",),
+        extra="public_nav_root: true\n",
+    )
+    return home_path
+
+
+def test_same_keyword_is_allowed_in_distinct_explicit_learning_scopes(
+    tmp_path: Path,
+) -> None:
     _write_page(
         tmp_path,
-        "wiki/Wiki/books/README.md",
+        "wiki/README.md",
+        title="Wiki",
+        canonical_id="README",
+        node_kind="root",
+        parent=None,
+        keywords=("Wiki",),
+    )
+    for page_id, title in (("common", "언어 공통"), ("kotlin", "Kotlin")):
+        _write_page(
+            tmp_path,
+            f"wiki/{page_id}.md",
+            title=title,
+            canonical_id=page_id,
+            node_kind="hub",
+            parent="[[wiki/README|Wiki]]",
+            keywords=(title,),
+        )
+        _write_page(
+            tmp_path,
+            f"wiki/{page_id}/functions.md",
+            title="함수·호출",
+            canonical_id=f"{page_id}/functions",
+            node_kind="topic",
+            parent=f"[[wiki/{page_id}|{title}]]",
+            keywords=("함수·호출",),
+            extra=f"identity_scope: {page_id}\n",
+        )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert not any("duplicate identity '함수·호출'" in issue for issue in report.issues)
+
+
+def test_public_developer_wiki_uses_hidden_boundary_and_sidebar_only_hub(
+    tmp_path: Path,
+) -> None:
+    home_path = _write_public_developer_wiki_shell(tmp_path)
+    for slug, title in _PUBLIC_DEVELOPER_WIKI_DOMAINS:
+        _write_page(
+            tmp_path,
+            f"wiki/Wiki/{slug}.md",
+            title=title,
+            canonical_id=f"wiki/{slug}",
+            node_kind="hub",
+            parent="[[wiki/Wiki/README|공개 Wiki 경계]]",
+            keywords=(title,),
+            extra="public_nav_root: true\n",
+        )
+    _write_page(
+        tmp_path,
+        "wiki/books/README.md",
         title="책",
-        canonical_id="wiki/books",
+        canonical_id="books/README",
         node_kind="hub",
-        parent="[[wiki/Wiki/README|Wiki]]",
+        parent="[[wiki/README|Vault]]",
         keywords=("책",),
     )
     _write_page(
         tmp_path,
-        "wiki/Wiki/books/programming-language-design.md",
+        "wiki/books/programming-language-design.md",
         title="프로그래밍 언어·설계",
-        canonical_id="wiki/books/programming-language-design",
+        canonical_id="books/programming-language-design",
         node_kind="hub",
-        parent="[[wiki/Wiki/books/README|책]]",
+        parent="[[wiki/books/README|책]]",
         keywords=("프로그래밍 언어", "설계"),
     )
     _write_page(
         tmp_path,
-        "wiki/Wiki/books/programming-language-design/refactoring.md",
+        "wiki/books/programming-language-design/refactoring.md",
         title="리팩터링 2판",
-        canonical_id="wiki/books/refactoring-2e",
+        canonical_id="books/refactoring-2e",
         node_kind="entity",
-        parent="[[wiki/Wiki/books/programming-language-design|프로그래밍 언어·설계]]",
+        parent="[[wiki/books/programming-language-design|프로그래밍 언어·설계]]",
         keywords=("리팩터링",),
         view_mode="linear",
         extra="entity_kind: book\n",
@@ -334,6 +478,18 @@ def test_public_wiki_hub_owns_books_while_private_people_stay_at_root(tmp_path: 
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert report.issues == ()
+    apply_wiki_tree_refresh(tmp_path, report)
+    boundary = (tmp_path / "wiki/Wiki/README.md").read_text(encoding="utf-8")
+    home = (tmp_path / home_path).read_text(encoding="utf-8")
+    assert "title: 공개 Wiki 경계" in boundary
+    assert "title: 홈" in home
+    assert CHILDREN_START not in boundary
+    assert CHILDREN_START not in home
+    assert len(_PUBLIC_DEVELOPER_WIKI_DOMAINS) == 11
+    for slug, title in _PUBLIC_DEVELOPER_WIKI_DOMAINS:
+        topic = tmp_path / f"wiki/Wiki/{slug}.md"
+        assert topic.is_file()
+        assert f"# {title}" in topic.read_text(encoding="utf-8")
 
 
 def test_project_entity_renders_only_information_and_blog_maps(tmp_path: Path) -> None:
@@ -348,29 +504,20 @@ def test_project_entity_renders_only_information_and_blog_maps(tmp_path: Path) -
     )
     _write_page(
         tmp_path,
-        "wiki/Wiki/README.md",
-        title="Wiki",
-        canonical_id="wiki",
+        "wiki/projects.md",
+        title="프로젝트",
+        canonical_id="projects",
         node_kind="hub",
         parent="[[wiki/README|Vault]]",
-        keywords=("Wiki",),
-    )
-    _write_page(
-        tmp_path,
-        "wiki/Wiki/projects.md",
-        title="프로젝트",
-        canonical_id="wiki/projects",
-        node_kind="hub",
-        parent="[[wiki/Wiki/README|Wiki]]",
         keywords=("프로젝트",),
     )
     _write_page(
         tmp_path,
-        "wiki/Wiki/projects/k8s-clue.md",
+        "wiki/projects/k8s-clue.md",
         title="K8s Clue",
-        canonical_id="wiki/projects/k8s-clue",
+        canonical_id="projects/k8s-clue",
         node_kind="entity",
-        parent="[[wiki/Wiki/projects|프로젝트]]",
+        parent="[[wiki/projects|프로젝트]]",
         keywords=("K8s Clue",),
         view_mode="project",
         extra=(
@@ -379,13 +526,13 @@ def test_project_entity_renders_only_information_and_blog_maps(tmp_path: Path) -
             "navigation_groups:\n"
             "- label: 프로젝트 정보\n"
             "  children:\n"
-            "  - wiki/projects/k8s-clue/overview\n"
-            "  - wiki/projects/k8s-clue/architecture\n"
-            "  - wiki/projects/k8s-clue/verification\n"
-            "  - wiki/projects/k8s-clue/roadmap\n"
+            "  - projects/k8s-clue/overview\n"
+            "  - projects/k8s-clue/architecture\n"
+            "  - projects/k8s-clue/verification\n"
+            "  - projects/k8s-clue/roadmap\n"
             "- label: 블로그\n"
             "  children:\n"
-            "  - wiki/projects/k8s-clue/blog\n"
+            "  - projects/k8s-clue/blog\n"
         ),
     )
     for slug, title in (
@@ -397,97 +544,105 @@ def test_project_entity_renders_only_information_and_blog_maps(tmp_path: Path) -
     ):
         _write_page(
             tmp_path,
-            f"wiki/Wiki/projects/k8s-clue/{slug}.md",
+            f"wiki/projects/k8s-clue/{slug}.md",
             title=title,
-            canonical_id=f"wiki/projects/k8s-clue/{slug}",
+            canonical_id=f"projects/k8s-clue/{slug}",
             node_kind="topic",
-            parent="[[wiki/Wiki/projects/k8s-clue|K8s Clue]]",
+            parent="[[wiki/projects/k8s-clue|K8s Clue]]",
             keywords=(title,),
         )
 
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert report.issues == ()
-    rendered = report.pages[tmp_path / "wiki/Wiki/projects/k8s-clue.md"].decode("utf-8")
-    assert "## 프로젝트 정보" in rendered
-    assert "## 블로그" in rendered
-    assert "## 하위 키워드" not in rendered
+    rendered = report.pages[tmp_path / "wiki/projects/k8s-clue.md"].decode("utf-8")
+    assert "- 프로젝트 정보" in rendered
+    assert "- 블로그" in rendered
+    assert "## 하위 키워드" in rendered
     assert "## 최신 하위 문서" not in rendered
     assert "## 최신 관련 문서" not in rendered
 
 
 def test_public_wiki_rejects_an_unapproved_hub_level(tmp_path: Path) -> None:
-    _write_page(
-        tmp_path,
-        "wiki/README.md",
-        title="Vault",
-        canonical_id="README",
-        node_kind="root",
-        parent=None,
-        keywords=("Vault",),
-    )
-    _write_page(
-        tmp_path,
-        "wiki/Wiki/README.md",
-        title="Wiki",
-        canonical_id="wiki",
-        node_kind="hub",
-        parent="[[wiki/README|Vault]]",
-        keywords=("Wiki",),
-    )
+    _write_public_developer_wiki_shell(tmp_path)
     _write_page(
         tmp_path,
         "wiki/Wiki/experimental-category.md",
         title="임의 분류",
         canonical_id="wiki/experimental-category",
         node_kind="hub",
-        parent="[[wiki/Wiki/README|Wiki]]",
+        parent="[[wiki/Wiki/README|공개 Wiki 경계]]",
         keywords=("임의 분류",),
     )
 
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert report.issues == (
-        "wiki/Wiki/experimental-category.md: public Wiki child '임의 분류' is not in the "
-        "fixed taxonomy below 'Wiki'",
+        "wiki/Wiki/experimental-category.md: public Wiki child "
+        "'임의 분류' is not in the "
+        "fixed taxonomy below '공개 Wiki 경계'",
     )
 
 
 def test_public_wiki_rejects_an_unapproved_topic_at_a_structural_level(tmp_path: Path) -> None:
-    _write_page(
-        tmp_path,
-        "wiki/README.md",
-        title="Vault",
-        canonical_id="README",
-        node_kind="root",
-        parent=None,
-        keywords=("Vault",),
-    )
-    _write_page(
-        tmp_path,
-        "wiki/Wiki/README.md",
-        title="Wiki",
-        canonical_id="wiki",
-        node_kind="hub",
-        parent="[[wiki/README|Vault]]",
-        keywords=("Wiki",),
-    )
+    _write_public_developer_wiki_shell(tmp_path)
     _write_page(
         tmp_path,
         "wiki/Wiki/experimental-topic.md",
         title="임의 주제",
         canonical_id="wiki/experimental-topic",
         node_kind="topic",
-        parent="[[wiki/Wiki/README|Wiki]]",
+        parent="[[wiki/Wiki/README|공개 Wiki 경계]]",
         keywords=("임의 주제",),
     )
 
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert report.issues == (
-        "wiki/Wiki/experimental-topic.md: public Wiki child '임의 주제' is not in the "
-        "fixed taxonomy below 'Wiki'",
+        "wiki/Wiki/experimental-topic.md: public Wiki child "
+        "'임의 주제' is not in the "
+        "fixed taxonomy below '공개 Wiki 경계'",
     )
+
+
+def test_public_wiki_scopes_a_repeated_structural_title_below_books(
+    tmp_path: Path,
+) -> None:
+    _write_public_developer_wiki_shell(tmp_path)
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/data-storage.md",
+        title="데이터·저장소",
+        canonical_id="wiki/data-storage",
+        node_kind="hub",
+        parent="[[wiki/Wiki/README|공개 Wiki 경계]]",
+        keywords=("데이터·저장소",),
+        extra="identity_scope: wiki\npublic_nav_root: true\n",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/books.md",
+        title="책",
+        canonical_id="wiki/books",
+        node_kind="hub",
+        parent="[[wiki/Wiki/README|공개 Wiki 경계]]",
+        keywords=("책",),
+        extra="identity_scope: wiki\npublic_nav_root: true\n",
+    )
+    _write_page(
+        tmp_path,
+        "wiki/Wiki/books/data-storage.md",
+        title="데이터·저장소",
+        canonical_id="wiki/books/data-storage",
+        node_kind="topic",
+        parent="[[wiki/Wiki/books|책]]",
+        keywords=("데이터·저장소",),
+        extra="identity_scope: wiki/books\n",
+    )
+
+    report = prepare_wiki_tree_refresh(tmp_path)
+
+    assert report.issues == ()
 
 
 def test_book_front_matter_titles_may_repeat_across_book_entities(tmp_path: Path) -> None:
