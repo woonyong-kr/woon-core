@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -282,6 +283,11 @@ class CompiledWikiTransaction:
     claims_upsert: tuple[dict[str, Any], ...]
     pages_upsert: tuple[dict[str, Any], ...]
     curations_upsert: tuple[dict[str, Any], ...]
+    # Existing compiler audit failures normally make every transaction fail
+    # closed. A reviewed recovery may explicitly permit only the exact errors
+    # present before this transaction; any additional or changed error still
+    # rolls the entire transaction back.
+    allow_preexisting_audit_errors: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +311,7 @@ class CompiledWikiTransactionReport:
     compiled: int
     unchanged: int
     page_ids: tuple[str, ...]
+    remaining_preexisting_audit_errors: int = 0
 
 
 class CompiledWiki:
@@ -4092,6 +4099,16 @@ class CompiledWiki:
         by :class:`KnowledgeService` while it holds the repository lock.
         """
 
+        if not isinstance(transaction.allow_preexisting_audit_errors, bool):
+            raise WoonError(
+                "compiled Wiki transaction allow_preexisting_audit_errors must be boolean"
+            )
+        preexisting_audit_errors = (
+            Counter(self.audit().errors)
+            if transaction.allow_preexisting_audit_errors
+            else Counter()
+        )
+
         page_ids = _transaction_record_ids(transaction.pages_upsert, "page_id", "page")
         curation_ids = _transaction_record_ids(transaction.curations_upsert, "page_id", "curation")
         source_ids = _transaction_record_ids(transaction.sources_upsert, "source_id", "source")
@@ -4195,7 +4212,13 @@ class CompiledWiki:
                 apply_wiki_tree_refresh(self._settings.vault, tree_report)
             self._refresh_generated_view_receipts(tuple(sorted(tree_changed_paths)))
             audit = self.audit()
-            if not audit.complete:
+            unexpected_audit_errors = Counter(audit.errors) - preexisting_audit_errors
+            if unexpected_audit_errors:
+                if transaction.allow_preexisting_audit_errors:
+                    raise WoonError(
+                        "compiled Wiki transaction final audit introduced or changed errors: "
+                        + "; ".join(sorted(unexpected_audit_errors.elements()))
+                    )
                 raise WoonError(
                     "compiled Wiki transaction final audit failed: " + "; ".join(audit.errors)
                 )
@@ -4211,6 +4234,7 @@ class CompiledWiki:
             compiled=compile_report.compiled,
             unchanged=compile_report.unchanged,
             page_ids=page_ids,
+            remaining_preexisting_audit_errors=len(audit.errors),
         )
 
     def preflight_legacy_page_adoptions(

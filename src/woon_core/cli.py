@@ -92,15 +92,15 @@ from woon_core.knowledge.novel_wiki_projection import (
     apply_novel_wiki_projection,
     prepare_novel_wiki_projection,
 )
-from woon_core.knowledge.public_projection import (
-    apply_public_projection,
-    prepare_public_projection,
-)
 from woon_core.knowledge.obsidian_plugins import ObsidianPluginService
 from woon_core.knowledge.ollama_quality_review import run_ollama_quality_reviews
 from woon_core.knowledge.orchestration import (
     load_orchestrator_settings,
     verify_codex_automation_registry,
+)
+from woon_core.knowledge.public_projection import (
+    apply_public_projection,
+    prepare_public_projection,
 )
 from woon_core.knowledge.reconciliation import (
     audit_reconciliation,
@@ -2059,7 +2059,7 @@ def _run_apply_compiled_transaction(arguments: list[str], output: TextIO) -> Non
         payload = json.loads(input_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WoonError("apply-compiled-transaction input is invalid JSON") from error
-    expected_fields = {
+    required_fields = {
         "apply",
         "expected_revisions",
         "sources_upsert",
@@ -2067,10 +2067,20 @@ def _run_apply_compiled_transaction(arguments: list[str], output: TextIO) -> Non
         "pages_upsert",
         "curations_upsert",
     }
-    if not isinstance(payload, dict) or set(payload) != expected_fields:
+    optional_fields = {"allow_preexisting_audit_errors"}
+    if (
+        not isinstance(payload, dict)
+        or not required_fields.issubset(payload)
+        or set(payload).difference(required_fields | optional_fields)
+    ):
         raise WoonError("apply-compiled-transaction input fields are invalid")
     if payload.get("apply") is not True:
         raise WoonError("apply-compiled-transaction input must explicitly set apply to true")
+    allow_preexisting_audit_errors = payload.get("allow_preexisting_audit_errors", False)
+    if not isinstance(allow_preexisting_audit_errors, bool):
+        raise WoonError(
+            "apply-compiled-transaction allow_preexisting_audit_errors must be true or false"
+        )
     expected_revisions = payload.get("expected_revisions")
     if not isinstance(expected_revisions, dict) or not all(
         isinstance(key, str) and (value is None or isinstance(value, str))
@@ -2090,6 +2100,7 @@ def _run_apply_compiled_transaction(arguments: list[str], output: TextIO) -> Non
         claims_upsert=arrays["claims_upsert"],
         pages_upsert=arrays["pages_upsert"],
         curations_upsert=arrays["curations_upsert"],
+        allow_preexisting_audit_errors=allow_preexisting_audit_errors,
     )
     vault_option = values.get("--vault")
     vault = (

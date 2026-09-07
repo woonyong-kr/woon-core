@@ -21,6 +21,7 @@ from woon_core.knowledge.adapters import (
 )
 from woon_core.knowledge.compiled_wiki import (
     BookCoverageManifestUpdate,
+    CompilationAudit,
     CompiledWiki,
     CompiledWikiSettings,
     CompiledWikiTransaction,
@@ -970,6 +971,82 @@ def test_compiled_transaction_rolls_back_reindex_failure(
     assert compiler.audit().complete
 
 
+def test_compiled_transaction_default_still_rejects_preexisting_audit_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiler, service = _service(tmp_path)
+    inputs_before = compiler.snapshot_inputs()
+    outputs_before = compiler.snapshot_outputs()
+    original_audit = compiler.audit
+    calls = 0
+
+    def preexisting_error() -> CompilationAudit:
+        nonlocal calls
+        calls += 1
+        return CompilationAudit(0, 0, ("injected preexisting audit error",))
+
+    monkeypatch.setattr(compiler, "audit", preexisting_error)
+    with pytest.raises(WoonError, match="final audit failed"):
+        service.apply_compiled_wiki_transaction(_transaction())
+
+    assert calls == 1
+    assert compiler.snapshot_inputs() == inputs_before
+    assert compiler.snapshot_outputs() == outputs_before
+    assert original_audit().complete
+
+
+def test_compiled_transaction_opt_in_allows_only_preexisting_audit_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiler, service = _service(tmp_path)
+    preexisting_error = "injected preexisting audit error"
+    original_audit = compiler.audit
+
+    monkeypatch.setattr(
+        compiler,
+        "audit",
+        lambda: CompilationAudit(0, 0, (preexisting_error,)),
+    )
+    report = service.apply_compiled_wiki_transaction(
+        replace(_transaction(), allow_preexisting_audit_errors=True)
+    )
+
+    assert report.remaining_preexisting_audit_errors == 1
+    assert (tmp_path / "wiki/concepts/reference-00.md").is_file()
+    assert original_audit().complete
+
+
+def test_compiled_transaction_opt_in_rolls_back_new_audit_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiler, service = _service(tmp_path)
+    inputs_before = compiler.snapshot_inputs()
+    outputs_before = compiler.snapshot_outputs()
+    original_audit = compiler.audit
+    calls = 0
+
+    def preexisting_then_new_error() -> CompilationAudit:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return CompilationAudit(0, 0, ("injected preexisting audit error",))
+        return CompilationAudit(
+            0,
+            0,
+            ("injected preexisting audit error", "injected new audit error"),
+        )
+
+    monkeypatch.setattr(compiler, "audit", preexisting_then_new_error)
+    with pytest.raises(WoonError, match="introduced or changed errors"):
+        service.apply_compiled_wiki_transaction(
+            replace(_transaction(), allow_preexisting_audit_errors=True)
+        )
+
+    assert compiler.snapshot_inputs() == inputs_before
+    assert compiler.snapshot_outputs() == outputs_before
+    assert original_audit().complete
+
+
 def test_compiled_transaction_applies_eleven_pages_and_reindexes(tmp_path: Path) -> None:
     compiler, service = _service(tmp_path)
     report = service.apply_compiled_wiki_transaction(_transaction(11))
@@ -1084,6 +1161,7 @@ def test_apply_compiled_transaction_cli_calls_service_once(
                 "claims_upsert": transaction.claims_upsert,
                 "pages_upsert": transaction.pages_upsert,
                 "curations_upsert": transaction.curations_upsert,
+                "allow_preexisting_audit_errors": True,
             },
             ensure_ascii=False,
         ),
@@ -1103,6 +1181,7 @@ def test_apply_compiled_transaction_cli_calls_service_once(
         "build_knowledge_service",
         lambda vault: (SimpleNamespace(vault=vault), FakeService()),
     )
+    output = StringIO()
     run(
         [
             "knowledge",
@@ -1112,7 +1191,34 @@ def test_apply_compiled_transaction_cli_calls_service_once(
             "--vault",
             str(tmp_path),
         ],
-        StringIO(),
+        output,
     )
     assert len(calls) == 1
     assert calls[0].expected_revisions == {"concepts/reference-00": None}
+    assert calls[0].allow_preexisting_audit_errors is True
+    assert json.loads(output.getvalue())["remaining_preexisting_audit_errors"] == 0
+
+
+def test_apply_compiled_transaction_cli_rejects_non_boolean_audit_error_opt_in(
+    tmp_path: Path,
+) -> None:
+    transaction = _transaction()
+    payload = tmp_path / "transaction.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "apply": True,
+                "expected_revisions": transaction.expected_revisions,
+                "sources_upsert": transaction.sources_upsert,
+                "claims_upsert": transaction.claims_upsert,
+                "pages_upsert": transaction.pages_upsert,
+                "curations_upsert": transaction.curations_upsert,
+                "allow_preexisting_audit_errors": "true",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WoonError, match="allow_preexisting_audit_errors must be true or false"):
+        run(["knowledge", "apply-compiled-transaction", "--input", str(payload)], StringIO())
