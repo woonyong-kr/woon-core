@@ -1,0 +1,772 @@
+"""Build a privacy-safe, read-only public projection from compiled Wiki pages.
+
+The Vault remains the only Markdown canonical.  This module consumes the
+compiler's page specifications and receipts, then writes a deliberately small
+Just the Docs input tree only when the caller explicitly applies a prepared
+report.  It never deploys a site or mutates Vault knowledge.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from woon_core.errors import WoonError
+from woon_core.io import atomic_write, exclusive_file_lock
+from woon_core.knowledge.wiki_tree import CHILDREN_END, CHILDREN_START, split_markdown
+
+_SCHEMA_VERSION = 1
+_CONTENT_RELATIVE = Path("generated/public-content")
+_RECEIPT_RELATIVE = Path(".local/woon-knowledge/public-projection/receipt.json")
+_WIKI_ROOT = Path("wiki/Wiki")
+_PUBLIC_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+_WIKILINK = re.compile(
+    r"(?<!\!)\[\[(?P<target>[^\]|#]+)(?P<anchor>#[^\]|]+)?(?:\|(?P<label>[^\]]+))?\]\]"
+)
+_ANY_WIKILINK = re.compile(r"!?\[\[[^\]]+\]\]")
+_MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]*\]\((?P<target>[^)]+)\)")
+_PRIVATE_CONTENT = (
+    ("Obsidian wikilink", _ANY_WIKILINK),
+    ("local file path", re.compile(r"(?:file://|/Users/|~/)")),
+    (
+        "private source link",
+        re.compile(r"(?:\]\(|href=[\"'])(?:\.\./)*(?:wiki/private|sources|private)/"),
+    ),
+    ("source session ID", re.compile(r"source_session_ids?\s*[:=]", re.IGNORECASE)),
+)
+_RELATION_LIST_FIELDS = frozenset(
+    {"prerequisites", "next_concepts", "related", "related_to", "source_roots"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PublicProjectionDocument:
+    """One deterministic public Markdown document prepared from one page spec."""
+
+    page_id: str
+    canonical_id: str
+    slug: str
+    relative_path: Path
+    content: bytes
+    projection_sha256: str
+    source_output_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublicProjectionReport:
+    """Read-only public projection preflight result ready for explicit apply."""
+
+    vault: Path
+    site: Path
+    content_root: Path
+    documents: tuple[PublicProjectionDocument, ...]
+    excluded_private_targets: tuple[str, ...]
+    link_checks: tuple[str, ...]
+    build_id: str
+    input_sha256: str
+    output_sha256: str
+    receipt: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class PublicProjectionApplyResult:
+    """Observable result of atomically replacing the generated site input."""
+
+    content_root: Path
+    receipt_path: Path
+    changed: bool
+
+
+def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport:
+    """Preflight a public projection without changing the Vault or site.
+
+    Only page specs explicitly marked ``publication_state: publish`` and
+    ``access: public`` beneath ``wiki/Wiki`` are eligible.  Every selected
+    page must have a matching compiler receipt, public provenance, and public
+    outbound links before any Markdown is rendered.
+    """
+
+    root = vault.expanduser().resolve()
+    site_root = site.expanduser().resolve()
+    content_root = _validate_site_projection_contract(site_root)
+    pages = _yaml_records(root / "catalog/llm-wiki/pages.yaml", "pages")
+    sources = _records_by_id(root / "catalog/llm-wiki/sources.yaml", "sources", "source_id")
+    receipts = _records_by_id(root / "catalog/llm-wiki/receipts.yaml", "receipts", "page_id")
+
+    selected: list[dict[str, Any]] = []
+    excluded: list[str] = []
+    all_targets: dict[str, dict[str, Any]] = {}
+    for page in pages:
+        page_id = _required_string(page, "page_id", "page spec")
+        for alias in _page_aliases(root, page):
+            existing = all_targets.get(alias)
+            if existing is not None and existing is not page:
+                raise WoonError(f"public projection page target is ambiguous: {alias}")
+            all_targets[alias] = page
+        frontmatter = _mapping(page.get("frontmatter"), f"page {page_id} frontmatter")
+        state = frontmatter.get("publication_state")
+        if state == "publish":
+            selected.append(page)
+        else:
+            excluded.append(page_id)
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for page in selected:
+        page_id = _required_string(page, "page_id", "page spec")
+        frontmatter = _mapping(page.get("frontmatter"), f"page {page_id} frontmatter")
+        _validate_candidate_scope(root, page_id, page, frontmatter)
+        for alias in _page_aliases(root, page):
+            existing = candidates.get(alias)
+            if existing is not None and existing is not page:
+                raise WoonError(f"public projection published target is ambiguous: {alias}")
+            candidates[alias] = page
+
+    documents: list[PublicProjectionDocument] = []
+    link_checks: list[str] = []
+    seen_slugs: set[str] = set()
+    rendered: dict[str, tuple[dict[str, Any], str, str]] = {}
+    for page in sorted(selected, key=lambda item: _required_string(item, "page_id", "page spec")):
+        page_id = _required_string(page, "page_id", "page spec")
+        frontmatter = _mapping(page.get("frontmatter"), f"page {page_id} frontmatter")
+        compiler_receipt = receipts.get(page_id)
+        if compiler_receipt is None:
+            raise WoonError(f"public projection requires compiler receipt: {page_id}")
+        source_output_sha256, body = _verified_compiled_body(root, page, compiler_receipt)
+        _validate_public_provenance(page_id, page, sources)
+        slug = _public_slug(frontmatter, page_id)
+        if slug in seen_slugs:
+            raise WoonError(f"public projection public_slug is duplicated: {slug}")
+        seen_slugs.add(slug)
+        rendered[page_id] = (frontmatter, source_output_sha256, body)
+
+    projection_targets = {
+        _required_string(page, "page_id", "page spec"): _public_slug(
+            _mapping(page.get("frontmatter"), "published page frontmatter"),
+            _required_string(page, "page_id", "page spec"),
+        )
+        for page in selected
+    }
+    for page in sorted(selected, key=lambda item: _required_string(item, "page_id", "page spec")):
+        page_id = _required_string(page, "page_id", "page spec")
+        frontmatter, source_output_sha256, body = rendered[page_id]
+        parent_title = _validate_frontmatter_relations(
+            page_id,
+            frontmatter,
+            candidates,
+            all_targets,
+            projection_targets,
+            link_checks,
+        )
+        projected_body = _project_body(
+            page_id,
+            body,
+            candidates,
+            all_targets,
+            projection_targets,
+            link_checks,
+        )
+        slug = _public_slug(frontmatter, page_id)
+        content = _render_projected_markdown(
+            page_id,
+            frontmatter,
+            slug,
+            parent_title,
+            projected_body,
+            source_output_sha256,
+        )
+        _assert_safe_projected_content(page_id, content.decode())
+        documents.append(
+            PublicProjectionDocument(
+                page_id=page_id,
+                canonical_id=_required_string(frontmatter, "canonical_id", f"page {page_id}"),
+                slug=slug,
+                relative_path=Path(f"{slug}.md"),
+                content=content,
+                projection_sha256=_projection_payload_sha256(
+                    page_id, frontmatter, slug, parent_title, projected_body, source_output_sha256
+                ),
+                source_output_sha256=source_output_sha256,
+            )
+        )
+
+    input_payload = {
+        "version": _SCHEMA_VERSION,
+        "documents": [
+            {
+                "page_id": item.page_id,
+                "canonical_id": item.canonical_id,
+                "slug": item.slug,
+                "source_output_sha256": item.source_output_sha256,
+                "projection_sha256": item.projection_sha256,
+            }
+            for item in documents
+        ],
+        "excluded_private_targets": sorted(excluded),
+        "link_checks": sorted(set(link_checks)),
+    }
+    input_sha256 = _sha256_json(input_payload)
+    build_id = input_sha256[:24]
+    document_hashes = {
+        item.relative_path.as_posix(): hashlib.sha256(item.content).hexdigest()
+        for item in documents
+    }
+    output_sha256 = _sha256_json(document_hashes)
+    receipt_payload = {
+        "version": _SCHEMA_VERSION,
+        "build_id": build_id,
+        "input_sha256": input_sha256,
+        "output_sha256": output_sha256,
+        "documents": document_hashes,
+        "excluded_private_targets": sorted(excluded),
+        "link_checks": sorted(set(link_checks)),
+    }
+    receipt_bytes = _json_bytes(receipt_payload)
+    return PublicProjectionReport(
+        vault=root,
+        site=site_root,
+        content_root=content_root,
+        documents=tuple(documents),
+        excluded_private_targets=tuple(sorted(excluded)),
+        link_checks=tuple(sorted(set(link_checks))),
+        build_id=build_id,
+        input_sha256=input_sha256,
+        output_sha256=output_sha256,
+        receipt=receipt_bytes,
+    )
+
+
+def apply_public_projection(report: PublicProjectionReport) -> PublicProjectionApplyResult:
+    """Atomically replace only ``generated/public-content`` and persist a private receipt.
+
+    The generated root is staged as a sibling before replacement.  A pre-existing
+    ``README.md`` is retained verbatim because it is a human-maintained boundary
+    note, not compiler-owned public content.
+    """
+
+    refreshed = prepare_public_projection(report.vault, report.site)
+    if (
+        refreshed.input_sha256 != report.input_sha256
+        or refreshed.output_sha256 != report.output_sha256
+    ):
+        raise WoonError("public projection preflight is stale; prepare again before apply")
+    content_root = refreshed.content_root
+    expected_root = refreshed.site / _CONTENT_RELATIVE
+    if content_root != expected_root:
+        raise WoonError("public projection report has an invalid site content root")
+    receipt_path = refreshed.vault / _RECEIPT_RELATIVE
+    lock_path = refreshed.vault / ".local/woon-knowledge/public-projection/apply.lock"
+    with exclusive_file_lock(lock_path):
+        existing_snapshot = _tree_snapshot(content_root)
+        desired_snapshot = _desired_snapshot(refreshed, content_root)
+        changed = existing_snapshot != desired_snapshot
+        if changed:
+            _replace_content_root(content_root, refreshed)
+        atomic_write(receipt_path, refreshed.receipt, mode=0o600)
+    return PublicProjectionApplyResult(content_root, receipt_path, changed)
+
+
+def _validate_site_projection_contract(site: Path) -> Path:
+    if not site.is_dir():
+        raise WoonError(f"public projection site is missing: {site}")
+    config_path = site / "config/public-projection.yml"
+    if not config_path.is_file():
+        raise WoonError(f"public projection config is missing: {config_path}")
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raise WoonError(f"public projection config is unreadable: {error}") from error
+    if not isinstance(config, dict):
+        raise WoonError("public projection config must be a mapping")
+    expected = {
+        "content_root": _CONTENT_RELATIVE.as_posix(),
+        "input_owner": "Obsidian Vault",
+        "write_policy": "compiler-only",
+        "publish_policy": "approved-documents-only",
+        "site_behavior": "read-only-build-input",
+    }
+    for key, value in expected.items():
+        if config.get(key) != value:
+            raise WoonError(f"public projection config {key} must be {value!r}")
+    required = config.get("required_front_matter")
+    required_fields = {
+        "layout",
+        "title",
+        "nav_order",
+        "permalink",
+        "publication_state",
+        "projection_id",
+        "projection_sha256",
+    }
+    if not isinstance(required, list) or set(required) != required_fields:
+        raise WoonError("public projection config required_front_matter is incomplete")
+    prohibited = config.get("privacy_prohibited")
+    expected_prohibited = {
+        "obsidian-wikilink",
+        "local-file-path",
+        "private-source-link",
+        "source-session-id",
+    }
+    if not isinstance(prohibited, list) or set(prohibited) != expected_prohibited:
+        raise WoonError("public projection config privacy_prohibited is incomplete")
+    return site / _CONTENT_RELATIVE
+
+
+def _yaml_records(path: Path, key: str) -> list[dict[str, Any]]:
+    if not path.is_file():
+        raise WoonError(f"public projection compiler input is missing: {path}")
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raise WoonError(
+            f"public projection compiler input is unreadable: {path}: {error}"
+        ) from error
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise WoonError(f"public projection compiler input must use version: 1: {path}")
+    records = payload.get(key)
+    if not isinstance(records, list):
+        raise WoonError(f"public projection compiler input requires {key}: {path}")
+    parsed: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise WoonError(f"public projection {key} entry must be a mapping: {path}")
+        parsed.append(record)
+    return parsed
+
+
+def _records_by_id(path: Path, key: str, identifier: str) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for record in _yaml_records(path, key):
+        value = _required_string(record, identifier, f"public projection {key} entry")
+        if value in indexed:
+            raise WoonError(f"public projection {key} has duplicate {identifier}: {value}")
+        indexed[value] = record
+    return indexed
+
+
+def _page_aliases(vault: Path, page: dict[str, Any]) -> tuple[str, ...]:
+    page_id = _required_string(page, "page_id", "page spec")
+    output_path = _safe_output_path(page, page_id)
+    frontmatter = _mapping(page.get("frontmatter"), f"page {page_id} frontmatter")
+    canonical_id = frontmatter.get("canonical_id")
+    aliases = {
+        page_id,
+        output_path.as_posix(),
+        output_path.with_suffix("").as_posix(),
+        (Path("wiki") / output_path).as_posix(),
+        (Path("wiki") / output_path).with_suffix("").as_posix(),
+    }
+    if isinstance(canonical_id, str) and canonical_id.strip():
+        aliases.add(canonical_id.strip())
+        aliases.add(canonical_id.strip().removeprefix("wiki/"))
+    return tuple(sorted(alias for alias in aliases if alias))
+
+
+def _safe_output_path(page: dict[str, Any], page_id: str) -> Path:
+    raw = _required_string(page, "output_path", f"page {page_id}")
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".md":
+        raise WoonError(f"public projection page has unsafe output_path: {page_id}")
+    return relative
+
+
+def _validate_candidate_scope(
+    vault: Path, page_id: str, page: dict[str, Any], frontmatter: dict[str, Any]
+) -> None:
+    if frontmatter.get("access") != "public" or frontmatter.get("privacy", "public") != "public":
+        raise WoonError(f"public projection page must be public-safe: {page_id}")
+    canonical_id = _required_string(frontmatter, "canonical_id", f"page {page_id}")
+    if canonical_id.startswith(("private/", "wiki/private/")):
+        raise WoonError(f"public projection page has private canonical_id: {page_id}")
+    _required_string(frontmatter, "title", f"page {page_id}")
+    _public_slug(frontmatter, page_id)
+    output = (vault / "wiki" / _safe_output_path(page, page_id)).resolve()
+    allowed_root = (vault / _WIKI_ROOT).resolve()
+    if output == allowed_root or not output.is_relative_to(allowed_root):
+        raise WoonError(f"public projection page must be below wiki/Wiki: {page_id}")
+
+
+def _public_slug(frontmatter: dict[str, Any], page_id: str) -> str:
+    slug = frontmatter.get("public_slug")
+    if not isinstance(slug, str) or not _PUBLIC_SLUG.fullmatch(slug):
+        raise WoonError(f"public projection page has invalid public_slug: {page_id}")
+    return slug
+
+
+def _verified_compiled_body(
+    vault: Path, page: dict[str, Any], receipt: dict[str, Any]
+) -> tuple[str, str]:
+    page_id = _required_string(page, "page_id", "page spec")
+    expected_hash = _required_sha256(receipt.get("output_sha256"), f"compiler receipt {page_id}")
+    output = vault / "wiki" / _safe_output_path(page, page_id)
+    if not output.is_file():
+        raise WoonError(f"public projection compiler output is missing: {page_id}")
+    content = output.read_bytes()
+    actual_hash = hashlib.sha256(content).hexdigest()
+    if actual_hash != expected_hash:
+        raise WoonError(f"public projection compiler output is stale: {page_id}")
+    try:
+        metadata, body = split_markdown(content.decode("utf-8"))
+    except (UnicodeDecodeError, WoonError) as error:
+        raise WoonError(
+            f"public projection compiler output is unreadable: {page_id}: {error}"
+        ) from error
+    compiled = metadata.get("llm_wiki")
+    if not isinstance(compiled, dict) or compiled.get("page_id") != page_id:
+        raise WoonError(f"public projection requires compiler-owned Markdown: {page_id}")
+    frontmatter = _mapping(page.get("frontmatter"), f"page {page_id} frontmatter")
+    for field in ("title", "canonical_id", "publication_state", "access"):
+        if metadata.get(field) != frontmatter.get(field):
+            raise WoonError(f"public projection compiler output metadata drift: {page_id}.{field}")
+    header = f"# {_required_string(page, 'title', f'page {page_id}')}"
+    if not body.startswith(header):
+        raise WoonError(f"public projection compiler output has no matching H1: {page_id}")
+    remaining = body[len(header) :].lstrip("\n")
+    return expected_hash, remaining.rstrip() + "\n"
+
+
+def _validate_public_provenance(
+    page_id: str, page: dict[str, Any], sources: dict[str, dict[str, Any]]
+) -> None:
+    source_ids = page.get("source_ids")
+    if not isinstance(source_ids, list) or not all(isinstance(item, str) for item in source_ids):
+        raise WoonError(f"public projection page source_ids are invalid: {page_id}")
+    for source_id in source_ids:
+        source = sources.get(source_id)
+        if source is None:
+            raise WoonError(f"public projection page references missing source: {page_id}")
+        if source.get("privacy") != "public" or source.get("lifecycle") != "compiled":
+            raise WoonError(f"public projection page has non-public provenance: {page_id}")
+        locator = source.get("locator")
+        if not isinstance(locator, str) or _looks_private_locator(locator):
+            raise WoonError(f"public projection page has private provenance locator: {page_id}")
+
+
+def _validate_frontmatter_relations(
+    page_id: str,
+    frontmatter: dict[str, Any],
+    candidates: dict[str, dict[str, Any]],
+    all_targets: dict[str, dict[str, Any]],
+    projection_targets: dict[str, str],
+    link_checks: list[str],
+) -> str | None:
+    parent_title: str | None = None
+    parent = frontmatter.get("parent")
+    if parent is not None:
+        target = _relation_target(parent, f"{page_id}.parent")
+        resolved = _require_public_relation(
+            page_id, target, candidates, all_targets, projection_targets, link_checks
+        )
+        if resolved is not None:
+            parent_title = _required_string(
+                _mapping(resolved.get("frontmatter"), "public relation frontmatter"),
+                "title",
+                "public relation",
+            )
+    public_nav_root = frontmatter.get("public_nav_root", False)
+    if not isinstance(public_nav_root, bool):
+        raise WoonError(f"public projection public_nav_root must be boolean: {page_id}")
+    if public_nav_root:
+        parent_title = None
+    for field in _RELATION_LIST_FIELDS:
+        value = frontmatter.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            raise WoonError(f"public projection relation must be a list: {page_id}.{field}")
+        for item in value:
+            target = _relation_target(item, f"{page_id}.{field}")
+            _require_public_relation(
+                page_id, target, candidates, all_targets, projection_targets, link_checks
+            )
+    navigation = frontmatter.get("navigation_groups")
+    if navigation is not None:
+        if not isinstance(navigation, list):
+            raise WoonError(f"public projection navigation_groups must be a list: {page_id}")
+        for group in navigation:
+            mapping = _mapping(group, f"public projection navigation group {page_id}")
+            children = mapping.get("children")
+            if not isinstance(children, list):
+                raise WoonError(f"public projection navigation children must be a list: {page_id}")
+            for child in children:
+                target = _relation_target(child, f"{page_id}.navigation_groups.children")
+                _require_public_relation(
+                    page_id, target, candidates, all_targets, projection_targets, link_checks
+                )
+    return parent_title
+
+
+def _relation_target(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise WoonError(f"public projection relation must be a non-empty string: {label}")
+    cleaned = value.strip()
+    match = _WIKILINK.fullmatch(cleaned)
+    if match is not None:
+        return match.group("target").strip()
+    if cleaned.startswith(("https://", "http://")):
+        return cleaned
+    return cleaned
+
+
+def _require_public_relation(
+    page_id: str,
+    target: str,
+    candidates: dict[str, dict[str, Any]],
+    all_targets: dict[str, dict[str, Any]],
+    projection_targets: dict[str, str],
+    link_checks: list[str],
+) -> dict[str, Any] | None:
+    if target.startswith(("https://", "http://")):
+        link_checks.append(f"{page_id}:external:{target}")
+        return None
+    candidate = candidates.get(target)
+    if candidate is not None:
+        link_checks.append(
+            f"{page_id}:public:{_required_string(candidate, 'page_id', 'public relation')}"
+        )
+        return candidate
+    if _is_hidden_wiki_hub(target, all_targets):
+        link_checks.append(f"{page_id}:hidden-hub:{target}")
+        return None
+    if target in all_targets:
+        raise WoonError(
+            f"public projection relation targets a non-published page: {page_id} -> {target}"
+        )
+    raise WoonError(f"public projection relation target is unresolved: {page_id} -> {target}")
+
+
+def _is_hidden_wiki_hub(target: str, all_targets: dict[str, dict[str, Any]]) -> bool:
+    page = all_targets.get(target)
+    if page is None:
+        return target.removesuffix(".md").rstrip("/") in {"Wiki", "wiki/Wiki"}
+    return _safe_output_path(page, _required_string(page, "page_id", "page spec")).with_suffix(
+        ""
+    ) == Path("Wiki/README")
+
+
+def _project_body(
+    page_id: str,
+    body: str,
+    candidates: dict[str, dict[str, Any]],
+    all_targets: dict[str, dict[str, Any]],
+    projection_targets: dict[str, str],
+    link_checks: list[str],
+) -> str:
+    body = _strip_compiler_navigation(body)
+    for label, pattern in _PRIVATE_CONTENT:
+        if pattern.search(body) and label != "Obsidian wikilink":
+            raise WoonError(f"public projection body contains prohibited {label}: {page_id}")
+
+    def replace(match: re.Match[str]) -> str:
+        target = match.group("target").strip()
+        resolved = _require_public_relation(
+            page_id, target, candidates, all_targets, projection_targets, link_checks
+        )
+        if resolved is None:
+            raise WoonError(f"public projection body links a hidden hub: {page_id} -> {target}")
+        target_page_id = _required_string(resolved, "page_id", "public relation")
+        label = (match.group("label") or target).strip()
+        anchor = match.group("anchor") or ""
+        url = f"/wiki/{projection_targets[target_page_id]}/{anchor.lower()}"
+        return f"[{label}]({url})"
+
+    projected = _WIKILINK.sub(replace, body)
+    if _ANY_WIKILINK.search(projected):
+        raise WoonError(f"public projection body contains an unresolved Obsidian link: {page_id}")
+    for match in _MARKDOWN_LINK.finditer(projected):
+        target = match.group("target").strip()
+        normalized_target = target.removeprefix("/").removeprefix("./")
+        if normalized_target.startswith(("wiki/private/", "sources/", "private/")):
+            raise WoonError(f"public projection body has a private source link: {page_id}")
+        if target.startswith(("https://", "http://", "/", "#", "mailto:")):
+            continue
+        raise WoonError(f"public projection body has a local Markdown link: {page_id}")
+    return projected.rstrip() + "\n"
+
+
+def _strip_compiler_navigation(body: str) -> str:
+    """Leave keyword navigation to the public sidebar while preserving authored prose."""
+
+    pattern = re.compile(rf"(?ms)^\s*{re.escape(CHILDREN_START)}.*?{re.escape(CHILDREN_END)}\s*")
+    return pattern.sub("", body).strip()
+
+
+def _render_projected_markdown(
+    page_id: str,
+    frontmatter: dict[str, Any],
+    slug: str,
+    parent_title: str | None,
+    body: str,
+    source_output_sha256: str,
+) -> bytes:
+    title = _required_string(frontmatter, "title", f"page {page_id}")
+    payload_hash = _projection_payload_sha256(
+        page_id, frontmatter, slug, parent_title, body, source_output_sha256
+    )
+    output: dict[str, Any] = {
+        "layout": "default",
+        "title": title,
+        "nav_order": _nav_order(frontmatter, page_id),
+        "permalink": f"/wiki/{slug}/",
+        "publication_state": "publish",
+        "has_toc": False,
+        "projection_id": _required_string(frontmatter, "canonical_id", f"page {page_id}"),
+        "projection_sha256": payload_hash,
+    }
+    if parent_title is not None:
+        output["parent"] = parent_title
+    yaml_text = yaml.safe_dump(
+        output, allow_unicode=True, sort_keys=False, default_flow_style=False
+    )
+    return (
+        f"---\n{yaml_text}---\n\n# {title}\n{{: .no_toc }}\n\n{_insert_reader_toc(body)}".encode()
+    )
+
+
+def _insert_reader_toc(body: str) -> str:
+    """Insert the Just the Docs page outline before the first authored H2."""
+
+    match = re.search(r"(?m)^##\s+", body)
+    if match is None:
+        return body
+    introduction = body[: match.start()].rstrip()
+    sections = body[match.start() :].lstrip()
+    toc = "## 목차\n{: .no_toc .text-delta }\n\n1. TOC\n{:toc}"
+    return f"{introduction}\n\n{toc}\n\n{sections}" if introduction else f"{toc}\n\n{sections}"
+
+
+def _assert_safe_projected_content(page_id: str, content: str) -> None:
+    for label, pattern in _PRIVATE_CONTENT:
+        if pattern.search(content):
+            raise WoonError(f"public projection output contains prohibited {label}: {page_id}")
+
+
+def _projection_payload_sha256(
+    page_id: str,
+    frontmatter: dict[str, Any],
+    slug: str,
+    parent_title: str | None,
+    body: str,
+    source_output_sha256: str,
+) -> str:
+    payload = {
+        "page_id": page_id,
+        "canonical_id": _required_string(frontmatter, "canonical_id", f"page {page_id}"),
+        "title": _required_string(frontmatter, "title", f"page {page_id}"),
+        "slug": slug,
+        "parent": parent_title,
+        "body": body,
+        "source_output_sha256": source_output_sha256,
+    }
+    return _sha256_json(payload)
+
+
+def _nav_order(frontmatter: dict[str, Any], page_id: str) -> int:
+    value = frontmatter.get("sequence", 1000)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise WoonError(
+            f"public projection page sequence must be a non-negative integer: {page_id}"
+        )
+    return value
+
+
+def _looks_private_locator(locator: str) -> bool:
+    candidate = locator.replace("\\", "/").lstrip("./")
+    return candidate.startswith(("private/", "wiki/private/", "wiki/private/_sources/"))
+
+
+def _tree_snapshot(root: Path) -> dict[str, str] | None:
+    if not root.exists():
+        return None
+    if root.is_symlink() or not root.is_dir():
+        raise WoonError(f"public projection content root is not a directory: {root}")
+    snapshot: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise WoonError(f"public projection content root rejects symlink: {path}")
+        if path.is_file():
+            snapshot[path.relative_to(root).as_posix()] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+    return snapshot
+
+
+def _desired_snapshot(report: PublicProjectionReport, current_root: Path) -> dict[str, str]:
+    desired = {
+        document.relative_path.as_posix(): hashlib.sha256(document.content).hexdigest()
+        for document in report.documents
+    }
+    readme = current_root / "README.md"
+    if readme.is_file():
+        desired["README.md"] = hashlib.sha256(readme.read_bytes()).hexdigest()
+    return desired
+
+
+def _replace_content_root(content_root: Path, report: PublicProjectionReport) -> None:
+    parent = content_root.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    stage_path = Path(tempfile.mkdtemp(prefix=".public-content-stage-", dir=parent))
+    stage: Path | None = stage_path
+    backup: Path | None = None
+    try:
+        existing_readme = content_root / "README.md"
+        if existing_readme.is_file():
+            atomic_write(stage_path / "README.md", existing_readme.read_bytes(), mode=0o644)
+        for document in report.documents:
+            destination = stage_path / document.relative_path
+            atomic_write(destination, document.content, mode=0o644)
+        if content_root.exists():
+            backup = Path(tempfile.mkdtemp(prefix=".public-content-backup-", dir=parent))
+            backup.rmdir()
+            os.replace(content_root, backup)
+        os.replace(stage_path, content_root)
+        stage = None
+        if backup is not None:
+            shutil.rmtree(backup)
+    except Exception:
+        if content_root.exists() and backup is not None:
+            shutil.rmtree(content_root)
+        if backup is not None and backup.exists() and not content_root.exists():
+            os.replace(backup, content_root)
+        raise
+    finally:
+        if stage is not None and stage.exists():
+            shutil.rmtree(stage)
+
+
+def _mapping(value: object, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise WoonError(f"public projection {label} must be a mapping")
+    return value
+
+
+def _required_string(mapping: dict[str, Any], key: str, label: str) -> str:
+    value = mapping.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise WoonError(f"public projection {label} requires {key}")
+    return value.strip()
+
+
+def _required_sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+        raise WoonError(f"public projection {label} requires a sha256")
+    return value
+
+
+def _sha256_json(payload: object) -> str:
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _json_bytes(payload: object) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )

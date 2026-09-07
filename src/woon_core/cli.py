@@ -92,6 +92,10 @@ from woon_core.knowledge.novel_wiki_projection import (
     apply_novel_wiki_projection,
     prepare_novel_wiki_projection,
 )
+from woon_core.knowledge.public_projection import (
+    apply_public_projection,
+    prepare_public_projection,
+)
 from woon_core.knowledge.obsidian_plugins import ObsidianPluginService
 from woon_core.knowledge.ollama_quality_review import run_ollama_quality_reviews
 from woon_core.knowledge.orchestration import (
@@ -204,6 +208,7 @@ Usage:
   woon knowledge compile [--force] [--page <canonical-id>...] [--vault <path>]
   woon knowledge compile-audit [--vault <path>]
   woon knowledge apply-compiled-transaction --input <local-JSON> [--vault <path>]
+  woon knowledge public-projection --site <path> [--apply] [--vault <path>]
   woon knowledge book-coverage-audit [--vault <path>]
   woon knowledge book-intake-audit [--manifest <name>] [--vault <path>]
   woon knowledge book-promote --input <local-JSON> [--vault <path>]
@@ -644,6 +649,9 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
         return
     if command == "source-restructure-catalog-audit":
         _run_source_restructure_catalog_audit(raw_options, output)
+        return
+    if command == "public-projection":
+        _run_public_projection(raw_options, output)
         return
     if command == "book-coverage-audit":
         _run_book_coverage_audit(raw_options, output)
@@ -1468,6 +1476,61 @@ def _run_schedule_apply(arguments: list[str], output: TextIO) -> None:
         vault or resolve_knowledge_vault(), Path(values["--candidate"])
     )
     print(json.dumps(receipt_record(receipt), ensure_ascii=False, indent=2), file=output)
+
+
+def _run_public_projection(arguments: list[str], output: TextIO) -> None:
+    """Prepare or explicitly apply the Vault-owned public site input projection."""
+
+    values: dict[str, str] = {}
+    apply = False
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option == "--apply":
+            if apply:
+                raise WoonError("knowledge public-projection accepts --apply once")
+            apply = True
+            index += 1
+            continue
+        if option not in {"--vault", "--site"}:
+            raise WoonError(f"unexpected knowledge public-projection argument: {option}")
+        if index + 1 >= len(arguments) or option in values:
+            raise WoonError(f"{option} requires exactly one value")
+        values[option] = arguments[index + 1]
+        index += 2
+    site_option = values.get("--site")
+    if site_option is None:
+        raise WoonError("knowledge public-projection requires --site <path>")
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
+    report = prepare_public_projection(vault, Path(site_option).expanduser().resolve())
+    result = apply_public_projection(report) if apply else None
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "apply": apply,
+                "document_count": len(report.documents),
+                "excluded_private_target_count": len(report.excluded_private_targets),
+                "link_check_count": len(report.link_checks),
+                "build_id": report.build_id,
+                "input_sha256": report.input_sha256,
+                "output_sha256": report.output_sha256,
+                "content_root": report.content_root.as_posix(),
+                "changed": result.changed if result is not None else False,
+                "receipt_path": (
+                    result.receipt_path.as_posix() if result is not None else None
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        file=output,
+    )
 
 
 def _run_novel_wiki_projection(arguments: list[str], output: TextIO) -> None:
