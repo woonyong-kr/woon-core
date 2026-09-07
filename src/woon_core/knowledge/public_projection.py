@@ -158,7 +158,7 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
     for page in sorted(selected, key=lambda item: _required_string(item, "page_id", "page spec")):
         page_id = _required_string(page, "page_id", "page spec")
         frontmatter, source_output_sha256, body = rendered[page_id]
-        parent_title = _validate_frontmatter_relations(
+        navigation_ancestry = _validate_frontmatter_relations(
             page_id,
             frontmatter,
             candidates,
@@ -179,7 +179,7 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
             page_id,
             frontmatter,
             slug,
-            parent_title,
+            navigation_ancestry,
             projected_body,
             source_output_sha256,
         )
@@ -192,7 +192,12 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
                 relative_path=Path(f"{slug}.md"),
                 content=content,
                 projection_sha256=_projection_payload_sha256(
-                    page_id, frontmatter, slug, parent_title, projected_body, source_output_sha256
+                    page_id,
+                    frontmatter,
+                    slug,
+                    navigation_ancestry,
+                    projected_body,
+                    source_output_sha256,
                 ),
                 source_output_sha256=source_output_sha256,
             )
@@ -457,25 +462,15 @@ def _validate_frontmatter_relations(
     all_targets: dict[str, dict[str, Any]],
     projection_targets: dict[str, str],
     link_checks: list[str],
-) -> str | None:
-    parent_title: str | None = None
+) -> tuple[str, ...]:
+    parent_page: dict[str, Any] | None = None
     parent = frontmatter.get("parent")
     if parent is not None:
         target = _relation_target(parent, f"{page_id}.parent")
-        resolved = _require_public_relation(
+        parent_page = _require_public_relation(
             page_id, target, candidates, all_targets, projection_targets, link_checks
         )
-        if resolved is not None:
-            parent_title = _required_string(
-                _mapping(resolved.get("frontmatter"), "public relation frontmatter"),
-                "title",
-                "public relation",
-            )
-    public_nav_root = frontmatter.get("public_nav_root", False)
-    if not isinstance(public_nav_root, bool):
-        raise WoonError(f"public projection public_nav_root must be boolean: {page_id}")
-    if public_nav_root:
-        parent_title = None
+    public_nav_root = _public_nav_root(frontmatter, page_id)
     for field in _RELATION_LIST_FIELDS:
         value = frontmatter.get(field)
         if value is None:
@@ -501,7 +496,67 @@ def _validate_frontmatter_relations(
                 _require_public_relation(
                     page_id, target, candidates, all_targets, projection_targets, link_checks
                 )
-    return parent_title
+    if public_nav_root or parent_page is None:
+        return ()
+    return _navigation_ancestry(
+        page_id,
+        parent_page,
+        candidates,
+        all_targets,
+        projection_targets,
+        link_checks,
+    )
+
+
+def _public_nav_root(frontmatter: dict[str, Any], page_id: str) -> bool:
+    value = frontmatter.get("public_nav_root", False)
+    if not isinstance(value, bool):
+        raise WoonError(f"public projection public_nav_root must be boolean: {page_id}")
+    return value
+
+
+def _navigation_ancestry(
+    page_id: str,
+    parent_page: dict[str, Any],
+    candidates: dict[str, dict[str, Any]],
+    all_targets: dict[str, dict[str, Any]],
+    projection_targets: dict[str, str],
+    link_checks: list[str],
+) -> tuple[str, ...]:
+    """Return nearest-first public titles used by Just the Docs navigation."""
+
+    titles: list[str] = []
+    seen = {page_id}
+    current = parent_page
+    while True:
+        current_id = _required_string(current, "page_id", "public navigation ancestor")
+        if current_id in seen:
+            raise WoonError(f"public projection navigation contains a cycle: {page_id}")
+        seen.add(current_id)
+        current_frontmatter = _mapping(
+            current.get("frontmatter"), f"page {current_id} frontmatter"
+        )
+        titles.append(
+            _required_string(current_frontmatter, "title", "public navigation ancestor")
+        )
+        if _public_nav_root(current_frontmatter, current_id):
+            break
+        parent = current_frontmatter.get("parent")
+        if parent is None:
+            break
+        target = _relation_target(parent, f"{current_id}.parent")
+        resolved = _require_public_relation(
+            current_id,
+            target,
+            candidates,
+            all_targets,
+            projection_targets,
+            link_checks,
+        )
+        if resolved is None:
+            break
+        current = resolved
+    return tuple(titles)
 
 
 def _relation_target(value: object, label: str) -> str:
@@ -560,7 +615,7 @@ def _project_body(
     projection_targets: dict[str, str],
     link_checks: list[str],
 ) -> str:
-    body = _strip_compiler_navigation(body)
+    body = _unwrap_compiler_navigation(body)
     for label, pattern in _PRIVATE_CONTENT:
         if pattern.search(body) and label != "Obsidian wikilink":
             raise WoonError(f"public projection body contains prohibited {label}: {page_id}")
@@ -592,24 +647,23 @@ def _project_body(
     return projected.rstrip() + "\n"
 
 
-def _strip_compiler_navigation(body: str) -> str:
-    """Leave keyword navigation to the public sidebar while preserving authored prose."""
+def _unwrap_compiler_navigation(body: str) -> str:
+    """Keep the direct-child map while removing compiler-only boundary comments."""
 
-    pattern = re.compile(rf"(?ms)^\s*{re.escape(CHILDREN_START)}.*?{re.escape(CHILDREN_END)}\s*")
-    return pattern.sub("", body).strip()
+    return body.replace(CHILDREN_START, "").replace(CHILDREN_END, "").strip()
 
 
 def _render_projected_markdown(
     page_id: str,
     frontmatter: dict[str, Any],
     slug: str,
-    parent_title: str | None,
+    navigation_ancestry: tuple[str, ...],
     body: str,
     source_output_sha256: str,
 ) -> bytes:
     title = _required_string(frontmatter, "title", f"page {page_id}")
     payload_hash = _projection_payload_sha256(
-        page_id, frontmatter, slug, parent_title, body, source_output_sha256
+        page_id, frontmatter, slug, navigation_ancestry, body, source_output_sha256
     )
     output: dict[str, Any] = {
         "layout": "default",
@@ -621,8 +675,12 @@ def _render_projected_markdown(
         "projection_id": _required_string(frontmatter, "canonical_id", f"page {page_id}"),
         "projection_sha256": payload_hash,
     }
-    if parent_title is not None:
-        output["parent"] = parent_title
+    if navigation_ancestry:
+        output["parent"] = navigation_ancestry[0]
+    if len(navigation_ancestry) >= 2:
+        output["grand_parent"] = navigation_ancestry[1]
+    if len(navigation_ancestry) >= 3:
+        output["ancestor"] = navigation_ancestry[-1]
     yaml_text = yaml.safe_dump(
         output, allow_unicode=True, sort_keys=False, default_flow_style=False
     )
@@ -653,7 +711,7 @@ def _projection_payload_sha256(
     page_id: str,
     frontmatter: dict[str, Any],
     slug: str,
-    parent_title: str | None,
+    navigation_ancestry: tuple[str, ...],
     body: str,
     source_output_sha256: str,
 ) -> str:
@@ -662,7 +720,7 @@ def _projection_payload_sha256(
         "canonical_id": _required_string(frontmatter, "canonical_id", f"page {page_id}"),
         "title": _required_string(frontmatter, "title", f"page {page_id}"),
         "slug": slug,
-        "parent": parent_title,
+        "navigation_ancestry": navigation_ancestry,
         "body": body,
         "source_output_sha256": source_output_sha256,
     }

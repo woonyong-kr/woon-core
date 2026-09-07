@@ -244,7 +244,7 @@ def test_public_nav_root_keeps_semantic_parent_check_and_inserts_reader_toc(tmp_
             body=(
                 "Kotlin을 시작하기 전에 필요한 내용을 먼저 살핀다.\n\n"
                 "<!-- woon-wiki-children:start -->\n"
-                "## 공개 sidebar가 맡는 목록\n\n"
+                "## 직접 하위 키워드\n\n"
                 "- [[Wiki/guide|가이드]]\n"
                 "<!-- woon-wiki-children:end -->\n\n"
                 "## 준비\n\n"
@@ -272,12 +272,96 @@ def test_public_nav_root_keeps_semantic_parent_check_and_inserts_reader_toc(tmp_
     assert "# Kotlin" in projected
     assert "# Kotlin\n{: .no_toc }" in projected
     assert "## 목차\n{: .no_toc .text-delta }\n\n1. TOC\n{:toc}" in projected
+    assert "## 직접 하위 키워드\n\n- [가이드](/wiki/guide/)" in projected
     assert "## 준비\n\n개발 환경을 확인한다." in projected
     assert "woon-wiki-children" not in projected
-    assert "공개 sidebar가 맡는 목록" not in projected
     assert "### 확인\n\n컴파일러를 실행한다." in projected
     assert "## 함수\n\n값을 받아 결과를 돌려준다." in projected
-    assert projected.index("## 목차") < projected.index("## 준비")
+    assert projected.index("## 목차") < projected.index("## 직접 하위 키워드")
+    assert projected.index("## 직접 하위 키워드") < projected.index("## 준비")
+
+
+def test_public_projection_disambiguates_repeated_parent_titles_with_ancestry(
+    tmp_path: Path,
+) -> None:
+    source_id = "source://public/example"
+    pages = [
+        _hidden_wiki_hub(),
+        _page(
+            page_id="Wiki/ai",
+            title="AI·머신러닝",
+            publication_state="publish",
+            access="public",
+            slug="ai",
+            parent="[[wiki/Wiki/README|Wiki]]",
+            source_ids=[source_id],
+        ),
+        _page(
+            page_id="Wiki/books",
+            title="책",
+            publication_state="publish",
+            access="public",
+            slug="books",
+            parent="[[wiki/Wiki/README|Wiki]]",
+            source_ids=[source_id],
+        ),
+        _page(
+            page_id="Wiki/books/ai",
+            title="AI·머신러닝",
+            publication_state="publish",
+            access="public",
+            slug="books-ai",
+            parent="[[wiki/Wiki/books|책]]",
+            source_ids=[source_id],
+        ),
+        _page(
+            page_id="Wiki/ai/foundations",
+            title="머신러닝 기초",
+            publication_state="publish",
+            access="public",
+            slug="ml-foundations",
+            parent="[[wiki/Wiki/ai|AI·머신러닝]]",
+            source_ids=[source_id],
+        ),
+        _page(
+            page_id="Wiki/books/ai/guide",
+            title="AI 학습서",
+            publication_state="publish",
+            access="public",
+            slug="ai-guide",
+            parent="[[wiki/Wiki/books/ai|AI·머신러닝]]",
+            source_ids=[source_id],
+        ),
+        _page(
+            page_id="Wiki/books/ai/guide/chapter",
+            title="첫 장",
+            publication_state="publish",
+            access="public",
+            slug="ai-guide-chapter",
+            parent="[[wiki/Wiki/books/ai/guide|AI 학습서]]",
+            source_ids=[source_id],
+        ),
+    ]
+    pages[1]["frontmatter"]["public_nav_root"] = True
+    pages[2]["frontmatter"]["public_nav_root"] = True
+    vault, site = _write_fixture(tmp_path, pages)
+
+    apply_public_projection(prepare_public_projection(vault, site))
+
+    def metadata(slug: str) -> dict[str, Any]:
+        content = (site / f"generated/public-content/{slug}.md").read_text(encoding="utf-8")
+        return yaml.safe_load(content.split("---", 2)[1])
+
+    technical_child = metadata("ml-foundations")
+    assert technical_child["parent"] == "AI·머신러닝"
+    assert "grand_parent" not in technical_child
+    book_child = metadata("ai-guide")
+    assert book_child["parent"] == "AI·머신러닝"
+    assert book_child["grand_parent"] == "책"
+    chapter = metadata("ai-guide-chapter")
+    assert chapter["parent"] == "AI 학습서"
+    assert chapter["grand_parent"] == "AI·머신러닝"
+    assert chapter["ancestor"] == "책"
 
 
 def test_public_projection_rejects_nonpublic_provenance(tmp_path: Path) -> None:
