@@ -173,6 +173,80 @@ def test_redirects_are_separate_deterministic_artifacts_and_replay_safely(tmp_pa
     assert set(json.loads(report.receipt)["redirects"]) == {"old-observability.html"}
 
 
+def test_legacy_paths_preserve_both_url_forms_and_replay_without_duplicates(tmp_path: Path) -> None:
+    page = _page(page_id="Wiki/structures", title="자료구조", publication_state="publish",
+                 access="public", slug="data-structures")
+    paths = ["/wiki/algorithm/linear-data-structures/",
+             "/wiki/algorithm/linear-data-structures.html"]
+    page["frontmatter"]["public_redirect_from_paths"] = paths
+    vault, site = _write_fixture(tmp_path, [page])
+    report = prepare_public_projection(vault, site)
+    assert len(report.documents) == 1
+    assert {item.public_path for item in report.redirects} == set(paths)
+    assert {item.relative_path.as_posix() for item in report.redirects} == {
+        "legacy-paths/algorithm/linear-data-structures/index.html",
+        "legacy-paths/algorithm/linear-data-structures.html",
+    }
+    for item in report.redirects:
+        assert item.slug is None
+        assert b"redirect_target: /wiki/data-structures/" in item.content
+    assert apply_public_projection(report).changed is True
+    assert apply_public_projection(prepare_public_projection(vault, site)).changed is False
+
+
+@pytest.mark.parametrize("path", [
+    "/wiki/algorithm/../private/", "/wiki/algorithm/%2e%2e/", "//example.com/wiki/a/b/",
+    "https://example.com/wiki/a/b/", "/wiki/algorithm/a/?q=x", "/wiki/algorithm/a/#x",
+    "/wiki/algorithm/a\\b/", "/wiki/private/item/", "/wiki/algorithm/private.html",
+    "/wiki/algorithm/a//", "/wiki/flat-slug/", "/wiki/algorithm/a.html/", "", None,
+])
+def test_legacy_paths_reject_unsafe_or_unapproved_path_forms(tmp_path: Path, path: object) -> None:
+    page = _page(page_id="Wiki/structures", title="자료구조", publication_state="publish",
+                 access="public", slug="data-structures")
+    page["frontmatter"]["public_redirect_from_paths"] = [path]
+    vault, site = _write_fixture(tmp_path, [page])
+    with pytest.raises(WoonError, match="safe legacy public paths"):
+        prepare_public_projection(vault, site)
+
+
+@pytest.mark.parametrize("collision", ["canonical", "private", "flat-alias", "duplicate"])
+def test_legacy_paths_reserve_final_output_files_as_well_as_urls(
+    tmp_path: Path, collision: str
+) -> None:
+    page = _page(page_id="Wiki/structures", title="자료구조", publication_state="publish",
+                 access="public", slug="data-structures")
+    path = "/wiki/algorithm/index.html"
+    page["frontmatter"]["public_redirect_from_paths"] = [path]
+    pages = [page]
+    if collision == "duplicate":
+        page["frontmatter"]["public_redirect_from_paths"].append(path)
+    elif collision == "flat-alias":
+        page["frontmatter"]["public_redirect_from"] = ["algorithm"]
+    else:
+        private = collision == "private"
+        pages.append(_page(page_id="Wiki/algorithm", title="Algorithm", slug="algorithm",
+                           publication_state="private" if private else "publish",
+                           access="local-only" if private else "public"))
+    vault, site = _write_fixture(tmp_path, pages)
+    with pytest.raises(WoonError, match="redirect path conflicts"):
+        prepare_public_projection(vault, site)
+
+
+def test_legacy_paths_require_compiled_metadata_and_ignore_private_owners(tmp_path: Path) -> None:
+    private = _page(page_id="Wiki/private-owner", title="Private", publication_state="private",
+                    access="local-only", slug="private-owner")
+    private["frontmatter"]["public_redirect_from_paths"] = ["/wiki/algorithm/hidden/"]
+    vault, site = _write_fixture(tmp_path / "private", [private])
+    assert prepare_public_projection(vault, site).redirects == ()
+    public = _page(page_id="Wiki/structures", title="자료구조", publication_state="publish",
+                  access="public", slug="data-structures")
+    vault, site = _write_fixture(tmp_path / "public", [public])
+    public["frontmatter"]["public_redirect_from_paths"] = ["/wiki/algorithm/old/"]
+    _write_yaml(vault / "catalog/llm-wiki/pages.yaml", {"version": 1, "pages": [public]})
+    with pytest.raises(WoonError, match="metadata drift.*public_redirect_from_paths"):
+        prepare_public_projection(vault, site)
+
+
 @pytest.mark.parametrize("former", ["old-name", None, [None], ["../private"],
                                    ["https://example.com"], ["Old-Name"], ["%2e%2e"], [""]])
 def test_redirect_input_cannot_be_a_path_or_unvalidated_url(tmp_path: Path, former: object) -> None:

@@ -30,6 +30,10 @@ _CONTENT_RELATIVE = Path("generated/public-content")
 _RECEIPT_RELATIVE = Path(".local/woon-knowledge/public-projection/receipt.json")
 _WIKI_ROOT = Path("wiki/Wiki")
 _PUBLIC_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+_LEGACY_PUBLIC_PATH = re.compile(
+    r"/wiki/[a-z0-9]+(?:-[a-z0-9]+)*/[a-z0-9]+(?:-[a-z0-9]+)*(?:/|\.html)\Z"
+)
+_PRIVATE_ROUTE_SEGMENTS = frozenset({"private", "sources", "catalog", "personal", "local-only"})
 _WIKILINK = re.compile(
     r"(?<!\!)\[\[(?P<target>[^\]|#]+)(?P<anchor>#[^\]|]+)?(?:\|(?P<label>[^\]]+))?\]\]"
 )
@@ -66,10 +70,11 @@ class PublicProjectionDocument:
 class PublicProjectionRedirect:
     """An explicit former public URL pointing directly to a canonical document."""
 
-    slug: str
+    slug: str | None
     target_slug: str
     relative_path: Path
     content: bytes
+    public_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +119,8 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
     A survivor's ``public_redirect_from`` lists explicitly approved former
     public slugs. They become separate HTML artifacts targeting that verified
     document directly; private owners and inferred aliases never create them.
+    ``public_redirect_from_paths`` separately names former category/document
+    paths, ending in a slash or ``.html``; it does not relax canonical slugs.
     """
 
     root = vault.expanduser().resolve()
@@ -242,7 +249,8 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
     }
     if redirects:
         input_payload["redirects"] = [
-            {"slug": item.slug, "target_slug": item.target_slug}
+            {**({"path": item.public_path} if item.public_path else {"slug": item.slug}),
+             "target_slug": item.target_slug}
             for item in redirects
         ]
     input_sha256 = _sha256_json(input_payload)
@@ -296,6 +304,8 @@ def _prepare_redirects(
         slug = page["frontmatter"].get("public_slug")
         if isinstance(slug, str):
             reserved.add(slug)
+    reserved_urls = {f"/wiki/{slug}/" for slug in reserved}
+    reserved_files = {_public_output_path(url) for url in reserved_urls}
     redirects = []
     for page_id, (frontmatter, _, _) in sorted(rendered.items()):
         former = frontmatter.get("public_redirect_from", [])
@@ -305,21 +315,52 @@ def _prepare_redirects(
         ):
             raise WoonError(f"public projection redirects require safe public slugs: {page_id}")
         target = _public_slug(frontmatter, page_id)
+        former_paths = frontmatter.get("public_redirect_from_paths", [])
+        if not isinstance(former_paths, list) or any(
+            not _safe_legacy_public_path(path) for path in former_paths
+        ):
+            raise WoonError(
+                f"public projection redirects require safe legacy public paths: {page_id}"
+            )
         for slug in sorted(former):
-            if slug in reserved:
+            url = f"/wiki/{slug}/"
+            if url in reserved_urls or _public_output_path(url) in reserved_files:
                 raise WoonError(f"public projection redirect slug conflicts: {slug}")
-            reserved.add(slug)
+            reserved_urls.add(url)
+            reserved_files.add(_public_output_path(url))
             redirects.append(PublicProjectionRedirect(
                 slug=slug, target_slug=target, relative_path=Path(f"{slug}.html"),
-                content=_render_redirect(slug, target),
+                content=_render_redirect(url, target),
             ))
-    return sorted(redirects, key=lambda item: item.slug)
+        for path in sorted(former_paths):
+            output = _public_output_path(path)
+            if path in reserved_urls or output in reserved_files:
+                raise WoonError(f"public projection redirect path conflicts: {path}")
+            reserved_urls.add(path)
+            reserved_files.add(output)
+            relative = Path("legacy-paths") / output.relative_to("wiki")
+            redirects.append(PublicProjectionRedirect(
+                slug=None, target_slug=target, relative_path=relative,
+                content=_render_redirect(path, target), public_path=path,
+            ))
+    return sorted(redirects, key=lambda item: item.public_path or f"/wiki/{item.slug}/")
 
 
-def _render_redirect(slug: str, target: str) -> bytes:
+def _safe_legacy_public_path(value: object) -> bool:
+    if not isinstance(value, str) or not _LEGACY_PUBLIC_PATH.fullmatch(value):
+        return False
+    parts = value.removeprefix("/wiki/").rstrip("/").removesuffix(".html").split("/")
+    return not _PRIVATE_ROUTE_SEGMENTS.intersection(parts)
+
+
+def _public_output_path(public_path: str) -> Path:
+    return Path(public_path.lstrip("/") + ("index.html" if public_path.endswith("/") else ""))
+
+
+def _render_redirect(public_path: str, target: str) -> bytes:
     frontmatter = {
         "layout": None,
-        "permalink": f"/wiki/{slug}/",
+        "permalink": public_path,
         "redirect_target": f"/wiki/{target}/",
         "nav_exclude": True,
         "search_exclude": True,
@@ -522,7 +563,7 @@ def _verified_compiled_body(
     frontmatter = _mapping(page.get("frontmatter"), f"page {page_id} frontmatter")
     for field in (
         "title", "canonical_id", "publication_state", "access", "public_slug",
-        "public_redirect_from", "content_status",
+        "public_redirect_from", "public_redirect_from_paths", "content_status",
     ):
         if metadata.get(field) != frontmatter.get(field):
             raise WoonError(f"public projection compiler output metadata drift: {page_id}.{field}")
