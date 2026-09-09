@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,16 @@ class PublicProjectionDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class PublicProjectionRedirect:
+    """An explicit former public URL pointing directly to a canonical document."""
+
+    slug: str
+    target_slug: str
+    relative_path: Path
+    content: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class PublicProjectionReport:
     """Read-only public projection preflight result ready for explicit apply."""
 
@@ -75,6 +86,12 @@ class PublicProjectionReport:
     input_sha256: str
     output_sha256: str
     receipt: bytes
+    redirects: tuple[PublicProjectionRedirect, ...] = ()
+
+    @property
+    def artifacts(self) -> tuple[PublicProjectionDocument | PublicProjectionRedirect, ...]:
+        """Generated files, keeping redirects outside canonical document counts."""
+        return (*self.documents, *self.redirects)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +110,10 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
     ``access: public`` beneath ``wiki/Wiki`` are eligible.  Every selected
     page must have a matching compiler receipt, public provenance, and public
     outbound links before any Markdown is rendered.
+
+    A survivor's ``public_redirect_from`` lists explicitly approved former
+    public slugs. They become separate HTML artifacts targeting that verified
+    document directly; private owners and inferred aliases never create them.
     """
 
     root = vault.expanduser().resolve()
@@ -203,6 +224,7 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
             )
         )
 
+    redirects = _prepare_redirects(pages, rendered, seen_slugs)
     input_payload = {
         "version": _SCHEMA_VERSION,
         "documents": [
@@ -218,13 +240,22 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
         "excluded_private_targets": sorted(excluded),
         "link_checks": sorted(set(link_checks)),
     }
+    if redirects:
+        input_payload["redirects"] = [
+            {"slug": item.slug, "target_slug": item.target_slug}
+            for item in redirects
+        ]
     input_sha256 = _sha256_json(input_payload)
     build_id = input_sha256[:24]
     document_hashes = {
         item.relative_path.as_posix(): hashlib.sha256(item.content).hexdigest()
         for item in documents
     }
-    output_sha256 = _sha256_json(document_hashes)
+    redirect_hashes = {
+        item.relative_path.as_posix(): hashlib.sha256(item.content).hexdigest()
+        for item in redirects
+    }
+    output_sha256 = _sha256_json(document_hashes | redirect_hashes)
     receipt_payload = {
         "version": _SCHEMA_VERSION,
         "build_id": build_id,
@@ -234,6 +265,8 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
         "excluded_private_targets": sorted(excluded),
         "link_checks": sorted(set(link_checks)),
     }
+    if redirect_hashes:
+        receipt_payload["redirects"] = redirect_hashes
     receipt_bytes = _json_bytes(receipt_payload)
     return PublicProjectionReport(
         vault=root,
@@ -246,7 +279,66 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
         input_sha256=input_sha256,
         output_sha256=output_sha256,
         receipt=receipt_bytes,
+        redirects=tuple(redirects),
     )
+
+
+def _prepare_redirects(
+    pages: list[dict[str, Any]],
+    rendered: dict[str, tuple[dict[str, Any], str, str]],
+    public_slugs: set[str],
+) -> list[PublicProjectionRedirect]:
+    # Reserve private metadata too: an alias must never expose or take over an
+    # existing private page's URL. Only explicit fields on verified public
+    # survivors can create output; aliases and historical source locators cannot.
+    reserved = set(public_slugs)
+    for page in pages:
+        slug = page["frontmatter"].get("public_slug")
+        if isinstance(slug, str):
+            reserved.add(slug)
+    redirects = []
+    for page_id, (frontmatter, _, _) in sorted(rendered.items()):
+        former = frontmatter.get("public_redirect_from", [])
+        if not isinstance(former, list) or any(
+            not isinstance(slug, str) or not _PUBLIC_SLUG.fullmatch(slug)
+            for slug in former
+        ):
+            raise WoonError(f"public projection redirects require safe public slugs: {page_id}")
+        target = _public_slug(frontmatter, page_id)
+        for slug in sorted(former):
+            if slug in reserved:
+                raise WoonError(f"public projection redirect slug conflicts: {slug}")
+            reserved.add(slug)
+            redirects.append(PublicProjectionRedirect(
+                slug=slug, target_slug=target, relative_path=Path(f"{slug}.html"),
+                content=_render_redirect(slug, target),
+            ))
+    return sorted(redirects, key=lambda item: item.slug)
+
+
+def _render_redirect(slug: str, target: str) -> bytes:
+    frontmatter = {
+        "layout": None,
+        "permalink": f"/wiki/{slug}/",
+        "redirect_target": f"/wiki/{target}/",
+        "nav_exclude": True,
+        "search_exclude": True,
+        "sitemap": False,
+    }
+    header = yaml.safe_dump(frontmatter, sort_keys=False)
+    body = """<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<title>문서가 이동했습니다</title>
+<link rel="canonical" href="{{ page.redirect_target | absolute_url | escape }}">
+<meta http-equiv="refresh" content="0; url={{ page.redirect_target | relative_url | escape }}">
+</head>
+<body><p><a href="{{ page.redirect_target | relative_url | escape }}">문서 열기</a></p></body>
+</html>
+"""
+    return f"---\n{header}---\n\n{body}".encode()
 
 
 def apply_public_projection(report: PublicProjectionReport) -> PublicProjectionApplyResult:
@@ -428,7 +520,10 @@ def _verified_compiled_body(
     if not isinstance(compiled, dict) or compiled.get("page_id") != page_id:
         raise WoonError(f"public projection requires compiler-owned Markdown: {page_id}")
     frontmatter = _mapping(page.get("frontmatter"), f"page {page_id} frontmatter")
-    for field in ("title", "canonical_id", "publication_state", "access"):
+    for field in (
+        "title", "canonical_id", "publication_state", "access", "public_slug",
+        "public_redirect_from", "content_status",
+    ):
         if metadata.get(field) != frontmatter.get(field):
             raise WoonError(f"public projection compiler output metadata drift: {page_id}.{field}")
     header = f"# {_required_string(page, 'title', f'page {page_id}')}"
@@ -470,6 +565,11 @@ def _validate_frontmatter_relations(
         parent_page = _require_public_relation(
             page_id, target, candidates, all_targets, projection_targets, link_checks
         )
+    public_parent_id = frontmatter.get("public_parent_id")
+    if public_parent_id is not None and (
+        parent_page is None or public_parent_id != parent_page.get("page_id")
+    ):
+        raise WoonError(f"public projection public_parent_id does not match parent: {page_id}")
     public_nav_root = _public_nav_root(frontmatter, page_id)
     for field in _RELATION_LIST_FIELDS:
         value = frontmatter.get(field)
@@ -533,12 +633,8 @@ def _navigation_ancestry(
         if current_id in seen:
             raise WoonError(f"public projection navigation contains a cycle: {page_id}")
         seen.add(current_id)
-        current_frontmatter = _mapping(
-            current.get("frontmatter"), f"page {current_id} frontmatter"
-        )
-        titles.append(
-            _required_string(current_frontmatter, "title", "public navigation ancestor")
-        )
+        current_frontmatter = _mapping(current.get("frontmatter"), f"page {current_id} frontmatter")
+        titles.append(_required_string(current_frontmatter, "title", "public navigation ancestor"))
         if _public_nav_root(current_frontmatter, current_id):
             break
         parent = current_frontmatter.get("parent")
@@ -630,7 +726,7 @@ def _project_body(
         target_page_id = _required_string(resolved, "page_id", "public relation")
         label = (match.group("label") or target).strip()
         anchor = match.group("anchor") or ""
-        url = f"/wiki/{projection_targets[target_page_id]}/{anchor.lower()}"
+        url = f"/wiki/{projection_targets[target_page_id]}/{_jekyll_heading_fragment(anchor)}"
         return f"[{label}]({url})"
 
     projected = _WIKILINK.sub(replace, body)
@@ -645,6 +741,26 @@ def _project_body(
             continue
         raise WoonError(f"public projection body has a local Markdown link: {page_id}")
     return projected.rstrip() + "\n"
+
+
+def _jekyll_heading_fragment(anchor: str) -> str:
+    """Match the site's kramdown-parser-gfm 1.1.0 automatic heading ID rule.
+
+    Its generate_gfm_header_id keeps Unicode Word characters and hyphens,
+    then translates each space/tab to a hyphen without collapsing runs.
+    This is a heading fragment, not a filename slug or a rewrite of URI links.
+    """
+    if not anchor:
+        return ""
+    text = "".join(character.lower() for character in anchor.removeprefix("#").strip())
+    kept = (
+        character
+        for character in text
+        if character in "- \t"
+        or unicodedata.category(character)[0] in {"L", "M"}
+        or unicodedata.category(character) in {"Nl", "Nd", "Pc"}
+    )
+    return "#" + "".join("-" if character in " \t" else character for character in kept)
 
 
 def _unwrap_compiler_navigation(body: str) -> str:
@@ -677,6 +793,24 @@ def _render_projected_markdown(
     }
     if navigation_ancestry:
         output["parent"] = navigation_ancestry[0]
+    # The preview flag is a content state, never a privacy override. Eligibility
+    # and public provenance have already been checked above.
+    content_status = frontmatter.get("content_status")
+    if content_status is not None:
+        if content_status not in {"planned", "overview", "ready"}:
+            raise WoonError(f"public projection content_status is invalid: {page_id}")
+        output["content_status"] = content_status
+        output["has_toc"] = True
+    if frontmatter.get("public_parent_id"):
+        output["public_parent_id"] = frontmatter["public_parent_id"]
+    search_terms = frontmatter.get("public_search_terms")
+    if search_terms is not None:
+        if not isinstance(search_terms, list) or any(
+            not isinstance(term, str) or not term.strip() for term in search_terms
+        ):
+            raise WoonError(f"public projection search terms are invalid: {page_id}")
+        if search_terms:
+            output["search_terms"] = search_terms
     if len(navigation_ancestry) >= 2:
         output["grand_parent"] = navigation_ancestry[1]
     if len(navigation_ancestry) >= 3:
@@ -684,9 +818,10 @@ def _render_projected_markdown(
     yaml_text = yaml.safe_dump(
         output, allow_unicode=True, sort_keys=False, default_flow_style=False
     )
-    return (
-        f"---\n{yaml_text}---\n\n# {title}\n{{: .no_toc }}\n\n{_insert_reader_toc(body)}".encode()
-    )
+    if content_status == "planned":
+        body = '<p class="wn-content-status">작성 예정</p>\n\n' + body
+    reader_body = body if content_status else _insert_reader_toc(body)
+    return f"---\n{yaml_text}---\n\n# {title}\n{{: .no_toc }}\n\n{reader_body}".encode()
 
 
 def _insert_reader_toc(body: str) -> str:
@@ -760,7 +895,7 @@ def _tree_snapshot(root: Path) -> dict[str, str] | None:
 def _desired_snapshot(report: PublicProjectionReport, current_root: Path) -> dict[str, str]:
     desired = {
         document.relative_path.as_posix(): hashlib.sha256(document.content).hexdigest()
-        for document in report.documents
+        for document in report.artifacts
     }
     readme = current_root / "README.md"
     if readme.is_file():
@@ -778,7 +913,7 @@ def _replace_content_root(content_root: Path, report: PublicProjectionReport) ->
         existing_readme = content_root / "README.md"
         if existing_readme.is_file():
             atomic_write(stage_path / "README.md", existing_readme.read_bytes(), mode=0o644)
-        for document in report.documents:
+        for document in report.artifacts:
             destination = stage_path / document.relative_path
             atomic_write(destination, document.content, mode=0o644)
         if content_root.exists():

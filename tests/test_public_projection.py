@@ -35,6 +35,161 @@ privacy_prohibited:
 """
 
 
+def test_keyword_preview_preserves_planned_state_and_child_navigation(tmp_path: Path) -> None:
+    page = _page(
+        page_id="Wiki/kotlin",
+        title="Kotlin",
+        publication_state="publish",
+        access="public",
+        slug="kotlin",
+        body="<!-- planned -->",
+    )
+    page["frontmatter"]["content_status"] = "planned"
+    vault, site = _write_fixture(tmp_path, [page])
+    report = prepare_public_projection(vault, site)
+    rendered = report.documents[0].content.decode()
+    assert "content_status: planned" in rendered
+    assert "has_toc: true" in rendered
+    assert "작성 예정" in rendered
+    assert "## 목차" not in rendered
+
+
+def test_keyword_preview_does_not_override_private_provenance(tmp_path: Path) -> None:
+    page = _page(
+        page_id="Wiki/kotlin",
+        title="Kotlin",
+        publication_state="publish",
+        access="public",
+        slug="kotlin",
+        source_ids=["source://private/book"],
+    )
+    page["frontmatter"]["content_status"] = "planned"
+    vault, site = _write_fixture(tmp_path, [page], source_privacy="local-only")
+    with pytest.raises(WoonError, match="non-public provenance"):
+        prepare_public_projection(vault, site)
+
+
+def test_keyword_parent_identity_cannot_disagree_with_navigation(tmp_path: Path) -> None:
+    page = _page(
+        page_id="Wiki/kotlin",
+        title="Kotlin",
+        publication_state="publish",
+        access="public",
+        slug="kotlin",
+    )
+    page["frontmatter"]["public_parent_id"] = "Wiki/private"
+    vault, site = _write_fixture(tmp_path, [page])
+    with pytest.raises(WoonError, match="public_parent_id does not match parent"):
+        prepare_public_projection(vault, site)
+
+
+def test_only_explicit_public_search_terms_are_projected(tmp_path: Path) -> None:
+    page = _page(
+        page_id="Wiki/heap", title="Heap", publication_state="publish", access="public", slug="heap"
+    )
+    page["frontmatter"]["public_search_terms"] = ["힙"]
+    page["frontmatter"]["aliases"] = ["internal alias"]
+    vault, site = _write_fixture(tmp_path, [page])
+
+    rendered = prepare_public_projection(vault, site).documents[0].content.decode()
+
+    assert "search_terms:\n- 힙" in rendered
+    assert "internal alias" not in rendered
+
+
+@pytest.mark.parametrize("terms", ["힙", [None], [""]])
+def test_invalid_public_search_terms_fail(tmp_path: Path, terms: object) -> None:
+    page = _page(
+        page_id="Wiki/heap", title="Heap", publication_state="publish", access="public", slug="heap"
+    )
+    page["frontmatter"]["public_search_terms"] = terms
+    vault, site = _write_fixture(tmp_path, [page])
+    with pytest.raises(WoonError, match="search terms are invalid"):
+        prepare_public_projection(vault, site)
+
+
+def test_redirects_are_separate_deterministic_artifacts_and_replay_safely(tmp_path: Path) -> None:
+    page = _page(page_id="Wiki/observability", title="Observability",
+                 publication_state="publish", access="public", slug="observability")
+    page["frontmatter"].update(content_status="planned", public_redirect_from=["old-observability"])
+    vault, site = _write_fixture(tmp_path, [page])
+    report = prepare_public_projection(vault, site)
+    assert len(report.documents) == 1
+    assert len(report.redirects) == 1
+    redirect = report.redirects[0]
+    assert redirect.target_slug == "observability"
+    assert redirect.relative_path == Path("old-observability.html")
+    assert b"projection_id" not in redirect.content
+    assert b"redirect_target: /wiki/observability/" in redirect.content
+    assert b"absolute_url" in redirect.content and b"relative_url" in redirect.content
+    assert report.receipt == prepare_public_projection(vault, site).receipt
+    assert apply_public_projection(report).changed
+    assert (report.content_root / redirect.relative_path).read_bytes() == redirect.content
+    assert not apply_public_projection(report).changed
+    assert set(json.loads(report.receipt)["documents"]) == {"observability.md"}
+    assert set(json.loads(report.receipt)["redirects"]) == {"old-observability.html"}
+
+
+@pytest.mark.parametrize("former", ["old-name", None, [None], ["../private"],
+                                   ["https://example.com"], ["Old-Name"], ["%2e%2e"], [""]])
+def test_redirect_input_cannot_be_a_path_or_unvalidated_url(tmp_path: Path, former: object) -> None:
+    page = _page(page_id="Wiki/one", title="One", publication_state="publish",
+                 access="public", slug="one")
+    page["frontmatter"]["public_redirect_from"] = former
+    vault, site = _write_fixture(tmp_path, [page])
+    with pytest.raises(WoonError, match="safe public slugs"):
+        prepare_public_projection(vault, site)
+
+
+@pytest.mark.parametrize("former", [["one"], ["old", "old"], ["two"], ["private"]])
+def test_redirects_cannot_shadow_current_or_private_urls(tmp_path: Path, former: list[str]) -> None:
+    one = _page(page_id="Wiki/one", title="One", publication_state="publish",
+                access="public", slug="one")
+    one["frontmatter"]["public_redirect_from"] = former
+    two = _page(page_id="Wiki/two", title="Two", publication_state="publish",
+                access="public", slug="two")
+    private = _page(page_id="Wiki/private", title="Private", publication_state="private",
+                    access="local-only", slug="private")
+    private["frontmatter"]["public_redirect_from"] = ["private-alias"]
+    vault, site = _write_fixture(tmp_path, [one, two, private])
+    with pytest.raises(WoonError, match="redirect slug conflicts"):
+        prepare_public_projection(vault, site)
+
+
+def test_redirect_owners_require_public_provenance_and_compiled_metadata(tmp_path: Path) -> None:
+    page = _page(page_id="Wiki/one", title="One", publication_state="publish",
+                 access="public", slug="one", source_ids=["source://private/book"])
+    page["frontmatter"]["public_redirect_from"] = ["old"]
+    vault, site = _write_fixture(tmp_path, [page], source_privacy="local-only")
+    with pytest.raises(WoonError, match="non-public provenance"):
+        prepare_public_projection(vault, site)
+    page["source_ids"] = []
+    page["frontmatter"]["public_redirect_from"] = ["uncompiled-change"]
+    _write_yaml(vault / "catalog/llm-wiki/pages.yaml", {"version": 1, "pages": [page]})
+    with pytest.raises(WoonError, match="metadata drift.*public_redirect_from"):
+        prepare_public_projection(vault, site)
+
+
+def test_private_owner_produces_no_redirect_and_target_removal_invalidates_apply(
+    tmp_path: Path,
+) -> None:
+    page = _page(page_id="Wiki/one", title="One", publication_state="publish",
+                 access="public", slug="one")
+    page["frontmatter"]["public_redirect_from"] = ["old"]
+    vault, site = _write_fixture(tmp_path, [page])
+    report = prepare_public_projection(vault, site)
+    apply_public_projection(report)
+    assert (report.content_root / "old.html").exists()
+    page["frontmatter"].update(publication_state="private", access="local-only")
+    _write_yaml(vault / "catalog/llm-wiki/pages.yaml", {"version": 1, "pages": [page]})
+    hidden = prepare_public_projection(vault, site)
+    assert not hidden.documents and not hidden.redirects
+    with pytest.raises(WoonError, match="preflight is stale"):
+        apply_public_projection(report)
+    apply_public_projection(hidden)
+    assert not (hidden.content_root / "old.html").exists()
+
+
 def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
@@ -219,6 +374,56 @@ def test_public_projection_rewrites_only_approved_wikilinks_and_replays(tmp_path
         "home.md",
         "kotlin.md",
     }
+
+
+def test_public_heading_links_match_gfm_ids_and_preserve_uri_links(tmp_path: Path) -> None:
+    # Expected IDs were rendered by the site's locked Jekyll/GFM converter.
+    headings = (
+        ("실행 파일의 쓰기를 막는 이유", "실행-파일의-쓰기를-막는-이유"),
+        ("HTTP API: 오류 & 복구", "http-api-오류--복구"),
+        ("A  B\tC_D", "a--b-c_d"),
+        ("C++ / Kotlin (JVM)", "c--kotlin-jvm"),
+        ("École é ²Ⅳ‿", "école-é-ⅳ‿"),
+    )
+    uri = "[원문](https://example.com/doc#A%20B)\n[참조][source]\n\n[source]: https://example.com/#C_D"
+    body = "\n".join(
+        f"[[Wiki/target#{heading}|절 {index}]]" for index, (heading, _) in enumerate(headings)
+    )
+    body += "\n[[Wiki/target|전체]]\n" + uri
+    source_ids = ["source://public/example"]
+    pages = [
+        _hidden_wiki_hub(),
+        _page(
+            page_id="Wiki/home",
+            title="Home",
+            publication_state="publish",
+            access="public",
+            slug="home",
+            parent="[[wiki/Wiki/README|Wiki]]",
+            body=body,
+            source_ids=source_ids,
+        ),
+        _page(
+            page_id="Wiki/target",
+            title="Target",
+            publication_state="publish",
+            access="public",
+            slug="target",
+            parent="[[wiki/Wiki/README|Wiki]]",
+            source_ids=source_ids,
+            body="\n\n".join(f"## {heading}" for heading, _ in headings),
+        ),
+    ]
+    vault, site = _write_fixture(tmp_path, pages)
+    report = prepare_public_projection(vault, site)
+    projected = next(
+        page.content.decode() for page in report.documents if page.page_id == "Wiki/home"
+    )
+    for index, (_heading, fragment) in enumerate(headings):
+        assert f"[절 {index}](/wiki/target/#{fragment})" in projected
+    assert "[전체](/wiki/target/)" in projected
+    assert uri in projected
+    assert body in (vault / "wiki/Wiki/home.md").read_text()
 
 
 def test_public_nav_root_keeps_semantic_parent_check_and_inserts_reader_toc(tmp_path: Path) -> None:
