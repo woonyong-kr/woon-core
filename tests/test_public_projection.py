@@ -173,6 +173,23 @@ def test_redirects_are_separate_deterministic_artifacts_and_replay_safely(tmp_pa
     assert set(json.loads(report.receipt)["redirects"]) == {"old-observability.html"}
 
 
+def test_flat_redirect_prefix_order_stays_stable_when_legacy_paths_are_added(
+    tmp_path: Path,
+) -> None:
+    page = _page(page_id="Wiki/one", title="One", publication_state="publish",
+                 access="public", slug="one")
+    page["frontmatter"]["public_redirect_from"] = ["a-b", "a"]
+    vault, site = _write_fixture(tmp_path / "flat", [page])
+    report = prepare_public_projection(vault, site)
+    assert [item.slug for item in report.redirects] == ["a", "a-b"]
+    page["frontmatter"]["public_redirect_from_paths"] = ["/wiki/algorithm/z/", "/wiki/algorithm/a/"]
+    vault, site = _write_fixture(tmp_path / "paths", [page])
+    report = prepare_public_projection(vault, site)
+    assert [(item.slug, item.public_path) for item in report.redirects] == [
+        ("a", None), ("a-b", None), (None, "/wiki/algorithm/a/"), (None, "/wiki/algorithm/z/")
+    ]
+
+
 def test_legacy_paths_preserve_both_url_forms_and_replay_without_duplicates(tmp_path: Path) -> None:
     page = _page(page_id="Wiki/structures", title="자료구조", publication_state="publish",
                  access="public", slug="data-structures")

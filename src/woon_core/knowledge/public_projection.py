@@ -343,7 +343,9 @@ def _prepare_redirects(
                 slug=None, target_slug=target, relative_path=relative,
                 content=_render_redirect(path, target), public_path=path,
             ))
-    return sorted(redirects, key=lambda item: item.public_path or f"/wiki/{item.slug}/")
+    return sorted(
+        redirects, key=lambda item: (item.slug is None, item.slug or item.public_path or "")
+    )
 
 
 def _safe_legacy_public_path(value: object) -> bool:
