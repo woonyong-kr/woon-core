@@ -1,0 +1,9 @@
+version: 1
+release: 0.7.2
+approved_plugin_versions: [0.7.2, 0.7.3]
+artifact_sha256: fdb5b2aa2247535d13a0fe0919b41fbacab85f46f2505f2a5fda48195e68327c
+host: 127.0.0.1
+port: 17171
+protocol_version: 1
+required_language: kotlin
+required_image: docker.io/gmazzo/kotlin@sha256:5b19a73f0ede1f5b103921c3a48ae3035d3fe7cbcde15c3eee039a9a0a3aacfb
