@@ -69,6 +69,49 @@ def test_keyword_preview_does_not_override_private_provenance(tmp_path: Path) ->
         prepare_public_projection(vault, site)
 
 
+@pytest.mark.parametrize(
+    ("status", "navigation", "has_groups", "expected_toc"),
+    [
+        ("ready", "sidebar-only", True, False),
+        ("overview", "sidebar-only", True, False),
+        ("planned", "sidebar-only", True, True),
+        ("ready", "sidebar-only", False, True),
+        ("ready", "sidebar-only", None, True),
+        ("ready", "inline", True, True),
+        ("ready", None, True, True),
+    ],
+)
+def test_authored_child_guide_avoids_duplicate_list_without_hiding_navigation(
+    tmp_path: Path, status: str, navigation: str | None,
+    has_groups: bool | None, expected_toc: bool,
+) -> None:
+    parent = _page(
+        page_id="Wiki/structures", title="자료구조", publication_state="publish", access="public",
+        slug="structures", body="## 위치로 접근하기\n\n- [[Wiki/array|Array]]",
+    )
+    parent["frontmatter"]["content_status"] = status
+    if navigation is not None:
+        parent["frontmatter"]["reader_navigation"] = navigation
+    parent["frontmatter"]["navigation_groups"] = None if has_groups is None else [
+        {"label": "위치로 접근하기", "children": ["Wiki/array"] if has_groups else []}
+    ]
+    child = _page(
+        page_id="Wiki/array", title="Array", publication_state="publish", access="public",
+        slug="array", parent="[[Wiki/structures|자료구조]]",
+    )
+    vault, site = _write_fixture(tmp_path, [parent, child])
+
+    documents = {
+        doc.page_id: doc.content.decode()
+        for doc in prepare_public_projection(vault, site).documents
+    }
+    metadata = yaml.safe_load(documents["Wiki/structures"].split("---", 2)[1])
+    assert metadata["has_toc"] is expected_toc
+    assert "## 위치로 접근하기\n\n- [Array](/wiki/array/)" in documents["Wiki/structures"]
+    child_metadata = yaml.safe_load(documents["Wiki/array"].split("---", 2)[1])
+    assert child_metadata["parent"] == "자료구조"
+
+
 def test_keyword_parent_identity_cannot_disagree_with_navigation(tmp_path: Path) -> None:
     page = _page(
         page_id="Wiki/kotlin",

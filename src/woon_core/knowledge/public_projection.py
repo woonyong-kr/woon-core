@@ -800,7 +800,14 @@ def _render_projected_markdown(
         if content_status not in {"planned", "overview", "ready"}:
             raise WoonError(f"public projection content_status is invalid: {page_id}")
         output["content_status"] = content_status
-        output["has_toc"] = True
+        # Authored maps already guide readers through their grouped children.
+        # Keep the fallback list for planned pages and ungrouped hubs.
+        authored_child_guide = (
+            content_status in {"overview", "ready"}
+            and frontmatter.get("reader_navigation") == "sidebar-only"
+            and any(group["children"] for group in (frontmatter.get("navigation_groups") or []))
+        )
+        output["has_toc"] = not authored_child_guide
     if frontmatter.get("public_parent_id"):
         output["public_parent_id"] = frontmatter["public_parent_id"]
     search_terms = frontmatter.get("public_search_terms")
