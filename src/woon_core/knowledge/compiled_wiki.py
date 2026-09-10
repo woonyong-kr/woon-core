@@ -15,11 +15,14 @@ import shutil
 import subprocess
 import tempfile
 from collections import Counter
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import yaml
 from PIL import Image
@@ -52,14 +55,19 @@ from woon_core.knowledge.source_boundary import (
     source_storage_layout,
 )
 from woon_core.knowledge.wiki_tree import (
+    WikiTreeReport,
     apply_wiki_tree_refresh,
+    iter_wiki_pages,
     load_wiki_tree,
     prepare_wiki_tree_refresh,
+    split_markdown,
     strip_generated_wiki_views,
+    validate_wiki_tree_inputs,
 )
 from woon_core.knowledge.wiki_tree_migration import rewrite_retired_map_links
 from woon_core.knowledge.woon_wiki import (
     compiled_wiki_contract,
+    is_retired_wiki_record,
     preserve_managed_context,
 )
 from woon_core.knowledge.yaml_cache import load_yaml_file, load_yaml_text
@@ -68,6 +76,26 @@ FRONTMATTER = re.compile(r"\A---\n(?P<yaml>[\s\S]*?)\n---\n?(?P<body>[\s\S]*)\Z"
 H1 = re.compile(r"\A(?:\n)*#\s+(?P<title>.+?)\s*\n(?:\n)?")
 COMPILED_KEY = "llm_wiki"
 SCHEMA_VERSION = 1
+_RETIREMENT_RECEIPT_FIELDS = frozenset(
+    {
+        "predecessor_page_id",
+        "successor_page_id",
+        "predecessor_output_sha256",
+        "predecessor_page_spec_sha256",
+        "predecessor_receipt_sha256",
+        "transaction_sha256",
+        "retired_at",
+        "record_sha256",
+    }
+)
+
+WIKILINK_RE = re.compile(
+    r"(?P<embed>!?)\[\[(?P<target>[^\]|#]+)(?P<fragment>#[^\]|]+)?(?P<label>\|[^\]]+)?\]\]"
+)
+
+RETIREMENT_RECEIPTS_ANCHOR_KEY = "retirement_receipts_sha256"
+RETIREMENT_RECEIPTS_KEY = "retirements"
+RETIREMENT_RECEIPTS_FILENAME = "retirement-receipts.yaml"
 MAX_COMPOSED_CLAIM_MARKDOWN_CHARS = 1_800
 MANUAL_ARCHIVE_ORIGINS = {"manual-reviewed", "verified-source"}
 GIT_RESTORE_ARCHIVE_ORIGIN = "git-restore"
@@ -283,11 +311,39 @@ class CompiledWikiTransaction:
     claims_upsert: tuple[dict[str, Any], ...]
     pages_upsert: tuple[dict[str, Any], ...]
     curations_upsert: tuple[dict[str, Any], ...]
+    # Optional stronger concurrency pins for writers that alter existing page
+    # specifications.  Output revisions alone cannot prove an unchanged page
+    # catalog when two structurally different specs happen to render the same
+    # Markdown bytes.
+    expected_page_spec_sha256: dict[str, str | None] = dataclass_field(default_factory=dict)
+    # Generated files that belonged to an upserted page before its output_path
+    # changed.  The compiler validates this boundary and removes them only
+    # after the replacement output, relations, and receipts have compiled.
+    retired_output_paths: tuple[str, ...] = ()
+    # Structural relocation must rebuild every affected parent map.  Ordinary
+    # catalog transactions retain their narrow, existing refresh scope.
+    refresh_wiki_tree: bool = False
+    # A path relocation may change rendered source bodies or composed claims.
+    # Existing source/claim records are immutable, so this creates hash-pinned
+    # successor records and marks exact predecessors inactive. Every page that
+    # references a successor remains an explicit page upsert.
+    wikilink_rewrites: tuple[CompiledWikiWikilinkRewrite, ...] = ()
+    expected_source_record_sha256: dict[str, str] = dataclass_field(default_factory=dict)
+    expected_claim_record_sha256: dict[str, str] = dataclass_field(default_factory=dict)
+    # Catalog retirement is separate from an output-path migration: the page
+    # identity, curation, generated Markdown, and receipt all leave the live
+    # compiler set after a survivor upsert has compiled successfully.
+    page_retirements: tuple[CompiledWikiPageRetirement, ...] = ()
     # Existing compiler audit failures normally make every transaction fail
     # closed. A reviewed recovery may explicitly permit only the exact errors
     # present before this transaction; any additional or changed error still
     # rolls the entire transaction back.
     allow_preexisting_audit_errors: bool = False
+    expected_catalog_revision: str | None = None
+    # Explicit single-owner curated body successors in a mixed resource rename.
+    # Prior source/claim bytes remain historical; only lifecycle and successor
+    # pointers change through the same helpers used by curate_revisions.
+    curated_successor_page_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +367,70 @@ class CompiledWikiTransactionReport:
     compiled: int
     unchanged: int
     page_ids: tuple[str, ...]
+    source_revisions: int = 0
+    claim_revisions: int = 0
+    pages_retired: int = 0
+    retirement_receipts_archived: int = 0
     remaining_preexisting_audit_errors: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledWikiWikilinkRewrite:
+    """One exact compiler-input wikilink relocation.
+
+    The occurrence counts pin the reviewed input surface. They cover active
+    compiler sources and accepted claims separately; inactive provenance stays
+    byte-for-byte historical evidence and is never rewritten.
+    Unlabelled ordinary links retain the old basename and fragment as display
+    text. Explicit labels and embeds are preserved without inferring a title.
+    """
+
+    current_target: str
+    replacement_target: str
+    expected_source_occurrences: int
+    expected_claim_occurrences: int
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledWikiPageRetirement:
+    """One hash-pinned compiled page identity that a survivor replaces.
+
+    Retirement intentionally carries no title, sequence, or body policy.  A
+    reviewed survivor page is supplied independently as an ordinary exact
+    upsert, so a future learning graph may merge, split, or rearrange document
+    boundaries without the compiler inventing semantic prose.  The old output,
+    page spec, and receipt hashes instead make the destructive half of the
+    operation optimistic and reversible.
+    """
+
+    page_id: str
+    successor_page_id: str
+    current_wikilink_target: str
+    expected_output_sha256: str
+    expected_page_spec_sha256: str
+    expected_receipt_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedWikilinkRevisions:
+    """Validated compiler-input successor records for one transaction."""
+
+    source_successors: dict[str, dict[str, Any]]
+    claim_successors: dict[str, dict[str, Any]]
+    affected_page_ids: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedPageRetirements:
+    """Validated compiler-owned identities removed after survivor compilation."""
+
+    by_page_id: dict[str, CompiledWikiPageRetirement]
+    retired_output_paths: frozenset[str]
+    native_survivors: dict[str, dict[str, Any]] = dataclass_field(default_factory=dict)
+
+    @property
+    def page_ids(self) -> frozenset[str]:
+        return frozenset(self.by_page_id)
 
 
 class CompiledWiki:
@@ -425,6 +544,12 @@ class CompiledWiki:
         """Compile stale or requested pages only after validating every input relation."""
 
         sources, claims, pages, curations, receipts = self._load_inputs()
+        retirement_receipts = self._load_retirement_receipts()
+        retirement_receipts_anchor = self._load_retirement_receipts_anchor()
+        _validate_retirement_receipt_archive_anchor(
+            retirement_receipts,
+            retirement_receipts_anchor,
+        )
         review_items = _load_yaml_list(self._settings.review_queue_path, "items")
         for source in sources.values():
             _validate_archive_review_binding(source, review_items)
@@ -447,10 +572,13 @@ class CompiledWiki:
             if selected and page_id not in selected:
                 continue
             page = pages[page_id]
-            curation = self._page_curation(page, curations)
-            source_records = self._page_sources(page, sources)
-            claim_records = self._page_claims(page, claims)
-            _validate_page(page, source_records, claim_records, curation)
+            try:
+                curation = self._page_curation(page, curations)
+                source_records = self._page_sources(page, sources)
+                claim_records = self._page_claims(page, claims)
+                _validate_page(page, source_records, claim_records, curation)
+            except WoonError as error:
+                raise WoonError(f"compiled page {page_id}: {error}") from error
             input_sha256 = _input_hash(page, source_records, claim_records, curation)
             output_path = _inside(
                 self._settings.output_root, page["output_path"], "page output_path"
@@ -523,10 +651,7 @@ class CompiledWiki:
             if writes or receipt_changed:
                 _write_yaml(
                     self._settings.receipts_path,
-                    {
-                        "version": SCHEMA_VERSION,
-                        "receipts": [updated_receipts[key] for key in sorted(updated_receipts)],
-                    },
+                    _active_receipts_payload(updated_receipts, retirement_receipts_anchor),
                 )
         except Exception:
             for path, snapshot in snapshots:
@@ -546,11 +671,14 @@ class CompiledWiki:
         self._last_input_state = None
         return CompileReport(compiled, unchanged, tuple(changed_ids))
 
-    def owns_page(self, page_id: str) -> bool:
-        """Return whether this compiler owns the reader-facing page identity."""
+    def owns_page(self, page_id: str, *, output_path: str | None = None) -> bool:
+        """Check declared identity/output ownership without loading unrelated source prose."""
 
-        _, _, pages, _, _ = self._load_inputs()
-        return page_id in pages
+        pages = _indexed(_load_yaml_list(self._settings.pages_path, "pages"), "page_id", "page")
+        return page_id in pages or (
+            output_path is not None
+            and any(page.get("output_path") == output_path for page in pages.values())
+        )
 
     def archive(
         self,
@@ -4089,7 +4217,13 @@ class CompiledWiki:
         return refreshed
 
     def apply_compiled_wiki_transaction(
-        self, transaction: CompiledWikiTransaction
+        self,
+        transaction: CompiledWikiTransaction,
+        *,
+        _page_overrides: Mapping[Path, bytes | None] | None = None,
+        _before_write: Callable[[], None] | None = None,
+        _native_writes: dict[Path, bytes | None] | None = None,
+        _native_survivors: dict[str, dict[str, Any]] | None = None,
     ) -> CompiledWikiTransactionReport:
         """Apply exact catalog upserts, compile affected pages, and audit the result.
 
@@ -4097,8 +4231,17 @@ class CompiledWiki:
         be repeated only with byte-for-byte equivalent structured content.
         Pages and curations are optimistic upserts whose revisions are checked
         by :class:`KnowledgeService` while it holds the repository lock.
+        Its mixed writer supplies exact manual overrides and defers their writes
+        until the same proposed output tree has passed validation.
+        Confirmed native writes are shared with that writer so both recovery
+        layers preserve untouched paths and bytes subsequently edited by users.
         """
 
+        if (
+            transaction.expected_catalog_revision is not None
+            and transaction.expected_catalog_revision != self.catalog_revision()
+        ):
+            raise WoonError("compiled catalog changed; refresh the transaction before applying")
         if not isinstance(transaction.allow_preexisting_audit_errors, bool):
             raise WoonError(
                 "compiled Wiki transaction allow_preexisting_audit_errors must be boolean"
@@ -4119,15 +4262,114 @@ class CompiledWiki:
             raise WoonError("compiled Wiki transaction curation page_ids must match page upserts")
         if set(page_ids) != set(transaction.expected_revisions):
             raise WoonError("compiled Wiki transaction expected_revisions must match page upserts")
+        if transaction.expected_page_spec_sha256 and set(page_ids) != set(
+            transaction.expected_page_spec_sha256
+        ):
+            raise WoonError(
+                "compiled Wiki transaction expected_page_spec_sha256 must match page upserts"
+            )
+        if transaction.wikilink_rewrites and set(page_ids) != set(
+            transaction.expected_page_spec_sha256
+        ):
+            raise WoonError(
+                "wikilink successor revisions require page spec hashes for every page upsert"
+            )
+        if transaction.page_retirements and set(page_ids) != set(
+            transaction.expected_page_spec_sha256
+        ):
+            raise WoonError(
+                "compiled page retirements require page spec hashes for every survivor upsert"
+            )
         for page_id, revision in transaction.expected_revisions.items():
             _required_string({"page_id": page_id}, "page_id")
             if revision is not None and re.fullmatch(r"[0-9a-f]{64}", revision) is None:
                 raise WoonError(
                     "compiled Wiki transaction expected revision must be lowercase SHA-256 or null"
                 )
+        for page_id, digest in transaction.expected_page_spec_sha256.items():
+            _required_string({"page_id": page_id}, "page_id")
+            if digest is not None and re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise WoonError(
+                    "compiled Wiki transaction expected page spec hash must be lowercase SHA-256 "
+                    "or null"
+                )
 
-        sources, claims, pages, curations, _ = self._load_inputs()
+        sources, claims, pages, curations, receipts = self._load_inputs()
         page_upserts = {str(record["page_id"]): record for record in transaction.pages_upsert}
+        native_survivors = _native_survivors or {}
+        for canonical_id, proof in native_survivors.items():
+            current = _inside(self.output_root, proof["current_path"], "native current_path")
+            target = _inside(self.output_root, proof["output_path"], "native output_path")
+            after = (_page_overrides or {}).get(target)
+            before = current.read_bytes() if current.is_file() else b""
+            before_metadata = split_markdown(before.decode("utf-8"))[0]
+            after_metadata = split_markdown(after.decode("utf-8"))[0] if after else {}
+            if (
+                _before_write is None
+                or canonical_id in pages
+                or canonical_id in page_upserts
+                or after is None
+                or _sha256_bytes(after) != proof["after_sha256"]
+                or _sha256_bytes(before) != proof["before_sha256"]
+                or before_metadata.get("canonical_id") != canonical_id
+                or after_metadata.get("canonical_id") != canonical_id
+                or COMPILED_KEY in before_metadata
+                or COMPILED_KEY in after_metadata
+                or is_retired_wiki_record(before_metadata)
+                or is_retired_wiki_record(after_metadata)
+                or after_metadata.get("publish") is not False
+                or after_metadata.get("access") != "local-only"
+            ):
+                raise WoonError("native retirement survivor requires an exact mixed manual write")
+        page_retirements = _prepare_compiled_page_retirements(
+            transaction,
+            pages,
+            receipts,
+            page_upserts,
+            page_ids,
+            self._settings.output_root,
+            native_survivors,
+        )
+        existing_retirement_receipts = self._load_retirement_receipts()
+        existing_retirement_receipts_anchor = self._load_retirement_receipts_anchor()
+        _validate_retirement_receipt_archive_anchor(
+            existing_retirement_receipts,
+            existing_retirement_receipts_anchor,
+        )
+        _validate_retirement_receipt_archive(
+            existing_retirement_receipts,
+            pages,
+            receipts,
+            self.output_root,
+            sources,
+            claims,
+        )
+        updated_retirement_receipts = _append_retirement_receipts(
+            existing_retirement_receipts,
+            transaction,
+            page_retirements,
+            pages,
+            page_upserts,
+            sources,
+            claims,
+        )
+        _validate_retirement_wikilink_rewrites(
+            transaction,
+            page_retirements,
+            sources,
+            claims,
+            pages,
+            {**page_upserts, **native_survivors},
+        )
+        wikilink_revisions = _prepare_wikilink_successor_revisions(
+            transaction,
+            sources,
+            claims,
+            pages,
+            page_ids,
+            retiring_page_ids=page_retirements.page_ids,
+        )
+        migrated_output_paths: set[str] = set()
         for page_id in page_ids:
             expected_revision = transaction.expected_revisions[page_id]
             current_page = pages.get(page_id)
@@ -4147,6 +4389,44 @@ class CompiledWiki:
                     "compiled Wiki transaction expected an existing page spec but it is missing: "
                     f"{page_id}"
                 )
+            expected_page_spec = transaction.expected_page_spec_sha256.get(page_id)
+            if expected_page_spec is None:
+                if transaction.expected_page_spec_sha256 and current_page is not None:
+                    raise WoonError(
+                        "compiled Wiki transaction expected a new page spec but it already exists: "
+                        f"{page_id}"
+                    )
+            elif current_page is None or _sha256_canonical_json(current_page) != expected_page_spec:
+                raise WoonError(
+                    "compiled Wiki transaction page spec changed after it was read; "
+                    f"reload and merge before writing: {page_id}"
+                )
+            if current_page is not None:
+                current_output_path = _required_string(current_page, "output_path")
+                replacement_output_path = _required_string(page_upserts[page_id], "output_path")
+                if current_output_path != replacement_output_path:
+                    migrated_output_paths.add(current_output_path)
+
+        declared_retired_paths = tuple(sorted(set(transaction.retired_output_paths)))
+        if len(declared_retired_paths) != len(transaction.retired_output_paths):
+            raise WoonError("compiled Wiki transaction retired output paths must be unique")
+        for relative in declared_retired_paths:
+            _inside(self._settings.output_root, relative, "retired page output_path")
+        if declared_retired_paths and set(declared_retired_paths) != migrated_output_paths:
+            raise WoonError(
+                "compiled Wiki transaction retired outputs must exactly match migrated page outputs"
+            )
+        retired_output_paths = migrated_output_paths | set(page_retirements.retired_output_paths)
+        successor_source_ids = {
+            record["source_id"] for record in wikilink_revisions.source_successors.values()
+        }
+        successor_claim_ids = {
+            record["claim_id"] for record in wikilink_revisions.claim_successors.values()
+        }
+        if set(source_ids).intersection(successor_source_ids):
+            raise WoonError("compiled Wiki source upserts must not repeat wikilink successors")
+        if set(claim_ids).intersection(successor_claim_ids):
+            raise WoonError("compiled Wiki claim upserts must not repeat wikilink successors")
         for record in transaction.sources_upsert:
             _validate_source(record)
             source_id = str(record["source_id"])
@@ -4165,10 +4445,33 @@ class CompiledWiki:
                     f"{claim_id}"
                 )
             claims[claim_id] = copy.deepcopy(record)
+        for predecessor_id, successor in wikilink_revisions.source_successors.items():
+            successor_id = str(successor["source_id"])
+            sources[predecessor_id].update({"lifecycle": "archived", "superseded_by": successor_id})
+            sources[successor_id] = successor
+        for predecessor_id, successor in wikilink_revisions.claim_successors.items():
+            successor_id = str(successor["claim_id"])
+            claims[predecessor_id].update({"status": "superseded", "superseded_by": successor_id})
+            claims[successor_id] = successor
+        curated_successions = self._supersede_transaction_curated_pages(
+            transaction, sources, claims, pages
+        )
         for record in transaction.pages_upsert:
             pages[str(record["page_id"])] = copy.deepcopy(record)
         for record in transaction.curations_upsert:
             curations[str(record["page_id"])] = copy.deepcopy(record)
+        _apply_wikilink_successor_page_references(
+            pages, wikilink_revisions, explicit_page_ids=frozenset(page_ids)
+        )
+        _validate_retirement_page_boundaries(page_retirements, pages, page_ids)
+        _retire_compiled_page_provenance(
+            page_retirements,
+            pages,
+            curations,
+            sources,
+            claims,
+            self,
+        )
 
         for page_id in page_ids:
             page = pages[page_id]
@@ -4179,38 +4482,125 @@ class CompiledWiki:
                 self._page_curation(page, curations),
             )
 
-        input_snapshot = self.snapshot_inputs()
-        output_snapshot = self.snapshot_outputs(
-            extra_relative_paths=tuple(str(pages[page_id]["output_path"]) for page_id in page_ids)
-        )
-        try:
-            self._write_inputs(sources, claims, pages, curations)
-            compile_report = self.compile(page_ids=page_ids)
-            tree_changed_paths: set[Path] = set()
-            tree_page_ids = tuple(
+        tree_scopes: tuple[str | None, ...] = (
+            (None,)
+            if transaction.refresh_wiki_tree
+            else tuple(
                 page_id
                 for page_id in page_ids
-                if page_id in pages
-                and isinstance(pages[page_id].get("frontmatter"), dict)
+                if isinstance(pages[page_id].get("frontmatter"), dict)
                 and pages[page_id]["frontmatter"].get("navigation_groups")
             )
-            for page_id in tree_page_ids:
-                tree_report = prepare_wiki_tree_refresh(
+        )
+        tree_plan: WikiTreeReport | None = None
+        if tree_scopes:
+            proposed = dict(_page_overrides or {})
+            for relative in retired_output_paths:
+                proposed[
+                    _inside(self._settings.output_root, relative, "retired page output_path")
+                ] = None
+            for page_id in page_ids:
+                page = pages[page_id]
+                page_sources = self._page_sources(page, sources)
+                page_claims = self._page_claims(page, claims)
+                curation = self._page_curation(page, curations)
+                rendered = _render_page(
+                    page,
+                    page_sources,
+                    page_claims,
+                    curation,
+                    _input_hash(page, page_sources, page_claims, curation),
+                )
+                path = _inside(self._settings.output_root, page["output_path"], "page output_path")
+                existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+                proposed[path] = preserve_managed_context(existing, rendered).encode("utf-8")
+            for scope in tree_scopes:
+                report = prepare_wiki_tree_refresh(
                     self._settings.vault,
-                    canonical_prefix=page_id,
+                    canonical_prefix=scope,
+                    page_overrides=proposed,
                 )
-                if tree_report.issues:
+                if report.issues:
                     raise WoonError(
-                        "compiled Wiki transaction could not refresh its Wiki tree: "
-                        + tree_report.issues[0]
+                        "compiled Wiki transaction could not refresh its Wiki tree before write: "
+                        + report.issues[0]
                     )
-                tree_changed_paths.update(
-                    path
-                    for path, content in tree_report.pages.items()
-                    if not path.is_file() or path.read_bytes() != content
+                if tree_plan is None:
+                    tree_plan = report
+                else:
+                    combined = {**tree_plan.pages, **report.pages}
+                    tree_plan = WikiTreeReport(
+                        tree_plan.document_count,
+                        sum(
+                            value != tree_plan.expected_inputs[path]
+                            for path, value in combined.items()
+                        ),
+                        combined,
+                        (),
+                        tree_plan.expected_inputs,
+                        tree_plan.previous_inputs,
+                    )
+        input_snapshot = self.snapshot_inputs()
+        output_snapshot = self.snapshot_outputs(
+            extra_relative_paths=tuple(
+                sorted(
+                    {
+                        *(str(pages[page_id]["output_path"]) for page_id in page_ids),
+                        *retired_output_paths,
+                    }
                 )
-                apply_wiki_tree_refresh(self._settings.vault, tree_report)
-            self._refresh_generated_view_receipts(tuple(sorted(tree_changed_paths)))
+            )
+        )
+        compiler_paths = {
+            _inside(self._settings.output_root, page["output_path"], "page output_path")
+            for page in pages.values()
+        }
+        native_view_snapshot = {
+            path: (path.read_bytes(), path.stat().st_mode & 0o777)
+            if path.is_file()
+            else (None, None)
+            for path in (tree_plan.pages if tree_plan is not None else {})
+            if path not in compiler_paths
+        }
+        native_writes = _native_writes if _native_writes is not None else {}
+        if tree_plan is not None:
+            validate_wiki_tree_inputs(self._settings.vault, tree_plan.previous_inputs)
+        if _before_write is not None:
+            _before_write()
+        try:
+            for proof in native_survivors.values():
+                target = _inside(self.output_root, proof["output_path"], "native output_path")
+                if (
+                    not target.is_file()
+                    or _sha256_bytes(target.read_bytes()) != proof["after_sha256"]
+                ):
+                    raise WoonError("native retirement survivor after hash was not written")
+            self._write_inputs(sources, claims, pages, curations)
+            if updated_retirement_receipts != existing_retirement_receipts:
+                self._write_retirement_receipts(updated_retirement_receipts)
+                self._write_retirement_receipts_anchor(
+                    receipts,
+                    _retirement_receipts_sha256(updated_retirement_receipts),
+                )
+            compile_report = self.compile(page_ids=page_ids)
+            tree_changed_paths: set[Path] = set()
+            for relative in sorted(retired_output_paths):
+                _inside(self._settings.output_root, relative, "retired page output_path").unlink(
+                    missing_ok=True
+                )
+            if tree_plan is not None:
+                tree_changed_paths = {
+                    path
+                    for path, content in tree_plan.pages.items()
+                    if not path.is_file() or path.read_bytes() != content
+                }
+                apply_wiki_tree_refresh(self._settings.vault, tree_plan)
+                native_writes.update(
+                    {path: tree_plan.pages[path] for path in tree_changed_paths - compiler_paths}
+                )
+            self._refresh_generated_view_receipts(
+                tuple(sorted(tree_changed_paths & compiler_paths))
+            )
             audit = self.audit()
             unexpected_audit_errors = Counter(audit.errors) - preexisting_audit_errors
             if unexpected_audit_errors:
@@ -4225,6 +4615,16 @@ class CompiledWiki:
         except Exception:
             self.restore_inputs(input_snapshot)
             self.restore_outputs(output_snapshot)
+            for path, (content, mode) in native_view_snapshot.items():
+                if path not in native_writes or path.is_symlink():
+                    continue
+                actual = path.read_bytes() if path.is_file() else None
+                if actual != native_writes[path]:
+                    continue  # An external edit is not owned by this rollback.
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_write(path, content, mode=mode if mode is not None else 0o644)
             raise
         return CompiledWikiTransactionReport(
             sources_upserted=len(source_ids),
@@ -4234,6 +4634,12 @@ class CompiledWiki:
             compiled=compile_report.compiled,
             unchanged=compile_report.unchanged,
             page_ids=page_ids,
+            source_revisions=len(wikilink_revisions.source_successors) + curated_successions,
+            claim_revisions=len(wikilink_revisions.claim_successors) + curated_successions,
+            pages_retired=len(page_retirements.page_ids),
+            retirement_receipts_archived=(
+                len(updated_retirement_receipts) - len(existing_retirement_receipts)
+            ),
             remaining_preexisting_audit_errors=len(audit.errors),
         )
 
@@ -4347,6 +4753,12 @@ class CompiledWiki:
         """Pin tree-derived output bytes after proving compiler projection stability."""
 
         sources, claims, pages, curations, receipts = self._load_inputs()
+        retirement_receipts = self._load_retirement_receipts()
+        retirement_receipts_anchor = self._load_retirement_receipts_anchor()
+        _validate_retirement_receipt_archive_anchor(
+            retirement_receipts,
+            retirement_receipts_anchor,
+        )
         by_output = {
             _inside(self._settings.output_root, page["output_path"], "page output_path"): (
                 page_id,
@@ -4384,10 +4796,7 @@ class CompiledWiki:
         if changed:
             _write_yaml(
                 self._settings.receipts_path,
-                {
-                    "version": SCHEMA_VERSION,
-                    "receipts": [receipts[key] for key in sorted(receipts)],
-                },
+                _active_receipts_payload(receipts, retirement_receipts_anchor),
             )
 
     def snapshot_outputs(
@@ -4429,6 +4838,8 @@ class CompiledWiki:
         errors: list[str] = []
         try:
             sources, claims, pages, curations, receipts = self._load_inputs()
+            retirement_receipts = self._load_retirement_receipts()
+            retirement_receipts_anchor = self._load_retirement_receipts_anchor()
             review_items = _load_yaml_list(self._settings.review_queue_path, "items")
         except WoonError as error:
             return CompilationAudit(0, 0, (str(error),))
@@ -4482,6 +4893,23 @@ class CompiledWiki:
                 errors.append(f"{page_id}: {error}")
         for page_id in sorted(set(receipts).difference(pages)):
             errors.append(f"{page_id}: receipt has no page spec")
+        try:
+            _validate_retirement_receipt_archive_anchor(
+                retirement_receipts,
+                retirement_receipts_anchor,
+            )
+            retained_sources, retained_claims = _validate_retirement_receipt_archive(
+                retirement_receipts,
+                pages,
+                receipts,
+                self.output_root,
+                sources,
+                claims,
+            )
+            referenced_sources.update(retained_sources)
+            referenced_claims.update(retained_claims)
+        except WoonError as error:
+            errors.append(str(error))
         for source_id in sorted(set(sources).difference(referenced_sources)):
             inactive_error = _inactive_revision_error(
                 source_id,
@@ -4670,6 +5098,7 @@ class CompiledWiki:
             self._settings.curation_path,
             self._settings.relations_path,
             self._settings.receipts_path,
+            self.retirement_receipts_path,
         )
 
     def _input_state(self) -> tuple[tuple[str, int, int], ...]:
@@ -4713,6 +5142,177 @@ class CompiledWiki:
                 targets.add(relative.removeprefix("wiki/"))
             targets.add(path.stem)
         return targets
+
+    def catalog_revision(self) -> str:
+        """Hash shared catalog bytes for an optimistic writer handoff."""
+        digest = hashlib.sha256()
+        for path, content in sorted(self.snapshot_inputs().items()):
+            digest.update(path.relative_to(self._settings.vault).as_posix().encode())
+            digest.update(b"\0")
+            digest.update(b"missing" if content is None else content)
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    @property
+    def retirement_receipts_path(self) -> Path:
+        """Return the append-only archive for completed page retirements.
+
+        It deliberately sits beside the active receipt catalog while remaining
+        outside the active ``receipts.yaml`` schema: retired pages must not be
+        mistaken for live compiler outputs during an ordinary compile or audit.
+        """
+
+        return self._settings.receipts_path.with_name(RETIREMENT_RECEIPTS_FILENAME)
+
+    def _load_retirement_receipts(self) -> list[dict[str, Any]]:
+        """Load the optional append-only retirement receipt archive.
+
+        Older Vaults predate this archive, so a missing file means no completed
+        page-retirement records rather than a stale active compiler catalog.
+        Once it exists, however, its schema is strict and audit-validatable.
+        """
+
+        path = self.retirement_receipts_path
+        if not path.is_file():
+            return []
+        return _load_yaml_list(path, RETIREMENT_RECEIPTS_KEY)
+
+    def _load_retirement_receipts_anchor(self) -> str | None:
+        """Read the active-catalog anchor for the immutable receipt archive."""
+
+        try:
+            payload = load_yaml_file(self._settings.receipts_path) or {}
+        except (OSError, yaml.YAMLError) as error:
+            raise WoonError(f"load compiled Wiki receipts: {error}") from error
+        if not isinstance(payload, dict) or payload.get("version") != SCHEMA_VERSION:
+            raise WoonError("compiled Wiki receipts catalog has unsupported version")
+        anchor = payload.get(RETIREMENT_RECEIPTS_ANCHOR_KEY)
+        if anchor is None:
+            return None
+        if not isinstance(anchor, str) or re.fullmatch(r"[0-9a-f]{64}", anchor) is None:
+            raise WoonError("compiled Wiki retirement receipt archive anchor is invalid")
+        return anchor
+
+    def _write_retirement_receipts(self, receipts: list[dict[str, Any]]) -> None:
+        """Append reviewed retirement receipts without touching active receipts."""
+
+        _write_yaml(
+            self.retirement_receipts_path,
+            {
+                "version": SCHEMA_VERSION,
+                RETIREMENT_RECEIPTS_KEY: receipts,
+            },
+        )
+
+    def _write_retirement_receipts_anchor(
+        self, active_receipts: dict[str, dict[str, Any]], archive_sha256: str
+    ) -> None:
+        """Anchor an appended archive before compilation prunes active receipts."""
+
+        _write_yaml(
+            self._settings.receipts_path,
+            _active_receipts_payload(active_receipts, archive_sha256),
+        )
+
+    def _supersede_transaction_curated_pages(
+        self,
+        transaction: CompiledWikiTransaction,
+        sources: dict[str, dict[str, Any]],
+        claims: dict[str, dict[str, Any]],
+        pages: dict[str, dict[str, Any]],
+    ) -> int:
+        """Reuse curated revision lifecycle handling for explicitly pinned page owners."""
+
+        requested = transaction.curated_successor_page_ids
+        if not requested:
+            return 0
+        if (
+            transaction.expected_catalog_revision is None
+            or len(set(requested)) != len(requested)
+            or transaction.wikilink_rewrites
+            or transaction.page_retirements
+        ):
+            raise WoonError("curated successors require pinned catalog and distinct page owners")
+        replacements = {str(page["page_id"]): page for page in transaction.pages_upsert}
+        new_source_ids = {str(record["source_id"]) for record in transaction.sources_upsert}
+        new_claim_ids = {str(record["claim_id"]) for record in transaction.claims_upsert}
+        for page_id in requested:
+            before, after = pages.get(page_id), replacements.get(page_id)
+            if (
+                before is None
+                or after is None
+                or not transaction.expected_page_spec_sha256.get(page_id)
+            ):
+                raise WoonError("curated successor requires an existing hash-pinned page")
+            old_render, new_render = before.get("render", {}), after.get("render", {})
+            if old_render.get("kind") != "source-body" or new_render.get("kind") != "source-body":
+                raise WoonError("curated successor requires source-body renderers")
+            prior_id, next_id = str(old_render.get("source_id")), str(new_render.get("source_id"))
+            prior, successor = sources.get(prior_id, {}), sources.get(next_id, {})
+            if (
+                prior_id == next_id
+                or next_id not in new_source_ids
+                or any(record.get("kind") != "curated-wiki" for record in (prior, successor))
+                or any(record.get("lifecycle") != "compiled" for record in (prior, successor))
+                or not all(
+                    _owned_curated_revision(value, "source", page_id)
+                    for value in (prior_id, next_id)
+                )
+                or prior.get("privacy") != successor.get("privacy")
+            ):
+                raise WoonError("curated successor must preserve the owned source privacy")
+            old_claims = [
+                identifier
+                for identifier in _book_rights_scan_claim_ids(before)
+                if claims.get(identifier, {}).get("source_ids") == [prior_id]
+            ]
+            next_claims = [
+                identifier
+                for identifier in _book_rights_scan_claim_ids(after)
+                if claims.get(identifier, {}).get("source_ids") == [next_id]
+            ]
+            if len(old_claims) != 1 or len(next_claims) != 1:
+                raise WoonError("curated successor requires one exact prior and successor claim")
+            old_claim, next_claim = old_claims[0], next_claims[0]
+            if (
+                next_claim not in new_claim_ids
+                or any(
+                    claims[value].get("kind") != "curated-document"
+                    or claims[value].get("status") != "accepted"
+                    or not _owned_curated_revision(value, "claim", page_id)
+                    for value in (old_claim, next_claim)
+                )
+                or any(
+                    other_id != page_id
+                    and (
+                        _page_may_reference(other, "source_ids", prior_id)
+                        or _page_may_reference(other, "claim_ids", old_claim)
+                    )
+                    for other_id, other in pages.items()
+                )
+                or any(
+                    identifier != old_claim and _page_may_reference(record, "source_ids", prior_id)
+                    for identifier, record in claims.items()
+                )
+            ):
+                raise WoonError("curated successor predecessor must have one unshared owner")
+            if set(_book_rights_scan_source_ids(after)) != (
+                set(_book_rights_scan_source_ids(before)) - {prior_id}
+            ) | {next_id} or set(_book_rights_scan_claim_ids(after)) != (
+                set(_book_rights_scan_claim_ids(before)) - {old_claim}
+            ) | {next_claim}:
+                raise WoonError("curated successor must preserve all other page dependencies")
+            self._supersede_unshared_curated_source(prior_id, next_id, page_id, pages, sources)
+            self._supersede_unshared_curated_claims(
+                [old_claim], prior_id, next_claim, page_id, pages, claims
+            )
+        return len(requested)
+
+    @property
+    def output_root(self) -> Path:
+        """Return the generated Markdown root owned by this compiler."""
+
+        return self._settings.output_root
 
 
 def _validate_page(
@@ -4768,6 +5368,7 @@ def _validate_page(
         raise WoonError("legacy output adoption must keep one matching legacy canonical source")
     if (
         not legacy_output_adoption
+        and page.get("output_path_migration") is not True
         and not page_id.endswith(output_path.removesuffix(".md"))
         and not page_id.startswith("wiki/")
     ):
@@ -6752,3 +7353,1051 @@ def _source_owner_bindings(manifest: dict[str, Any]) -> tuple[tuple[str, str], .
             if isinstance(item, dict)
         )
     )
+
+
+def _prepare_compiled_page_retirements(
+    transaction: CompiledWikiTransaction,
+    pages: dict[str, dict[str, Any]],
+    receipts: dict[str, dict[str, Any]],
+    page_upserts: dict[str, dict[str, Any]],
+    page_ids: tuple[str, ...],
+    output_root: Path,
+    native_survivors: dict[str, dict[str, Any]],
+) -> _PreparedPageRetirements:
+    """Pin every destructive predecessor before staging a survivor graph.
+
+    Retirements never infer a successor body or a new semantic boundary.  The
+    Successors are exact page upserts or existing native identities pinned by
+    the mixed writer. Native ownership never implies adopting a compiler page.
+    """
+
+    if not transaction.page_retirements:
+        return _PreparedPageRetirements({}, frozenset())
+    prepared: dict[str, CompiledWikiPageRetirement] = {}
+    retired_paths: set[str] = set()
+    for item in transaction.page_retirements:
+        if not isinstance(item, CompiledWikiPageRetirement):
+            raise WoonError("compiled page retirements must use CompiledWikiPageRetirement")
+        page_id = _required_string({"page_id": item.page_id}, "page_id")
+        successor_id = _required_string(
+            {"successor_page_id": item.successor_page_id}, "successor_page_id"
+        )
+        if page_id == successor_id:
+            raise WoonError("compiled page retirement must change page identity")
+        if page_id in prepared:
+            raise WoonError("compiled Wiki transaction contains a duplicate retired page ID")
+        if page_id in page_ids:
+            raise WoonError("compiled page cannot be both upserted and retired")
+        if successor_id not in page_upserts and successor_id not in native_survivors:
+            raise WoonError(
+                "compiled page retirement successor must be an exact page upsert "
+                "or mixed manual write: " + successor_id
+            )
+        page = pages.get(page_id)
+        if page is None:
+            raise WoonError(f"compiled Wiki page spec not found for retirement: {page_id}")
+        for label, value in (
+            ("expected_output_sha256", item.expected_output_sha256),
+            ("expected_page_spec_sha256", item.expected_page_spec_sha256),
+            ("expected_receipt_sha256", item.expected_receipt_sha256),
+        ):
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise WoonError(f"compiled page retirement {label} must be lowercase SHA-256")
+        if _sha256_canonical_json(page) != item.expected_page_spec_sha256:
+            raise WoonError(
+                "compiled page retirement page spec changed after it was read: " + page_id
+            )
+        receipt = receipts.get(page_id)
+        if receipt is None or _sha256_canonical_json(receipt) != item.expected_receipt_sha256:
+            raise WoonError(
+                "compiled page retirement receipt changed after it was read: " + page_id
+            )
+        output_path = _required_string(page, "output_path")
+        output = _inside(output_root, output_path, "page output_path")
+        if (
+            not output.is_file()
+            or _sha256_bytes(output.read_bytes()) != item.expected_output_sha256
+        ):
+            raise WoonError("compiled page retirement output changed after it was read: " + page_id)
+        expected_target = _canonical_wikilink_target(
+            item.current_wikilink_target, "compiled page retirement current_wikilink_target"
+        )
+        actual_target = f"wiki/{output_path.removesuffix('.md')}"
+        if expected_target != actual_target:
+            raise WoonError(
+                "compiled page retirement current_wikilink_target must match page output_path: "
+                + page_id
+            )
+        successor_output = _required_string(
+            page_upserts.get(successor_id, native_survivors.get(successor_id, {})), "output_path"
+        )
+        if successor_output == output_path:
+            raise WoonError(
+                "compiled page retirement survivor may not reuse predecessor output_path"
+            )
+        prepared[page_id] = item
+        retired_paths.add(output_path)
+    survivors = {item.successor_page_id for item in prepared.values()}
+    overlap = set(prepared).intersection(survivors)
+    if overlap:
+        raise WoonError(
+            "compiled page retirement successor must survive this transaction: "
+            + sorted(overlap)[0]
+        )
+    return _PreparedPageRetirements(prepared, frozenset(retired_paths), native_survivors)
+
+
+def _retirement_receipts_sha256(records: list[dict[str, Any]]) -> str:
+    """Digest the ordered append-only archive for its active-catalog anchor."""
+
+    return _sha256_canonical_json(records)
+
+
+def _validate_retirement_receipt_archive_anchor(
+    records: list[dict[str, Any]], anchor: str | None
+) -> None:
+    """Require the active receipt catalog to witness every archived event."""
+
+    if not records:
+        if anchor is not None:
+            raise WoonError("retirement receipt archive anchor exists without archived receipts")
+        return
+    if anchor is None:
+        raise WoonError("retirement receipt archive is missing its active receipt anchor")
+    if anchor != _retirement_receipts_sha256(records):
+        raise WoonError("retirement receipt archive does not match its active receipt anchor")
+
+
+def _append_retirement_receipts(
+    existing: list[dict[str, Any]],
+    transaction: CompiledWikiTransaction,
+    retirements: _PreparedPageRetirements,
+    pages: dict[str, dict[str, Any]],
+    page_upserts: dict[str, dict[str, Any]],
+    sources: dict[str, dict[str, Any]],
+    claims: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Append one immutable, content-free receipt for each completed retirement.
+
+    The archive retains the hashes that proved the predecessor at the moment
+    it left the live catalog.  It deliberately does not copy a rendered page,
+    source, claim, or active receipt payload into a second source of truth.
+    """
+
+    if not retirements.page_ids:
+        return existing
+    known_predecessors = {_required_string(record, "predecessor_page_id") for record in existing}
+    run_at = datetime.now(UTC).isoformat()
+    transaction_sha256 = _retirement_transaction_sha256(transaction)
+    appended = list(existing)
+    for page_id in sorted(retirements.page_ids):
+        if page_id in known_predecessors:
+            raise WoonError(
+                "compiled retirement receipt archive already records predecessor: " + page_id
+            )
+        item = retirements.by_page_id[page_id]
+        record: dict[str, Any] = {
+            "predecessor_page_id": item.page_id,
+            "successor_page_id": item.successor_page_id,
+            "predecessor_output_sha256": item.expected_output_sha256,
+            "predecessor_page_spec_sha256": item.expected_page_spec_sha256,
+            "predecessor_receipt_sha256": item.expected_receipt_sha256,
+            "transaction_sha256": transaction_sha256,
+            "retired_at": run_at,
+        }
+        if item.successor_page_id in retirements.native_survivors:
+            predecessor = pages[page_id]
+            render = predecessor.get("render", {})
+            if render.get("kind") not in {"source-body", "claims"} or set(render) - {
+                "kind",
+                "source_id",
+            }:
+                raise WoonError("native survivor retirement requires plain navigation rendering")
+            body = (
+                str(sources.get(render.get("source_id"), {}).get("body", ""))
+                if render.get("kind") == "source-body"
+                else "\n".join(
+                    str(claims[c].get("markdown", ""))
+                    for c in _book_rights_scan_claim_ids(predecessor)
+                )
+            )
+            if predecessor.get("frontmatter", {}).get(
+                "node_kind"
+            ) != "hub" or not _navigation_only_body(body):
+                raise WoonError("native survivor retirement is limited to navigation-only hubs")
+            remaining = {**pages, **page_upserts}
+            remaining = {k: v for k, v in remaining.items() if k not in retirements.page_ids}
+            source_refs = {s for p in remaining.values() for s in _book_rights_scan_source_ids(p)}
+            claim_refs = {
+                c for p in remaining.values() for c in _transaction_claim_reference_ids(p)
+            }
+            record["native_survivor"] = {
+                **retirements.native_survivors[item.successor_page_id],
+                "preserved_sources": {
+                    s: _sha256_canonical_json(sources[s])
+                    for s in _book_rights_scan_source_ids(predecessor)
+                    if s not in source_refs
+                },
+                "preserved_claims": {
+                    c: _sha256_canonical_json(claims[c])
+                    for c in _book_rights_scan_claim_ids(predecessor)
+                    if c not in claim_refs
+                },
+            }
+            record["transaction_sha256"] = _sha256_canonical_json(
+                {
+                    "compiler_transaction_sha256": transaction_sha256,
+                    "native_survivor": record["native_survivor"],
+                }
+            )
+        record["record_sha256"] = _sha256_canonical_json(record)
+        appended.append(record)
+    return appended
+
+
+def _retirement_transaction_sha256(transaction: CompiledWikiTransaction) -> str:
+    """Return a content-free identifier for a reviewed retirement transaction."""
+
+    return _sha256_canonical_json(
+        {
+            "expected_revisions": dict(sorted(transaction.expected_revisions.items())),
+            "expected_page_spec_sha256": dict(
+                sorted(transaction.expected_page_spec_sha256.items())
+            ),
+            "pages_upsert": [
+                {
+                    "page_id": _required_string(page, "page_id"),
+                    "page_spec_sha256": _sha256_canonical_json(page),
+                }
+                for page in sorted(
+                    transaction.pages_upsert,
+                    key=lambda page: _required_string(page, "page_id"),
+                )
+            ],
+            "curations_upsert": [
+                {
+                    "page_id": _required_string(curation, "page_id"),
+                    "curation_sha256": _sha256_canonical_json(curation),
+                }
+                for curation in sorted(
+                    transaction.curations_upsert,
+                    key=lambda curation: _required_string(curation, "page_id"),
+                )
+            ],
+            "sources_upsert": sorted(
+                _required_string(source, "source_id") for source in transaction.sources_upsert
+            ),
+            "claims_upsert": sorted(
+                _required_string(claim, "claim_id") for claim in transaction.claims_upsert
+            ),
+            "wikilink_rewrites": [
+                {
+                    "current_target": rewrite.current_target,
+                    "replacement_target": rewrite.replacement_target,
+                    "expected_source_occurrences": rewrite.expected_source_occurrences,
+                    "expected_claim_occurrences": rewrite.expected_claim_occurrences,
+                }
+                for rewrite in sorted(
+                    transaction.wikilink_rewrites,
+                    key=lambda rewrite: (rewrite.current_target, rewrite.replacement_target),
+                )
+            ],
+            "expected_source_record_sha256": dict(
+                sorted(transaction.expected_source_record_sha256.items())
+            ),
+            "expected_claim_record_sha256": dict(
+                sorted(transaction.expected_claim_record_sha256.items())
+            ),
+            "page_retirements": [
+                {
+                    "page_id": item.page_id,
+                    "successor_page_id": item.successor_page_id,
+                    "current_wikilink_target": item.current_wikilink_target,
+                    "expected_output_sha256": item.expected_output_sha256,
+                    "expected_page_spec_sha256": item.expected_page_spec_sha256,
+                    "expected_receipt_sha256": item.expected_receipt_sha256,
+                }
+                for item in sorted(
+                    transaction.page_retirements,
+                    key=lambda item: item.page_id,
+                )
+            ],
+            "retired_output_paths": sorted(transaction.retired_output_paths),
+            "refresh_wiki_tree": transaction.refresh_wiki_tree,
+        }
+    )
+
+
+def _validate_retirement_receipt_archive(
+    records: list[dict[str, Any]],
+    pages: dict[str, dict[str, Any]],
+    receipts: dict[str, dict[str, Any]],
+    output_root: Path,
+    sources: dict[str, dict[str, Any]],
+    claims: dict[str, dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    """Validate archive integrity and its successor chain without reviving pages.
+
+    The Core writer only appends to this file.  Each event carries an integrity
+    digest and every chain ends at a compiled receipt or a proven native identity.
+    Native after hashes attest to the original transaction, not all future edits.
+    Historical wrapper inputs remain immutable and do not become orphan errors.
+    """
+
+    by_predecessor: dict[str, dict[str, Any]] = {}
+    retained_sources: set[str] = set()
+    retained_claims: set[str] = set()
+    native_ids = {
+        str(record.get("successor_page_id", ""))
+        for record in records
+        if "native_survivor" in record
+    }
+    native_matches: Counter[str] = Counter()
+    available_native_ids: set[str] = set()
+    if native_ids:
+        compiled_paths = {str(page.get("output_path", "")) for page in pages.values()}
+        for path in iter_wiki_pages(output_root):
+            relative = path.relative_to(output_root)
+            if relative.as_posix() in compiled_paths:
+                continue
+            if any((output_root / parent).is_symlink() for parent in (relative, *relative.parents)):
+                continue
+            try:
+                metadata, _ = split_markdown(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError) as error:
+                raise WoonError(f"cannot verify native retirement identity: {relative}") from error
+            identity = metadata.get("canonical_id")
+            if identity in native_ids:
+                native_matches[identity] += 1
+            if (
+                identity in native_ids
+                and not is_retired_wiki_record(metadata)
+                and metadata.get("type") == "Wiki"
+                and COMPILED_KEY not in metadata
+                and metadata.get("publish") is False
+                and metadata.get("access") == "local-only"
+            ):
+                available_native_ids.add(identity)
+    for position, record in enumerate(records, start=1):
+        label = f"retirement receipt {position}"
+        if set(record) not in (
+            _RETIREMENT_RECEIPT_FIELDS,
+            _RETIREMENT_RECEIPT_FIELDS | {"native_survivor"},
+        ):
+            raise WoonError(f"{label} fields are not the immutable receipt schema")
+        predecessor = _required_string(record, "predecessor_page_id")
+        successor = _required_string(record, "successor_page_id")
+        if predecessor == successor:
+            raise WoonError(f"{label} predecessor and successor must differ")
+        if predecessor in by_predecessor:
+            raise WoonError(f"{label} duplicates retired predecessor: {predecessor}")
+        for key in (
+            "predecessor_output_sha256",
+            "predecessor_page_spec_sha256",
+            "predecessor_receipt_sha256",
+            "transaction_sha256",
+            "record_sha256",
+        ):
+            _required_digest(record, key)
+        retired_at = _required_string(record, "retired_at")
+        try:
+            timestamp = datetime.fromisoformat(retired_at)
+        except ValueError as error:
+            raise WoonError(f"{label} retired_at must be an ISO-8601 timestamp") from error
+        if timestamp.tzinfo is None or timestamp.utcoffset() != UTC.utcoffset(timestamp):
+            raise WoonError(f"{label} retired_at must be a UTC timestamp")
+        expected = {key: value for key, value in record.items() if key != "record_sha256"}
+        if record["record_sha256"] != _sha256_canonical_json(expected):
+            raise WoonError(f"{label} integrity SHA-256 does not match")
+        if "native_survivor" in record:
+            proof = record["native_survivor"]
+            if not isinstance(proof, dict) or set(proof) != {
+                "current_path",
+                "output_path",
+                "before_sha256",
+                "after_sha256",
+                "preserved_sources",
+                "preserved_claims",
+            }:
+                raise WoonError(f"{label} native survivor proof is invalid")
+            for key in ("current_path", "output_path"):
+                path = _inside(output_root, _required_string(proof, key), key)
+                if path.suffix != ".md":
+                    raise WoonError(f"{label} native survivor must be a Wiki page")
+            for key in ("before_sha256", "after_sha256"):
+                _required_digest(proof, key)
+            for key, catalog, retained in (
+                ("preserved_sources", sources, retained_sources),
+                ("preserved_claims", claims, retained_claims),
+            ):
+                pins = proof[key]
+                if not isinstance(pins, dict):
+                    raise WoonError(f"{label} preserved provenance must be hash pins")
+                for record_id, digest in pins.items():
+                    _required_digest(pins, record_id)
+                    if (
+                        record_id not in catalog
+                        or _sha256_canonical_json(catalog[record_id]) != digest
+                    ):
+                        raise WoonError(f"{label} preserved provenance changed: {record_id}")
+                    retained.add(record_id)
+        if predecessor in pages:
+            raise WoonError(f"{label} predecessor is still an active page: {predecessor}")
+        if predecessor in receipts:
+            raise WoonError(f"{label} predecessor is still an active receipt: {predecessor}")
+        by_predecessor[predecessor] = record
+
+    for predecessor, record in by_predecessor.items():
+        seen = {predecessor}
+        terminal_record = record
+        successor = _required_string(record, "successor_page_id")
+        while successor not in pages:
+            if "native_survivor" in terminal_record:
+                if native_matches[successor] != 1 or successor not in available_native_ids:
+                    raise WoonError(
+                        "retirement receipt native successor is missing or ambiguous: " + successor
+                    )
+                break
+            if successor in seen:
+                raise WoonError(
+                    "retirement receipt successor chain contains a cycle: " + predecessor
+                )
+            seen.add(successor)
+            next_record = by_predecessor.get(successor)
+            if next_record is None:
+                raise WoonError(
+                    "retirement receipt successor does not resolve to an active page: "
+                    + predecessor
+                )
+            successor = _required_string(next_record, "successor_page_id")
+            terminal_record = next_record
+        if "native_survivor" in terminal_record and successor in pages:
+            raise WoonError("retirement native successor ownership changed: " + successor)
+        if "native_survivor" not in terminal_record and successor not in receipts:
+            raise WoonError("retirement receipt successor has no active receipt: " + successor)
+    return retained_sources, retained_claims
+
+
+def _transaction_claim_reference_ids(page: dict[str, Any]) -> tuple[str, ...]:
+    """Enumerate existing edges without approving the page's claim contract.
+
+    A source-body page with an empty claim list still fails the normal audit.
+    Reference discovery must nevertheless inspect its sources, so a scoped
+    recovery can preserve an unchanged preexisting error without changing the
+    unrelated page. Missing or malformed lists remain hard errors; the final
+    transaction audit still rejects every new or changed validation error.
+    """
+
+    if page.get("claim_ids") == []:
+        return ()
+    return tuple(_string_list(page.get("claim_ids"), "page claim_ids"))
+
+
+def _validate_retirement_wikilink_rewrites(
+    transaction: CompiledWikiTransaction,
+    retirements: _PreparedPageRetirements,
+    sources: dict[str, dict[str, Any]],
+    claims: dict[str, dict[str, Any]],
+    pages: dict[str, dict[str, Any]],
+    page_upserts: dict[str, dict[str, Any]],
+) -> None:
+    """Require an explicit target rewrite for every live compiler inbound link."""
+
+    if not retirements.page_ids:
+        return
+    rewrites = _normalized_wikilink_replacements(transaction.wikilink_rewrites)
+    live_pages = {
+        page_id: page for page_id, page in pages.items() if page_id not in retirements.page_ids
+    }
+    live_source_ids = {
+        source_id
+        for page in live_pages.values()
+        for source_id in _book_rights_scan_source_ids(page)
+    }
+    live_claim_ids = {
+        claim_id
+        for page in live_pages.values()
+        for claim_id in _transaction_claim_reference_ids(page)
+    }
+    for retirement in retirements.by_page_id.values():
+        current = _canonical_wikilink_target(
+            retirement.current_wikilink_target,
+            "compiled page retirement current_wikilink_target",
+        )
+        replacement = rewrites.get(current)
+        successor = page_upserts[retirement.successor_page_id]
+        successor_output = _required_string(successor, "output_path")
+        expected_replacement = f"wiki/{successor_output.removesuffix('.md')}"
+        if replacement is not None and replacement.replacement_target != expected_replacement:
+            raise WoonError(
+                "compiled page retirement wikilink rewrite must target its declared successor: "
+                + retirement.page_id
+            )
+        source_count = sum(
+            _count_exact_wikilinks(str(sources[source_id].get("body", "")), current)
+            for source_id in live_source_ids
+            if source_id in sources and sources[source_id].get("lifecycle") == "compiled"
+        )
+        claim_count = sum(
+            _count_exact_wikilinks(str(claims[claim_id].get("statement", "")), current)
+            + _count_exact_wikilinks(str(claims[claim_id].get("markdown", "")), current)
+            for claim_id in live_claim_ids
+            if claim_id in claims and claims[claim_id].get("status") == "accepted"
+        )
+        if (source_count or claim_count) and replacement is None:
+            raise WoonError(
+                "compiled page retirement has live source/claim inbound wikilinks without "
+                "an explicit rewrite: " + retirement.page_id
+            )
+
+
+def _validate_retirement_page_boundaries(
+    retirements: _PreparedPageRetirements,
+    pages: dict[str, dict[str, Any]],
+    page_ids: tuple[str, ...],
+) -> None:
+    """Reject undeclared surviving structural references to a retired identity."""
+
+    retiring = retirements.page_ids
+    if not retiring:
+        return
+    upserted = set(page_ids)
+    for page_id, page in pages.items():
+        if page_id in retiring:
+            continue
+        frontmatter = page.get("frontmatter")
+        if not isinstance(frontmatter, dict):
+            raise WoonError("page frontmatter must be a mapping")
+        references = _frontmatter_relation_targets(frontmatter)
+        references.update(_navigation_group_children(frontmatter))
+        referenced_retirements = sorted(references.intersection(retiring))
+        if not referenced_retirements:
+            continue
+        if page_id not in upserted:
+            raise WoonError(
+                "compiled page retirement requires an explicit upsert for inbound structural "
+                "reference: " + page_id
+            )
+        raise WoonError(
+            "compiled page retirement survivor upsert still references predecessor: "
+            + referenced_retirements[0]
+        )
+
+
+def _retire_compiled_page_provenance(
+    retirements: _PreparedPageRetirements,
+    pages: dict[str, dict[str, Any]],
+    curations: dict[str, dict[str, Any]],
+    sources: dict[str, dict[str, Any]],
+    claims: dict[str, dict[str, Any]],
+    compiler: CompiledWiki,
+) -> None:
+    """Archive unshared predecessor provenance, then remove live page records."""
+
+    retiring = retirements.page_ids
+    if not retiring:
+        return
+    remaining_pages = {page_id: page for page_id, page in pages.items() if page_id not in retiring}
+    remaining_source_ids = {
+        source_id
+        for page in remaining_pages.values()
+        for source_id in _book_rights_scan_source_ids(page)
+    }
+    remaining_claim_ids = {
+        claim_id
+        for page in remaining_pages.values()
+        for claim_id in _transaction_claim_reference_ids(page)
+    }
+    source_successors: dict[str, set[str]] = {}
+    claim_successors: dict[str, set[str]] = {}
+
+    for page_id, retirement in retirements.by_page_id.items():
+        predecessor = pages[page_id]
+        if retirement.successor_page_id in retirements.native_survivors:
+            continue  # The immutable retirement receipt retains the original wrapper inputs.
+        successor = pages[retirement.successor_page_id]
+        predecessor_sources = _book_rights_scan_source_ids(predecessor)
+        predecessor_claims = _transaction_claim_reference_ids(predecessor)
+        inactive_sources = [
+            source_id
+            for source_id in predecessor_sources
+            if source_id not in remaining_source_ids
+            and sources.get(source_id, {}).get("lifecycle") == "compiled"
+        ]
+        inactive_claims = [
+            claim_id
+            for claim_id in predecessor_claims
+            if claim_id not in remaining_claim_ids
+            and claims.get(claim_id, {}).get("status") == "accepted"
+        ]
+        if inactive_sources:
+            successor_source_id = _current_source_id(
+                successor, compiler._page_sources(successor, sources)
+            )
+            for source_id in inactive_sources:
+                source_successors.setdefault(source_id, set()).add(successor_source_id)
+        if inactive_claims:
+            successor_claim_id = _current_claim_id(
+                successor, compiler._page_claims(successor, claims)
+            )
+            for claim_id in inactive_claims:
+                claim_successors.setdefault(claim_id, set()).add(successor_claim_id)
+
+    for source_id, successor_ids in source_successors.items():
+        if len(successor_ids) != 1:
+            raise WoonError(
+                "shared retired source provenance requires one explicit surviving successor: "
+                + source_id
+            )
+        successor_id = next(iter(successor_ids))
+        if successor_id == source_id or successor_id not in sources:
+            raise WoonError("compiled page retirement source successor is invalid: " + source_id)
+        sources[source_id].update({"lifecycle": "archived", "superseded_by": successor_id})
+    for claim_id, successor_ids in claim_successors.items():
+        if len(successor_ids) != 1:
+            raise WoonError(
+                "shared retired claim provenance requires one explicit surviving successor: "
+                + claim_id
+            )
+        successor_id = next(iter(successor_ids))
+        if successor_id == claim_id or successor_id not in claims:
+            raise WoonError("compiled page retirement claim successor is invalid: " + claim_id)
+        claims[claim_id].update({"status": "superseded", "superseded_by": successor_id})
+    for page_id in retiring:
+        del pages[page_id]
+        curations.pop(page_id, None)
+
+
+def _prepare_wikilink_successor_revisions(
+    transaction: CompiledWikiTransaction,
+    sources: dict[str, dict[str, Any]],
+    claims: dict[str, dict[str, Any]],
+    pages: dict[str, dict[str, Any]],
+    page_ids: tuple[str, ...],
+    *,
+    retiring_page_ids: frozenset[str] = frozenset(),
+) -> _PreparedWikilinkRevisions:
+    """Plan exact source/claim successors without touching historical records.
+
+    Rewriting a compiler input is not an in-place text edit. The previous
+    source/claim remains traceable through ``superseded_by`` and only the
+    current pages switch to the new record. All affected page specs must be
+    supplied by the caller, so this helper cannot silently change another
+    document during a structure relocation.
+    """
+
+    if not transaction.wikilink_rewrites:
+        if transaction.expected_source_record_sha256 or transaction.expected_claim_record_sha256:
+            raise WoonError("source or claim revision hashes require at least one wikilink rewrite")
+        return _PreparedWikilinkRevisions({}, {}, frozenset())
+
+    replacements = _normalized_wikilink_replacements(transaction.wikilink_rewrites)
+    live_pages = {
+        page_id: page for page_id, page in pages.items() if page_id not in retiring_page_ids
+    }
+    live_source_ids = {
+        source_id
+        for page in live_pages.values()
+        for source_id in _book_rights_scan_source_ids(page)
+    }
+    live_claim_ids = {
+        claim_id
+        for page in live_pages.values()
+        for claim_id in _transaction_claim_reference_ids(page)
+    }
+    source_occurrences = {current: 0 for current in replacements}
+    claim_occurrences = {current: 0 for current in replacements}
+    source_successors: dict[str, dict[str, Any]] = {}
+
+    for source_id in sorted(live_source_ids):
+        source = sources.get(source_id)
+        if source is None:
+            raise WoonError(f"wikilink rewrite source record is missing: {source_id}")
+        if source.get("lifecycle") != "compiled":
+            raise WoonError("wikilink rewrite may only revise compiled source records")
+        body = source.get("body")
+        if not isinstance(body, str):
+            raise WoonError("wikilink rewrite source body must be a string")
+        replacement_body, counts = _rewrite_exact_wikilinks(body, replacements)
+        for current, count in counts.items():
+            source_occurrences[current] += count
+        if replacement_body != body:
+            successor = _wikilink_source_successor(source, replacement_body)
+            successor_id = str(successor["source_id"])
+            if successor_id in sources or any(
+                item.get("source_id") == successor_id for item in source_successors.values()
+            ):
+                raise WoonError("wikilink rewrite successor source already exists")
+            source_successors[source_id] = successor
+
+    source_id_replacements = {
+        predecessor: str(successor["source_id"])
+        for predecessor, successor in source_successors.items()
+    }
+    claim_successors: dict[str, dict[str, Any]] = {}
+    for claim_id in sorted(live_claim_ids):
+        claim = claims.get(claim_id)
+        if claim is None:
+            raise WoonError(f"wikilink rewrite claim record is missing: {claim_id}")
+        if claim.get("status") != "accepted":
+            raise WoonError("wikilink rewrite may only revise accepted claim records")
+        statement = _required_string(claim, "statement")
+        markdown = claim.get("markdown")
+        if not isinstance(markdown, str):
+            raise WoonError("wikilink rewrite claim markdown must be a string")
+        replacement_statement, statement_counts = _rewrite_exact_wikilinks(statement, replacements)
+        replacement_markdown, markdown_counts = _rewrite_exact_wikilinks(markdown, replacements)
+        for current, count in statement_counts.items():
+            claim_occurrences[current] += count
+        for current, count in markdown_counts.items():
+            claim_occurrences[current] += count
+        source_ids = _string_list(claim.get("source_ids"), "claim source_ids")
+        replacement_source_ids = [
+            source_id_replacements.get(source_id, source_id) for source_id in source_ids
+        ]
+        if (
+            replacement_statement != statement
+            or replacement_markdown != markdown
+            or replacement_source_ids != source_ids
+        ):
+            successor = _wikilink_claim_successor(
+                claim,
+                replacement_source_ids,
+                replacement_statement,
+                replacement_markdown,
+            )
+            successor_id = str(successor["claim_id"])
+            if successor_id in claims or any(
+                item.get("claim_id") == successor_id for item in claim_successors.values()
+            ):
+                raise WoonError("wikilink rewrite successor claim already exists")
+            claim_successors[claim_id] = successor
+
+    for current, rewrite in replacements.items():
+        if source_occurrences[current] != rewrite.expected_source_occurrences:
+            raise WoonError(
+                "wikilink rewrite source occurrence count changed for "
+                f"{current}: expected {rewrite.expected_source_occurrences}, "
+                f"found {source_occurrences[current]}"
+            )
+        if claim_occurrences[current] != rewrite.expected_claim_occurrences:
+            raise WoonError(
+                "wikilink rewrite claim occurrence count changed for "
+                f"{current}: expected {rewrite.expected_claim_occurrences}, "
+                f"found {claim_occurrences[current]}"
+            )
+
+    _validate_wikilink_revision_hashes(
+        "source",
+        transaction.expected_source_record_sha256,
+        source_successors,
+        sources,
+    )
+    _validate_wikilink_revision_hashes(
+        "claim",
+        transaction.expected_claim_record_sha256,
+        claim_successors,
+        claims,
+    )
+
+    claim_id_replacements = {
+        predecessor: str(successor["claim_id"])
+        for predecessor, successor in claim_successors.items()
+    }
+    affected_page_ids = frozenset(
+        page_id
+        for page_id, page in live_pages.items()
+        if any(
+            source_id in source_id_replacements for source_id in _book_rights_scan_source_ids(page)
+        )
+        or any(
+            claim_id in claim_id_replacements for claim_id in _transaction_claim_reference_ids(page)
+        )
+    )
+    missing_page_upserts = sorted(affected_page_ids.difference(page_ids))
+    if missing_page_upserts:
+        raise WoonError(
+            "wikilink rewrite requires every affected page as an explicit upsert: "
+            + missing_page_upserts[0]
+        )
+    return _PreparedWikilinkRevisions(
+        source_successors=source_successors,
+        claim_successors=claim_successors,
+        affected_page_ids=affected_page_ids,
+    )
+
+
+def _normalized_wikilink_replacements(
+    rewrites: tuple[CompiledWikiWikilinkRewrite, ...],
+) -> dict[str, CompiledWikiWikilinkRewrite]:
+    """Index retired targets; multiple predecessors may share one successor."""
+
+    normalized: dict[str, CompiledWikiWikilinkRewrite] = {}
+    for rewrite in rewrites:
+        if not isinstance(rewrite, CompiledWikiWikilinkRewrite):
+            raise WoonError("wikilink rewrites must use CompiledWikiWikilinkRewrite records")
+        current = _canonical_wikilink_target(
+            rewrite.current_target, "wikilink rewrite current_target"
+        )
+        replacement = _canonical_wikilink_target(
+            rewrite.replacement_target, "wikilink rewrite replacement_target"
+        )
+        if current == replacement:
+            raise WoonError("wikilink rewrite must change its target")
+        for value, label in (
+            (rewrite.expected_source_occurrences, "source occurrence count"),
+            (rewrite.expected_claim_occurrences, "claim occurrence count"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise WoonError(f"wikilink rewrite {label} must be a non-negative integer")
+        if current in normalized:
+            raise WoonError("wikilink rewrite current_target is duplicated")
+        normalized[current] = CompiledWikiWikilinkRewrite(
+            current_target=current,
+            replacement_target=replacement,
+            expected_source_occurrences=rewrite.expected_source_occurrences,
+            expected_claim_occurrences=rewrite.expected_claim_occurrences,
+        )
+    return normalized
+
+
+def _canonical_wikilink_target(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise WoonError(f"{label} must be a non-empty Wiki path")
+    candidate = Path(value.strip().replace("\\", "/").removesuffix(".md"))
+    if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
+        raise WoonError(f"{label} must be a safe relative Wiki path")
+    normalized = candidate.as_posix()
+    if not normalized.startswith("wiki/"):
+        raise WoonError(f"{label} must start with wiki/")
+    return normalized
+
+
+def _rewrite_exact_wikilinks(
+    text: str, replacements: dict[str, CompiledWikiWikilinkRewrite]
+) -> tuple[str, dict[str, int]]:
+    """Relocate links without exposing a successor path as new prose."""
+
+    counts = {current: 0 for current in replacements}
+
+    def replace(match: re.Match[str]) -> str:
+        raw_target = match.group("target").strip()
+        try:
+            current = _canonical_wikilink_target(raw_target, "wikilink target")
+        except WoonError:
+            return match.group(0)
+        rewrite = replacements.get(current)
+        if rewrite is None:
+            return match.group(0)
+        counts[current] += 1
+        suffix = ".md" if raw_target.endswith(".md") else ""
+        fragment = match.group("fragment") or ""
+        label = match.group("label") or ""
+        if not label and not match.group("embed"):
+            label = f"|{Path(current).name}{fragment}"
+        return f"{match.group('embed')}[[{rewrite.replacement_target}{suffix}{fragment}{label}]]"
+
+    return WIKILINK_RE.sub(replace, text), counts
+
+
+def _count_exact_wikilinks(text: str, target: str) -> int:
+    """Count one normalized Wiki target without treating labels/fragments as identity."""
+
+    count = 0
+    for match in WIKILINK_RE.finditer(text):
+        try:
+            candidate = _canonical_wikilink_target(match.group("target").strip(), "wikilink target")
+        except WoonError:
+            continue
+        if candidate == target:
+            count += 1
+    return count
+
+
+def _wikilink_source_successor(source: dict[str, Any], body: str) -> dict[str, Any]:
+    """Return one current source successor without modifying the predecessor."""
+
+    source_id = _required_string(source, "source_id")
+    normalized_hash = _sha256_text(_normalize(body))
+    subject = quote(source_id.removeprefix("source://"), safe="/._-")
+    successor = copy.deepcopy(source)
+    successor.update(
+        {
+            "source_id": f"source://wiki-restructure-revision/{subject}/{normalized_hash[:24]}",
+            "original_sha256": _sha256_text(body),
+            "normalized_sha256": normalized_hash,
+            "lifecycle": "compiled",
+            "body": body,
+            "revision_of": source_id,
+        }
+    )
+    successor.pop("superseded_by", None)
+    # An archived review is bound to the predecessor's exact body. The
+    # successor is instead authorized by this hash-pinned restructure manifest.
+    successor.pop("archive_origin", None)
+    successor.pop("approved_review_id", None)
+    _validate_source(successor)
+    return successor
+
+
+def _wikilink_claim_successor(
+    claim: dict[str, Any],
+    source_ids: list[str],
+    statement: str,
+    markdown: str,
+) -> dict[str, Any]:
+    """Return one accepted claim successor with current evidence references."""
+
+    claim_id = _required_string(claim, "claim_id")
+    identity = json.dumps(
+        {
+            "predecessor": claim_id,
+            "source_ids": source_ids,
+            "statement": statement,
+            "markdown": markdown,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    subject = quote(claim_id.removeprefix("claim://"), safe="/._-")
+    successor = copy.deepcopy(claim)
+    successor.update(
+        {
+            "claim_id": (
+                f"claim://wiki-restructure-revision/{subject}/{_sha256_text(identity)[:24]}"
+            ),
+            "status": "accepted",
+            "source_ids": source_ids,
+            "statement": statement,
+            "markdown": markdown,
+            "revision_of": claim_id,
+        }
+    )
+    successor.pop("superseded_by", None)
+    _validate_claim_record(successor)
+    return successor
+
+
+def _validate_wikilink_revision_hashes(
+    label: str,
+    expected_hashes: dict[str, str],
+    successors: dict[str, dict[str, Any]],
+    current_records: dict[str, dict[str, Any]],
+) -> None:
+    if set(expected_hashes) != set(successors):
+        raise WoonError(
+            f"wikilink rewrite expected {label} record hashes must match rewritten {label} IDs"
+        )
+    for record_id, expected in expected_hashes.items():
+        if not isinstance(record_id, str) or not record_id:
+            raise WoonError(f"wikilink rewrite {label} record ID must be a non-empty string")
+        if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+            raise WoonError(
+                f"wikilink rewrite expected {label} record hash must be lowercase SHA-256"
+            )
+        current = current_records.get(record_id)
+        if current is None or _sha256_canonical_json(current) != expected:
+            raise WoonError(
+                f"wikilink rewrite {label} record changed after it was read: {record_id}"
+            )
+
+
+def _apply_wikilink_successor_page_references(
+    pages: dict[str, dict[str, Any]],
+    revisions: _PreparedWikilinkRevisions,
+    *,
+    explicit_page_ids: frozenset[str] = frozenset(),
+) -> None:
+    """Switch only preflight-declared pages from retired to successor IDs."""
+
+    source_ids = {
+        predecessor: str(successor["source_id"])
+        for predecessor, successor in revisions.source_successors.items()
+    }
+    claim_ids = {
+        predecessor: str(successor["claim_id"])
+        for predecessor, successor in revisions.claim_successors.items()
+    }
+    for page_id in revisions.affected_page_ids | explicit_page_ids:
+        page = pages[page_id]
+        page["source_ids"] = [
+            source_ids.get(source_id, source_id) for source_id in _book_rights_scan_source_ids(page)
+        ]
+        page["claim_ids"] = [
+            claim_ids.get(claim_id, claim_id) for claim_id in _transaction_claim_reference_ids(page)
+        ]
+        render = page.get("render")
+        if isinstance(render, dict) and render.get("kind") == "source-body":
+            source_id = _required_string(render, "source_id")
+            render["source_id"] = source_ids.get(source_id, source_id)
+
+
+def _owned_curated_revision(identifier: str, namespace: str, page_id: str) -> bool:
+    """Match a complete page identity, never a sibling or arbitrary ID prefix."""
+
+    prefix = f"{namespace}://curated-wiki/"
+    if not identifier.startswith(prefix):
+        return False
+    owner, separator, digest = identifier[len(prefix) :].rpartition("/")
+    return bool(
+        separator
+        and re.search(r"%2f|%5c", owner, flags=re.IGNORECASE) is None
+        and unquote(owner) == page_id
+        and re.fullmatch(r"[0-9a-f]{24}", digest)
+    )
+
+
+def _page_may_reference(page: dict[str, Any], field: str, identifier: str) -> bool:
+    """Conservatively inspect sharing without granting malformed pages audit approval.
+
+    An explicit empty list has no listed dependencies even if its content state is
+    invalid. Unknown/malformed lists can hide a reference, so retain the provenance.
+    Rights audits and selected-page validation keep their stricter schema checks.
+    """
+    raw = page.get(field)
+    if not isinstance(raw, list) or any(
+        not isinstance(item, str) or not item.strip() for item in raw
+    ):
+        return True
+    if identifier in raw:
+        return True
+    render = page.get("render")
+    if field == "source_ids" and isinstance(render, dict) and render.get("kind") == "source-body":
+        source_id = render.get("source_id")
+        return not isinstance(source_id, str) or not source_id.strip() or source_id == identifier
+    return False
+
+
+def _active_receipts_payload(
+    receipts: dict[str, dict[str, Any]], retirement_receipts_anchor: str | None
+) -> dict[str, Any]:
+    """Serialize active receipts while preserving their archive witness.
+
+    The anchor is catalog metadata only; the per-page active receipt schema and
+    its meaning remain unchanged.
+    """
+
+    payload: dict[str, Any] = {
+        "version": SCHEMA_VERSION,
+        "receipts": [receipts[key] for key in sorted(receipts)],
+    }
+    if retirement_receipts_anchor is not None:
+        payload[RETIREMENT_RECEIPTS_ANCHOR_KEY] = retirement_receipts_anchor
+    return payload
+
+
+def _sha256_canonical_json(value: object) -> str:
+    """Hash structured compiler input independently of YAML presentation."""
+
+    try:
+        encoded = json.dumps(
+            value,
+            default=str,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as error:
+        raise WoonError("compiled Wiki page spec is not canonical JSON") from error
+    return _sha256_text(encoded)

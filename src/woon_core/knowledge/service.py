@@ -6,7 +6,8 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import replace
+import uuid
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from woon_core.errors import WoonError
@@ -23,6 +24,7 @@ from woon_core.knowledge.book_rights import (
     BookRightsRestorationReport,
 )
 from woon_core.knowledge.compiled_wiki import (
+    WIKILINK_RE,
     BookCoverageManifestUpdate,
     CompilationAudit,
     CompiledWiki,
@@ -64,9 +66,90 @@ from woon_core.knowledge.ports import (
     KnowledgeSearchIndex,
     ReadOnlyKnowledgeCorpus,
 )
-from woon_core.knowledge.wiki_tree import normalize_identity
+from woon_core.knowledge.wiki_tree import (
+    iter_wiki_pages,
+    load_wiki_tree,
+    normalize_identity,
+    split_markdown,
+)
+from woon_core.people.records import validate_record_collection, validate_record_metadata_update
 
 DIFFICULTIES = {"foundation", "intermediate", "advanced"}
+
+
+@dataclass(frozen=True, slots=True)
+class ManualWikiWrite:
+    """One hash-pinned manual Wiki rewrite, relocation, or retirement.
+
+    A mixed Wiki restructure never asks the service to infer a filename,
+    frontmatter change, or link replacement.  The reviewed planner supplies
+    the complete next bytes, pinned both to the source it read and to the
+    bytes it intends to write.  ``current_path == target_path`` represents a
+    manual metadata/link update without a physical relocation.  A retirement
+    uses ``target_path=target_sha256=content=None``; no empty synthetic page
+    is written in place of the reviewed predecessor.
+    """
+
+    current_path: str
+    current_sha256: str
+    target_path: str | None
+    target_sha256: str | None
+    content: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceFileRename:
+    """A reviewed same-directory private resource filename change; bytes stay intact."""
+
+    current_path: str
+    target_path: str
+    current_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class WikiRestructureTransactionReport:
+    """Observable outcome for one compiler-and-manual Wiki transaction."""
+
+    compiler: CompiledWikiTransactionReport
+    manual_written: int
+    indexed_documents: int
+    resources_renamed: int = 0
+    resource_references_written: int = 0
+
+
+def _manual_wikilink_atom(value: str) -> str:
+    """Normalize the path part of an Obsidian link without accepting traversal."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise WoonError("manual Wiki rewrite target must be a non-empty Wiki path")
+    candidate = Path(value.strip().replace("\\", "/").removesuffix(".md"))
+    if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
+        raise WoonError("manual Wiki rewrite target must be a safe relative Wiki path")
+    normalized = candidate.as_posix()
+    if not normalized.startswith("wiki/"):
+        raise WoonError("manual Wiki rewrite target must start with wiki/")
+    return normalized
+
+
+def _manual_wikilink_count(text: str, target: str) -> int:
+    count = 0
+    for match in WIKILINK_RE.finditer(text):
+        try:
+            candidate = _manual_wikilink_atom(match.group("target").strip())
+        except WoonError:
+            continue
+        if candidate == target:
+            count += 1
+    return count
+
+
+def _transaction_refreshes_tree(transaction: CompiledWikiTransaction) -> bool:
+    """A tree refresh can update Core-owned views on native Markdown pages too."""
+
+    return transaction.refresh_wiki_tree or any(
+        isinstance(page.get("frontmatter"), dict) and page["frontmatter"].get("navigation_groups")
+        for page in transaction.pages_upsert
+    )
 
 
 class KnowledgeService:
@@ -115,6 +198,11 @@ class KnowledgeService:
                 )
             self._ensure_unique_identity(validated)
             snapshot = self._repository.snapshot(validated.canonical_id)
+            if snapshot and "record_kind" in split_markdown(snapshot.decode("utf-8"))[0]:
+                raise WoonError(
+                    "record metadata is owned by its native/source writer; "
+                    "use apply_native_wiki_transaction with resolved frontmatter"
+                )
             compiler_snapshot = (
                 self._compiled_wiki.snapshot_inputs() if self._compiled_wiki is not None else None
             )
@@ -254,6 +342,9 @@ class KnowledgeService:
         self, transaction: CompiledWikiTransaction
     ) -> CompiledWikiTransactionReport:
         """Apply one optimistic compiler catalog transaction and reindex atomically."""
+
+        if _transaction_refreshes_tree(transaction):
+            return self.apply_wiki_restructure_transaction(transaction, ()).compiler
 
         if self._compiled_wiki is None:
             raise WoonError("compiled Wiki is not enabled for this knowledge vault")
@@ -1316,6 +1407,647 @@ class KnowledgeService:
                 "body must not include an H1; the repository renders the canonical title"
             )
         return normalized + "\n"
+
+    def apply_wiki_restructure_transaction(
+        self,
+        compiler_transaction: CompiledWikiTransaction,
+        manual_writes: tuple[ManualWikiWrite, ...],
+        *,
+        resource_renames: tuple[ResourceFileRename, ...] = (),
+        resource_reference_writes: tuple[ManualWikiWrite, ...] = (),
+    ) -> WikiRestructureTransactionReport:
+        """Apply reviewed manual relocations with one compiler transaction.
+
+        Generated Wiki pages continue to be changed only through
+        :class:`CompiledWikiTransaction`.  Manual pages are supplied as exact,
+        hash-pinned bytes and are snapshotted together with every existing
+        manual page because a complete tree refresh can update their generated
+        navigation blocks.  Thus a compiler, audit, tree, or index failure
+        restores both ownership domains before the old index is rebuilt.
+        Optional resource renames preserve bytes, directory, extension and
+        mode. Their existing source catalog files accept only
+        the reviewed locator substitutions; compiler and native references
+        still belong to the two existing transaction inputs.
+        """
+
+        compiler = self._compiled_wiki
+        if compiler is None:
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        if (
+            not manual_writes
+            and not compiler_transaction.page_retirements
+            and not resource_renames
+            and not resource_reference_writes
+            and not _transaction_refreshes_tree(compiler_transaction)
+        ):
+            report = self.apply_compiled_wiki_transaction(compiler_transaction)
+            return WikiRestructureTransactionReport(
+                compiler=report,
+                manual_written=0,
+                indexed_documents=0,
+            )
+        with self._repository.exclusive():
+            self._validate_compiled_wiki_transaction_revisions(compiler_transaction)
+            manual_snapshot, writes = self._prepare_manual_wiki_writes(
+                compiler_transaction, manual_writes
+            )
+            self._validate_manual_wikilink_retirements(compiler_transaction, writes)
+            resource_moves, reference_writes = self._prepare_resource_renames(
+                resource_renames, resource_reference_writes
+            )
+            input_snapshot = compiler.snapshot_inputs()
+            output_snapshot = compiler.snapshot_outputs(
+                extra_relative_paths=tuple(
+                    sorted(
+                        {
+                            str(page.get("output_path", ""))
+                            for page in compiler_transaction.pages_upsert
+                        }
+                        | set(compiler_transaction.retired_output_paths)
+                    )
+                )
+            )
+            moved_resources: list[tuple[Path, Path, bytes, int]] = []
+            written_references: list[tuple[Path, bytes, bytes, int]] = []
+            native_writes: dict[Path, bytes | None] = {}
+            page_overrides: dict[Path, bytes | None] = {
+                source: None for source, _target, _content, _mode in writes
+            }
+            page_overrides.update(
+                {
+                    target: content
+                    for _source, target, content, _mode in writes
+                    if target is not None
+                }
+            )
+            native_survivors = {}
+            successor_ids = {
+                item.successor_page_id for item in compiler_transaction.page_retirements
+            }
+            for source, target, content, _mode in writes:
+                if target is None or content is None:
+                    continue
+                before = split_markdown(source.read_text(encoding="utf-8"))[0]
+                after = split_markdown(content.decode("utf-8"))[0]
+                canonical_id = after.get("canonical_id")
+                if canonical_id not in successor_ids:
+                    continue
+                if before.get("canonical_id") != canonical_id or canonical_id in native_survivors:
+                    raise WoonError(
+                        "native retirement survivor must preserve one existing identity"
+                    )
+                native_survivors[canonical_id] = {
+                    "current_path": source.relative_to(compiler.output_root).as_posix(),
+                    "output_path": target.relative_to(compiler.output_root).as_posix(),
+                    "before_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    "after_sha256": hashlib.sha256(content).hexdigest(),
+                }
+            mutation_started = False
+
+            def before_write() -> None:
+                nonlocal mutation_started
+                self._validate_compiled_wiki_transaction_revisions(compiler_transaction)
+                for source, _target, _content, _mode in writes:
+                    if source.read_bytes() != manual_snapshot[source][0]:
+                        raise WoonError("manual Wiki source changed before write; replan")
+                mutation_started = True
+                for source, target, content, mode in resource_moves:
+                    if source.is_symlink() or source.read_bytes() != content:
+                        raise WoonError(f"resource changed before rename: {source}")
+                    # link/unlink provides no-clobber rename semantics on POSIX.
+                    os.link(source, target, follow_symlinks=False)
+                    moved_resources.append((source, target, content, mode))
+                    source.unlink()
+                for path, before, after, mode in reference_writes:
+                    if path.is_symlink() or path.read_bytes() != before:
+                        raise WoonError(f"resource reference changed before write: {path}")
+                    atomic_write(path, after, mode=mode)
+                    written_references.append((path, before, after, mode))
+                self._apply_manual_wiki_writes(writes, native_writes)
+
+            try:
+                compiler_report = compiler.apply_compiled_wiki_transaction(
+                    compiler_transaction,
+                    _page_overrides=page_overrides,
+                    _before_write=before_write,
+                    _native_writes=native_writes,
+                    _native_survivors=native_survivors,
+                )
+                indexed_documents = self._reindex_unlocked()
+                for source, target, content, mode in moved_resources:
+                    if (
+                        source.exists()
+                        or target.is_symlink()
+                        or target.read_bytes() != content
+                        or target.stat().st_mode & 0o777 != mode
+                    ):
+                        raise WoonError(f"resource rename verification failed: {target}")
+            except BaseException as transaction_error:
+                if not mutation_started:
+                    raise
+                try:
+                    compiler.restore_inputs(input_snapshot)
+                    compiler.restore_outputs(output_snapshot)
+                    self._restore_manual_wiki_snapshot(manual_snapshot, native_writes)
+                    self._restore_resource_renames(moved_resources, written_references)
+                    self._reindex_unlocked()
+                except BaseException as recovery_error:
+                    raise WoonError(
+                        "mixed Wiki restructure failed and recovery was incomplete: "
+                        f"transaction={transaction_error}; recovery={recovery_error}"
+                    ) from recovery_error
+                raise
+            return WikiRestructureTransactionReport(
+                compiler=compiler_report,
+                manual_written=len(writes),
+                indexed_documents=indexed_documents,
+                resources_renamed=len(moved_resources),
+                resource_references_written=len(written_references),
+            )
+
+    def apply_native_wiki_transaction(
+        self, manual_writes: tuple[ManualWikiWrite, ...]
+    ) -> dict[str, object]:
+        """Update existing private native pages without compiling or rewriting the catalog.
+
+        The caller supplies complete, reviewed bytes. Creation, relocation, deletion,
+        identity changes and public promotion are outside this transaction's ownership.
+        """
+
+        if self._compiled_wiki is None:
+            raise WoonError("native Wiki transaction requires a configured Wiki vault")
+        if not manual_writes:
+            raise WoonError("native Wiki transaction requires at least one write")
+        vault = self._compiled_wiki.vault
+        with self._repository.exclusive():
+            writes: dict[Path, tuple[bytes, bytes, int]] = {}
+            for write in manual_writes:
+                if write.current_path != write.target_path or not isinstance(write.content, bytes):
+                    raise WoonError("native Wiki transaction only updates existing paths")
+                path = self._manual_wiki_path(vault, vault / "wiki", write.current_path, "native")
+                lexical = vault / write.current_path
+                if any(part.is_symlink() for part in (lexical, *lexical.parents)):
+                    raise WoonError("native Wiki transaction does not follow symlinks")
+                if path in writes or not path.is_file():
+                    raise WoonError("native Wiki target must be a distinct existing regular page")
+                before = path.read_bytes()
+                if hashlib.sha256(before).hexdigest() != write.current_sha256:
+                    raise WoonError(f"native Wiki source changed; replan: {write.current_path}")
+                if hashlib.sha256(write.content).hexdigest() != write.target_sha256:
+                    raise WoonError(f"native Wiki target hash does not match: {write.target_path}")
+                previous, _ = split_markdown(before.decode("utf-8"))
+                desired, _ = split_markdown(write.content.decode("utf-8"))
+                identity = previous.get("canonical_id")
+                if not isinstance(identity, str) or desired.get("canonical_id") != identity:
+                    raise WoonError("native Wiki transaction must preserve canonical identity")
+                if self._compiled_wiki.owns_page(
+                    identity, output_path=path.relative_to(vault / "wiki").as_posix()
+                ):
+                    raise WoonError("compiler-owned Wiki page requires a compiler transaction")
+                if any(
+                    header.get("access") != "local-only" or header.get("publish") is not False
+                    for header in (previous, desired)
+                ):
+                    raise WoonError("native Wiki transaction must preserve private publication")
+                validate_record_metadata_update(previous, desired)
+                writes[path] = (before, write.content, path.stat().st_mode & 0o777)
+            validate_record_collection(
+                (path.relative_to(vault).as_posix(), split_markdown(after.decode("utf-8"))[0])
+                for path, (_before, after, _mode) in writes.items()
+            )
+            changed = {path: values for path, values in writes.items() if values[0] != values[1]}
+            result: dict[str, object] = {
+                "action": "native-wiki-transaction",
+                "written": len(changed),
+                "compiler_written": 0,
+                "catalog_written": 0,
+                "ui_verified": False,
+            }
+            if not changed:
+                return result
+            _, _, baseline_issues = load_wiki_tree(vault)
+            operation_id = "native-wiki-" + uuid.uuid4().hex
+            local = vault
+            for part in (".local", "woon-knowledge", "native-wiki-transactions", operation_id):
+                local /= part
+                if local.is_symlink() or (local.exists() and not local.is_dir()):
+                    raise WoonError("native Wiki transaction state must use regular directories")
+                local.mkdir(exist_ok=True, mode=0o700)
+            receipt_path = local / "receipt.json"
+            records = []
+            for index, (path, (before, after, _mode)) in enumerate(changed.items()):
+                backup = local / f"before-{index}.md"
+                atomic_write(backup, before, mode=0o600)
+                records.append(
+                    {
+                        "path": path.relative_to(vault).as_posix(),
+                        "before_sha256": hashlib.sha256(before).hexdigest(),
+                        "after_sha256": hashlib.sha256(after).hexdigest(),
+                        "backup": backup.relative_to(vault).as_posix(),
+                    }
+                )
+            owned: dict[Path, bytes] = {}
+            try:
+                for path, (before, after, mode) in changed.items():
+                    if path.read_bytes() != before:
+                        raise WoonError("native Wiki source changed before write; replan")
+                    atomic_write(path, after, mode=mode)
+                    owned[path] = after
+                _, _, issues = load_wiki_tree(vault)
+                targets = tuple(record["path"] + ":" for record in records)
+                blocking = [
+                    issue
+                    for issue in issues
+                    if issue not in baseline_issues or issue.startswith(targets)
+                ]
+                if blocking:
+                    raise WoonError("native Wiki tree validation failed: " + "; ".join(blocking))
+                indexed = self._reindex_unlocked()
+                if any(path.read_bytes() != after for path, after in owned.items()):
+                    raise WoonError(
+                        "native Wiki changed during verification; preserve concurrent edit"
+                    )
+                result.update(
+                    operation_id=operation_id,
+                    indexed_documents=indexed,
+                    changes=records,
+                    verification="target-tree-and-index-reread; UI-not-checked",
+                )
+                content = (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode()
+                atomic_write(receipt_path, content, mode=0o600)
+                if receipt_path.read_bytes() != content:
+                    raise WoonError("native Wiki transaction receipt reread failed")
+                result["receipt"] = receipt_path.relative_to(vault).as_posix()
+                return result
+            except BaseException as error:
+                conflicts = []
+                for path, after in reversed(tuple(owned.items())):
+                    if not path.is_file() or path.read_bytes() != after:
+                        conflicts.append(path.relative_to(vault).as_posix())
+                        continue
+                    before, _after, mode = changed[path]
+                    atomic_write(path, before, mode=mode)
+                receipt_path.unlink(missing_ok=True)
+                try:
+                    self._reindex_unlocked()
+                except BaseException as recovery:
+                    raise WoonError(
+                        "native Wiki transaction failed; index recovery failed: "
+                        f"{error}; {recovery}"
+                    ) from recovery
+                if conflicts:
+                    raise WoonError(
+                        "native Wiki transaction failed; concurrent edits preserved; backups at "
+                        f"{local.relative_to(vault)}: " + ", ".join(conflicts)
+                    ) from error
+                raise
+
+    def _validate_compiled_wiki_transaction_revisions(
+        self, transaction: CompiledWikiTransaction
+    ) -> None:
+        """Re-read compiler output revisions while the repository lock is held."""
+
+        page_ids = tuple(str(page.get("page_id", "")) for page in transaction.pages_upsert)
+        if not page_ids:
+            raise WoonError("compiled Wiki transaction requires at least one page upsert")
+        for page_id in page_ids:
+            expected_revision = transaction.expected_revisions.get(page_id)
+            current = self._repository.get(page_id)
+            if expected_revision is None:
+                if current is not None:
+                    raise WoonError(
+                        "compiled Wiki transaction expected a new page but it already exists: "
+                        f"{page_id}"
+                    )
+                continue
+            if current is None:
+                raise WoonError(
+                    "compiled Wiki transaction expected an existing page but it is missing: "
+                    f"{page_id}"
+                )
+            if current.revision != expected_revision:
+                raise WoonError(
+                    "compiled Wiki transaction page changed after it was read; "
+                    f"reload and merge before writing: {page_id}"
+                )
+        for retirement in transaction.page_retirements:
+            page_id = retirement.page_id
+            current = self._repository.get(page_id)
+            if current is None or current.revision != retirement.expected_output_sha256:
+                raise WoonError(
+                    "compiled Wiki retirement page changed after it was read; "
+                    f"reload and merge before writing: {page_id}"
+                )
+
+    def _prepare_resource_renames(
+        self,
+        renames: tuple[ResourceFileRename, ...],
+        references: tuple[ManualWikiWrite, ...],
+    ) -> tuple[
+        tuple[tuple[Path, Path, bytes, int], ...],
+        tuple[tuple[Path, bytes, bytes, int], ...],
+    ]:
+        """Validate exact private filenames and active catalog locator replacements."""
+
+        if not renames:
+            if references:
+                raise WoonError("resource reference writes require resource renames")
+            return (), ()
+        assert self._compiled_wiki is not None
+        vault = self._compiled_wiki.vault.resolve()
+
+        def exact_path(relative: str) -> Path:
+            candidate = Path(relative)
+            path = vault / candidate
+            if (
+                not relative
+                or candidate.is_absolute()
+                or ".." in candidate.parts
+                or path.resolve() != path
+                or not path.is_relative_to(vault)
+            ):
+                raise WoonError("resource path must be relative and contain no symlinks")
+            return path
+
+        moves: list[tuple[Path, Path, bytes, int]] = []
+        touched: set[Path] = set()
+        replacements: list[tuple[bytes, bytes]] = []
+        for item in renames:
+            source, target = exact_path(item.current_path), exact_path(item.target_path)
+            if (
+                not item.current_path.startswith(
+                    ("private/knowledge/local-only/", "private/knowledge/private/career/")
+                )
+                or source.parent != target.parent
+                or source == target
+                or source.suffix.lower() not in {".pdf", ".html"}
+                or source.suffix != target.suffix
+            ):
+                raise WoonError("resource rename must preserve its private folder and extension")
+            if source in touched or target in touched:
+                raise WoonError("resource renames overlap")
+            touched.update((source, target))
+            if not source.is_file() or target.exists():
+                raise WoonError("resource source must exist and target must be absent")
+            content = source.read_bytes()
+            if hashlib.sha256(content).hexdigest() != item.current_sha256:
+                raise WoonError("resource source SHA-256 changed after review")
+            moves.append((source, target, content, source.stat().st_mode & 0o777))
+            replacements.append((item.current_path.encode(), item.target_path.encode()))
+
+        writes: list[tuple[Path, bytes, bytes, int]] = []
+        for reference in references:
+            path = exact_path(reference.current_path)
+            if (
+                not reference.current_path.startswith("catalog/sources/")
+                or path.suffix not in {".yaml", ".yml"}
+                or reference.target_path != reference.current_path
+                or not path.is_file()
+                or path in touched
+            ):
+                raise WoonError("resource reference write must update one existing source catalog")
+            touched.add(path)
+            before = path.read_bytes()
+            after = before
+            for old_locator, new_locator in replacements:
+                after = after.replace(old_locator, new_locator)
+            if (
+                before == after
+                or reference.content != after
+                or hashlib.sha256(before).hexdigest() != reference.current_sha256
+                or hashlib.sha256(after).hexdigest() != reference.target_sha256
+            ):
+                raise WoonError("resource reference write must match reviewed locator changes")
+            writes.append((path, before, after, path.stat().st_mode & 0o777))
+        return tuple(moves), tuple(writes)
+
+    @staticmethod
+    def _restore_resource_renames(
+        moves: list[tuple[Path, Path, bytes, int]],
+        references: list[tuple[Path, bytes, bytes, int]],
+    ) -> None:
+        """Restore owned bytes while preserving concurrent edits at either filename."""
+
+        conflicts: list[str] = []
+        for path, before, after, mode in reversed(references):
+            if path.is_symlink() or not path.is_file() or path.read_bytes() != after:
+                conflicts.append(str(path))
+                continue
+            atomic_write(path, before, mode=mode)
+        for source, target, content, mode in reversed(moves):
+            if not source.exists() and not source.is_symlink():
+                try:
+                    with source.open("xb") as stream:
+                        os.fchmod(stream.fileno(), mode)
+                        stream.write(content)
+                except FileExistsError:
+                    pass
+            if source.is_symlink() or not source.is_file() or source.read_bytes() != content:
+                conflicts.append(str(source))
+                continue
+            if target.is_symlink() or not target.is_file() or target.read_bytes() != content:
+                conflicts.append(str(target))
+                continue
+            target.unlink()
+        if conflicts:
+            raise WoonError("concurrent resource edits preserved: " + ", ".join(conflicts))
+
+    def _prepare_manual_wiki_writes(
+        self,
+        compiler_transaction: CompiledWikiTransaction,
+        manual_writes: tuple[ManualWikiWrite, ...],
+    ) -> tuple[
+        dict[Path, tuple[bytes | None, int | None]],
+        tuple[tuple[Path, Path | None, bytes | None, int], ...],
+    ]:
+        """Fail closed before a mixed transaction changes any manual page."""
+
+        compiler = self._compiled_wiki
+        if compiler is None:  # pragma: no cover - checked by public caller
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        vault = compiler.vault
+        wiki_root = (vault / "wiki").resolve()
+        current_compiler_paths = set(compiler.snapshot_outputs())
+        future_compiler_paths = {
+            (compiler.output_root / str(page.get("output_path", ""))).resolve()
+            for page in compiler_transaction.pages_upsert
+        }
+        protected_paths = current_compiler_paths | future_compiler_paths
+        current_paths: set[Path] = set()
+        target_paths: set[Path] = set()
+        prepared: list[tuple[Path, Path | None, bytes | None, int]] = []
+
+        for index, write in enumerate(manual_writes, start=1):
+            label = f"manual write {index}"
+            source = self._manual_wiki_path(vault, wiki_root, write.current_path, label)
+            retiring = write.target_path is None
+            target_path = write.target_path
+            target = (
+                None
+                if retiring
+                else self._manual_wiki_path(
+                    vault, wiki_root, target_path if target_path is not None else "", label
+                )
+            )
+            if source in current_paths:
+                raise WoonError(f"{label} repeats current_path: {write.current_path}")
+            if target is not None and target in target_paths:
+                raise WoonError(f"{label} repeats target_path: {write.target_path}")
+            current_paths.add(source)
+            if target is not None:
+                target_paths.add(target)
+            if source in protected_paths or (target is not None and target in protected_paths):
+                raise WoonError(
+                    f"{label} touches a compiler-owned Wiki output; use a compiler transaction"
+                )
+            if source.is_symlink() or not source.is_file():
+                raise WoonError(f"{label} current_path is not a regular manual Wiki page")
+            actual_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            if write.current_sha256 != actual_sha256:
+                raise WoonError(f"{label} current_sha256 does not match: {write.current_path}")
+            if retiring:
+                if write.target_sha256 is not None or write.content is not None:
+                    raise WoonError(
+                        f"{label} manual retirement must omit target_sha256 and content"
+                    )
+                prepared.append((source, None, None, source.stat().st_mode & 0o777))
+                continue
+            if not isinstance(write.content, bytes):
+                raise WoonError(f"{label} content must be bytes")
+            if not isinstance(write.target_sha256, str):
+                raise WoonError(f"{label} target_sha256 must be a SHA-256 digest")
+            target_sha256 = hashlib.sha256(write.content).hexdigest()
+            if write.target_sha256 != target_sha256:
+                raise WoonError(f"{label} target_sha256 does not match: {write.target_path}")
+            validate_record_metadata_update(
+                split_markdown(source.read_text(encoding="utf-8"))[0],
+                split_markdown(write.content.decode("utf-8"))[0],
+            )
+            if target is None:  # pragma: no cover - narrowed by the retirement branch
+                raise WoonError(f"{label} target_path is required for a manual write")
+            prepared.append((source, target, write.content, source.stat().st_mode & 0o777))
+
+        for index, (_source, target, _content, _mode) in enumerate(prepared, start=1):
+            if target is not None and target.exists() and target not in current_paths:
+                raise WoonError(
+                    f"manual write {index} target_path already exists and is not moving in this "
+                    f"transaction: {target.relative_to(vault).as_posix()}"
+                )
+
+        all_existing_manual_paths = {
+            path.resolve()
+            for path in iter_wiki_pages(wiki_root)
+            if path.resolve() not in current_compiler_paths
+        }
+        snapshot_paths = all_existing_manual_paths | current_paths | target_paths
+        snapshot: dict[Path, tuple[bytes | None, int | None]] = {
+            path: (path.read_bytes(), path.stat().st_mode & 0o777)
+            if path.is_file()
+            else (None, None)
+            for path in snapshot_paths
+        }
+        return snapshot, tuple(prepared)
+
+    def _validate_manual_wikilink_retirements(
+        self,
+        compiler_transaction: CompiledWikiTransaction,
+        writes: tuple[tuple[Path, Path | None, bytes | None, int], ...],
+    ) -> None:
+        """Require hash-pinned manual rewrites before a compiler target disappears."""
+
+        if not compiler_transaction.page_retirements:
+            return
+        compiler = self._compiled_wiki
+        if compiler is None:  # pragma: no cover - checked by public caller
+            raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        vault = compiler.vault
+        wiki_root = (vault / "wiki").resolve()
+        compiler_paths = set(compiler.snapshot_outputs())
+        final_manual: dict[Path, bytes] = {
+            path.resolve(): path.read_bytes()
+            for path in iter_wiki_pages(wiki_root)
+            if path.resolve() not in compiler_paths
+        }
+        for source, target, content, _mode in writes:
+            final_manual.pop(source, None)
+            if target is not None and content is not None:
+                final_manual[target] = content
+        replacements = {
+            _manual_wikilink_atom(rewrite.current_target): _manual_wikilink_atom(
+                rewrite.replacement_target
+            )
+            for rewrite in compiler_transaction.wikilink_rewrites
+        }
+        for retirement in compiler_transaction.page_retirements:
+            current = _manual_wikilink_atom(retirement.current_wikilink_target)
+            rewritten = replacements.get(current)
+            for path, content in final_manual.items():
+                try:
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError as error:
+                    relative = path.relative_to(vault).as_posix()
+                    raise WoonError(
+                        "manual Wiki page is not UTF-8 while checking retired inbound links: "
+                        + relative
+                    ) from error
+                if not _manual_wikilink_count(text, current):
+                    continue
+                relative = path.relative_to(vault).as_posix()
+                if rewritten is None:
+                    raise WoonError(
+                        "manual Wiki inbound link to a retired compiler page has no explicit "
+                        f"rewrite: {relative}"
+                    )
+                raise WoonError(
+                    "manual Wiki inbound link to a retired compiler page remains after its "
+                    f"explicit rewrite: {relative}"
+                )
+
+    @staticmethod
+    def _manual_wiki_path(vault: Path, wiki_root: Path, relative: str, label: str) -> Path:
+        candidate = Path(relative)
+        if not relative or candidate.is_absolute() or ".." in candidate.parts:
+            raise WoonError(f"{label} path escapes the Vault: {relative!r}")
+        if any((vault / part).is_symlink() for part in (candidate, *candidate.parents)):
+            raise WoonError(f"{label} path must not use symlinks: {relative}")
+        resolved = (vault / candidate).resolve()
+        if not resolved.is_relative_to(wiki_root):
+            raise WoonError(f"{label} path must stay below wiki/: {relative}")
+        return resolved
+
+    @staticmethod
+    def _apply_manual_wiki_writes(
+        writes: tuple[tuple[Path, Path | None, bytes | None, int], ...],
+        written: dict[Path, bytes | None],
+    ) -> None:
+        target_paths = {target for _source, target, _content, _mode in writes if target is not None}
+        source_paths = {source for source, _target, _content, _mode in writes}
+        for _source, target, content, mode in sorted(
+            writes,
+            key=lambda item: item[1].as_posix() if item[1] is not None else "",
+        ):
+            if target is not None and content is not None:
+                atomic_write(target, content, mode=mode)
+                written[target] = content
+        removals = sorted(source_paths.difference(target_paths), key=lambda path: path.as_posix())
+        for source in removals:
+            source.unlink(missing_ok=True)
+            written[source] = None
+
+    @staticmethod
+    def _restore_manual_wiki_snapshot(
+        snapshot: dict[Path, tuple[bytes | None, int | None]],
+        written: dict[Path, bytes | None],
+    ) -> None:
+        for path, owned in sorted(written.items(), key=lambda item: item[0].as_posix()):
+            actual = path.read_bytes() if path.is_file() else None
+            if path.is_symlink() or actual != owned:
+                continue  # Preserve untouched paths and later user edits.
+            content, mode = snapshot[path]
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write(path, content, mode=mode or 0o644)
 
 
 def _fingerprint(value: str) -> str:

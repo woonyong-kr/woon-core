@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -280,6 +281,8 @@ class WikiTreeReport:
     changed_count: int
     pages: dict[Path, bytes]
     issues: tuple[str, ...]
+    expected_inputs: dict[Path, bytes | None] = dataclass_field(default_factory=dict, repr=False)
+    previous_inputs: dict[Path, bytes | None] = dataclass_field(default_factory=dict, repr=False)
 
 
 def is_wiki_source_archive(path: Path, wiki_root: Path) -> bool:
@@ -330,12 +333,44 @@ def is_compact_link_page(node: WikiTreeNode) -> bool:
 
 
 def prepare_wiki_tree_refresh(
-    vault: Path, *, canonical_prefix: str | None = None
+    vault: Path,
+    *,
+    canonical_prefix: str | None = None,
+    page_overrides: Mapping[Path, bytes | None] | None = None,
 ) -> WikiTreeReport:
-    """Regenerate compact navigation and latest blocks from canonical metadata."""
+    """Prepare navigation from actual outputs plus optional exact pending writes.
+
+    None removes an output from the proposed tree. Unchanged pages always come
+    from disk, including stale outputs whose catalog metadata already differs.
+    Proposed reports pin their input bytes for reuse after the owning writer.
+    """
 
     root = vault.expanduser().resolve()
-    nodes, texts, issues = load_wiki_tree(root)
+    inputs = {path: path.read_bytes() for path in iter_wiki_pages(root / "wiki")}
+    previous: dict[Path, bytes | None] = dict(inputs) if page_overrides is not None else {}
+    for path, content in (page_overrides or {}).items():
+        if (
+            not path.is_relative_to(root / "wiki")
+            or ".." in path.parts
+            or path.suffix != ".md"
+            or is_wiki_source_archive(path, root / "wiki")
+            or any(part.is_symlink() for part in (path, *path.parents))
+        ):
+            raise WoonError("proposed Wiki tree path must be a regular human Wiki path")
+        previous.setdefault(path, None)
+        if content is None:
+            inputs.pop(path, None)
+        else:
+            inputs[path] = content
+    nodes, texts, issues = load_wiki_tree(
+        root,
+        page_texts={
+            path.relative_to(root).as_posix(): content.decode("utf-8")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            for path, content in inputs.items()
+        },
+    )
     scope = canonical_prefix.strip().strip("/") if canonical_prefix is not None else ""
     if canonical_prefix is not None and not scope:
         raise WoonError("Wiki tree refresh canonical prefix must not be empty")
@@ -368,9 +403,14 @@ def prepare_wiki_tree_refresh(
         )
         encoded = refreshed.encode("utf-8")
         pages[node.path] = encoded
-        if encoded != node.path.read_bytes():
+        if encoded != inputs[node.path]:
             changed += 1
-    return WikiTreeReport(len(nodes), changed, pages, ())
+    expected = (
+        {**inputs, **{p: None for p, value in page_overrides.items() if value is None}}
+        if page_overrides is not None
+        else {}
+    )
+    return WikiTreeReport(len(nodes), changed, pages, (), expected, previous)
 
 
 def apply_wiki_tree_refresh(vault: Path, report: WikiTreeReport) -> None:
@@ -379,6 +419,7 @@ def apply_wiki_tree_refresh(vault: Path, report: WikiTreeReport) -> None:
     if report.issues:
         raise WoonError("cannot apply an invalid Wiki tree refresh")
     root = vault.expanduser().resolve()
+    validate_wiki_tree_inputs(root, report.expected_inputs)
     snapshots: list[tuple[Path, bytes, int]] = []
     changed: list[tuple[Path, bytes, int]] = []
     for path, content in sorted(report.pages.items(), key=lambda item: item[0].as_posix()):
@@ -401,6 +442,8 @@ def apply_wiki_tree_refresh(vault: Path, report: WikiTreeReport) -> None:
 
 def load_wiki_tree(
     vault: Path,
+    *,
+    page_texts: Mapping[str, str] | None = None,
 ) -> tuple[tuple[WikiTreeNode, ...], dict[str, str], tuple[str, ...]]:
     """Load and validate the active Wiki parent graph without mutating files."""
 
@@ -413,10 +456,21 @@ def load_wiki_tree(
     issues: list[str] = []
     canonical: dict[str, str] = {}
     identities: dict[tuple[str, str], str] = {}
-    book_roots = _book_root_ids(wiki_root)
-    for path in iter_wiki_pages(wiki_root):
-        relative = path.relative_to(root).as_posix()
-        text = path.read_text(encoding="utf-8")
+    book_roots = _book_root_ids(
+        page_texts.values()
+        if page_texts is not None
+        else (path.read_text(encoding="utf-8") for path in iter_wiki_pages(wiki_root))
+    )
+    available = (
+        dict(page_texts)
+        if page_texts is not None
+        else {
+            path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+            for path in iter_wiki_pages(wiki_root)
+        }
+    )
+    for relative, text in sorted(available.items()):
+        path = root / relative
         texts[relative] = text
         try:
             metadata, _ = split_markdown(text)
@@ -556,14 +610,14 @@ def load_wiki_tree(
     return tuple(nodes), texts, tuple(dict.fromkeys(issues))
 
 
-def _book_root_ids(wiki_root: Path) -> frozenset[str]:
+def _book_root_ids(texts: Iterable[str]) -> frozenset[str]:
     """Discover book entities before validating descendant display identities."""
 
     roots: set[str] = set()
-    for path in iter_wiki_pages(wiki_root):
+    for text in texts:
         try:
-            metadata, _ = split_markdown(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, WoonError):
+            metadata, _ = split_markdown(text)
+        except WoonError:
             continue
         canonical_id = metadata.get("canonical_id")
         if (
@@ -2385,3 +2439,18 @@ def _optional_marker_with_trailing_space(text: str, start: str, end: str) -> str
 
 def _without_suffix(relative_path: str) -> str:
     return Path(relative_path).with_suffix("").as_posix()
+
+
+def validate_wiki_tree_inputs(vault: Path, expected_inputs: Mapping[Path, bytes | None]) -> None:
+    """Reject changed input bytes or page membership without repeating tree validation."""
+
+    if not expected_inputs:
+        return
+    root = vault.expanduser().resolve()
+    expected_paths = {p for p, value in expected_inputs.items() if value is not None}
+    if set(iter_wiki_pages(root / "wiki")) != expected_paths:
+        raise WoonError("Wiki tree paths changed after preparation; replan")
+    for path, expected in expected_inputs.items():
+        actual = path.read_bytes() if path.is_file() else None
+        if path.is_symlink() or actual != expected:
+            raise WoonError("Wiki tree input changed after preparation; replan")

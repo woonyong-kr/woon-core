@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -1893,3 +1894,12 @@ def _merge_h2_rows(text: str, heading: str, rows: list[str]) -> str:
     existing = [line for line in match.group(1).splitlines() if line.strip()]
     merged = existing + [row for row in rows if row not in existing]
     return pattern.sub(f"## {heading}\n\n" + "\n".join(merged) + "\n\n", text, count=1)
+
+
+def is_retired_wiki_record(metadata: dict[str, Any]) -> bool:
+    """Archived history remains usable; semantic retirement does not."""
+
+    return (
+        str(metadata.get("status", "")).lower() == "retired"
+        or metadata.get("knowledge_state") == "폐기됨"
+    )
