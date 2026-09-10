@@ -23,7 +23,7 @@ def test_moves_private_corpus_into_wiki_source_boundary(tmp_path: Path) -> None:
 
     result = archive_private_source_corpus(source, vault, "study-drop", "wiki/study.md")
 
-    destination = vault / "wiki/private/_sources/knowledge/local-only/study-drop"
+    destination = vault / "private/knowledge/local-only/study-drop"
     assert result.moved is True
     assert result.files == 2
     assert not source.exists()
@@ -34,7 +34,7 @@ def test_moves_private_corpus_into_wiki_source_boundary(tmp_path: Path) -> None:
     assert {record["state"] for record in catalog["records"]} == {"canonical"}
     assert {record["role"] for record in catalog["records"]} == {"document"}
     assert all(
-        str(record["target"]).startswith("wiki/private/_sources/") for record in catalog["records"]
+        str(record["target"]).startswith("private/knowledge/") for record in catalog["records"]
     )
     ledger = yaml.safe_load((vault / "catalog/reconciliation/study-drop.yaml").read_text())
     assert {record["action"] for record in ledger["records"]} == {"move-to-wiki-source"}
@@ -62,7 +62,7 @@ def test_replay_excludes_managed_rights_quarantine_and_refreshes_receipt(
     (source / "book.pdf").write_bytes(b"book")
     archive_private_source_corpus(source, vault, "study-drop", "wiki/study.md")
 
-    destination = vault / "wiki/private/_sources/knowledge/local-only/study-drop"
+    destination = vault / "private/knowledge/local-only/study-drop"
     quarantine = destination / "rights-quarantine/review-1"
     quarantine.mkdir(parents=True)
     (quarantine / "manifest.json").write_text("{}\n", encoding="utf-8")
@@ -126,7 +126,7 @@ def test_secret_rejection_keeps_external_source_unchanged(tmp_path: Path) -> Non
         archive_private_source_corpus(source, vault, "study-drop", "wiki/study.md")
 
     assert source.is_dir()
-    assert not (vault / "wiki/private/_sources/knowledge/local-only/study-drop").exists()
+    assert not (vault / "private/knowledge/local-only/study-drop").exists()
 
 
 def test_rejects_source_already_inside_vault(tmp_path: Path) -> None:

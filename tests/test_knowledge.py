@@ -293,6 +293,26 @@ def test_identity_scope_rejects_malformed_frontmatter(tmp_path: Path) -> None:
         )
 
 
+def test_language_title_symbols_are_part_of_canonical_identity(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    for slug, title in (("c", "C"), ("cpp", "C++"), ("csharp", "C#")):
+        service.archive(
+            replace(
+                metadata(f"programming/{slug}"),
+                title=title,
+                domain="programming",
+                prerequisites=(),
+            ),
+            "프로그래밍 언어.",
+        )
+    assert service.audit() == []
+    with pytest.raises(WoonError, match="same normalized title"):
+        service.archive(
+            replace(metadata("programming/duplicate"), title="c + +", domain="programming"),
+            "같은 언어의 중복 표기.",
+        )
+
+
 def test_audit_allows_same_frontmatter_title_in_different_books(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     for slug, title in (("first-book", "첫 번째 책"), ("second-book", "두 번째 책")):

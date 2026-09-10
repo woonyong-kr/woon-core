@@ -173,7 +173,7 @@ def audit_source_catalog_references(vault: Path) -> SourceCatalogReferenceAudit:
                             f"{relative_document}:records[{index}]={source_id}"
                         )
 
-    records: list[dict[str, object]] = []
+    audit_records: list[dict[str, object]] = []
     orphan_count = 0
     duplicate_primary_count = 0
     for path in paths:
@@ -184,7 +184,7 @@ def audit_source_catalog_references(vault: Path) -> SourceCatalogReferenceAudit:
         if len(owners) > 1:
             duplicate_primary_count += 1
             issues.append(f"raw source has multiple primary catalog owners: {path}")
-        records.append(
+        audit_records.append(
             {
                 "current_path": path,
                 "primary_catalog_owners": owners,
@@ -201,7 +201,7 @@ def audit_source_catalog_references(vault: Path) -> SourceCatalogReferenceAudit:
         duplicate_primary_count=duplicate_primary_count,
         stale_reference_count=stale_reference_count,
         issues=tuple(issues),
-        records=tuple(records),
+        records=tuple(audit_records),
     )
 
 

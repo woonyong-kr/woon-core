@@ -64,6 +64,7 @@ from woon_core.knowledge.ports import (
     KnowledgeSearchIndex,
     ReadOnlyKnowledgeCorpus,
 )
+from woon_core.knowledge.wiki_tree import normalize_identity
 
 DIFFICULTIES = {"foundation", "intermediate", "advanced"}
 
@@ -1318,7 +1319,7 @@ class KnowledgeService:
 
 
 def _fingerprint(value: str) -> str:
-    normalized = re.sub(r"[^0-9a-z가-힣]", "", value.lower())
+    normalized = normalize_identity(value)
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 

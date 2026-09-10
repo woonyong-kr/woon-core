@@ -841,7 +841,8 @@ def parent_link(relative_path: str, title: str) -> str:
 
 
 def normalize_identity(value: str) -> str:
-    return re.sub(r"[^0-9a-z가-힣]+", "", value.casefold())
+    # Symbols distinguish language identities such as C, C++ and C#.
+    return re.sub(r"[^0-9a-z가-힣+#]+", "", value.casefold())
 
 
 def wikilink_path(value: object, relative: str, issues: list[str]) -> str | None:
@@ -1031,8 +1032,8 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
     root = "wiki/README.md"
     books_path = "wiki/books/README.md"
     books_parent_path = root
-    resources_path = "wiki/resources/README.md"
-    people_path = "wiki/people/README.md"
+    resources_path: str | None = "wiki/resources/README.md"
+    people_path: str | None = "wiki/people/README.md"
     public_hub = by_path.get(PUBLIC_WIKI_HUB_PATH)
 
     if public_hub is not None:
@@ -1071,7 +1072,7 @@ def _domain_tree_issues(nodes: list[WikiTreeNode], texts: dict[str, str]) -> lis
             issues.append(f"{resources_path}: resources must be a direct child of Wiki root")
         if resources.title != "리소스" or resources.keywords[:1] != ("리소스",):
             issues.append(f"{resources_path}: resources root must use the visible keyword '리소스'")
-        for keyword in children.get(resources_path, ()):
+        for keyword in children.get(resources.relative_path, ()):
             grouped = children.get(keyword.relative_path, ())
             if keyword.node_kind != "topic":
                 issues.append(
