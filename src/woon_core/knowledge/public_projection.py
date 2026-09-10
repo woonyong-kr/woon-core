@@ -24,7 +24,12 @@ import yaml
 
 from woon_core.errors import WoonError
 from woon_core.io import atomic_write, exclusive_file_lock
-from woon_core.knowledge.wiki_tree import CHILDREN_END, CHILDREN_START, split_markdown
+from woon_core.knowledge.wiki_tree import (
+    CHILDREN_END,
+    CHILDREN_START,
+    split_markdown,
+    strip_local_parent_navigation,
+)
 
 _SCHEMA_VERSION = 1
 _CONTENT_RELATIVE = Path("generated/public-content")
@@ -854,6 +859,7 @@ def _jekyll_heading_fragment(anchor: str) -> str:
 def _unwrap_compiler_navigation(body: str) -> str:
     """Keep the direct-child map while removing compiler-only boundary comments."""
 
+    body = strip_local_parent_navigation(body)
     return body.replace(CHILDREN_START, "").replace(CHILDREN_END, "").strip()
 
 

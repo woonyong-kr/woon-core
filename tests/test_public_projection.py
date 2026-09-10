@@ -913,3 +913,46 @@ def test_cli_preflight_does_not_write_and_apply_requires_explicit_flag(tmp_path:
         StringIO(),
     )
     assert (vault / ".local/woon-knowledge/public-projection/receipt.json").is_file()
+
+
+@pytest.mark.parametrize("malformed", ["valid", "missing-end", "reversed"])
+def test_local_planned_parent_link_does_not_duplicate_public_navigation(
+    tmp_path: Path,
+    malformed: str,
+) -> None:
+    parent = _page(
+        page_id="Wiki/structures",
+        title="자료구조",
+        publication_state="publish",
+        access="public",
+        slug="structures",
+    )
+    child = _page(
+        page_id="Wiki/array",
+        title="배열",
+        publication_state="publish",
+        access="public",
+        slug="array",
+        parent="[[Wiki/structures|자료구조]]",
+        body="<!-- woon-wiki-local-parent:start -->\n"
+        "상위 주제: [[wiki/Wiki/structures|자료구조]]\n"
+        + ("" if malformed == "missing-end" else "<!-- woon-wiki-local-parent:end -->\n")
+        + "<!-- planned -->",
+    )
+    if malformed == "reversed":
+        child["test_body"] = child["test_body"].replace("<!-- woon-wiki-local-parent:end -->\n", "")
+        child["test_body"] = "<!-- woon-wiki-local-parent:end -->\n" + child["test_body"]
+    child["frontmatter"].update(content_status="planned", reader_navigation="sidebar-only")
+    vault, site = _write_fixture(tmp_path, [parent, child])
+    if malformed != "valid":
+        with pytest.raises(WoonError, match="malformed managed markers"):
+            prepare_public_projection(vault, site)
+        return
+    report = prepare_public_projection(vault, site)
+    assert len(report.documents) == 2 and not report.redirects
+    content = next(doc.content.decode() for doc in report.documents if doc.page_id == "Wiki/array")
+    metadata = yaml.safe_load(content.split("---", 2)[1])
+    assert metadata["parent"] == "자료구조" and metadata["has_toc"] is True
+    assert "상위 주제" not in content and "woon-wiki-local-parent" not in content
+    assert "[[" not in content and "## 목차" not in content
+    assert "작성 예정" in content and "<!-- planned -->" in content

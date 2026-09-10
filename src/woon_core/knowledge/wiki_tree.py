@@ -28,6 +28,8 @@ OVERVIEW_START = "<!-- woon-wiki-overview:start -->"
 OVERVIEW_END = "<!-- woon-wiki-overview:end -->"
 CHILDREN_START = "<!-- woon-wiki-children:start -->"
 CHILDREN_END = "<!-- woon-wiki-children:end -->"
+PARENT_START = "<!-- woon-wiki-local-parent:start -->"
+PARENT_END = "<!-- woon-wiki-local-parent:end -->"
 BOOK_READER_NAVIGATION_START = "<!-- woon-book-reader-navigation:start -->"
 BOOK_READER_NAVIGATION_END = "<!-- woon-book-reader-navigation:end -->"
 LATEST_START = "<!-- woon-wiki-latest:start -->"
@@ -591,6 +593,7 @@ def render_wiki_tree_view(
     # generated callout repeated title, kind, state, parent, and child count
     # without helping a reader understand the subject, so every Wiki page now
     # keeps only its authored semantic summary and navigation in the body.
+    text = strip_local_parent_navigation(text)
     updated = _normalize_reader_headings(
         _normalize_h1_spacing(
             _strip_ordered_book_navigation(_strip_marker_block(text, OVERVIEW_START, OVERVIEW_END))
@@ -741,13 +744,73 @@ def render_wiki_tree_view(
         updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
         updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
         updated = _strip_section(updated, "최신 관련 문서", LATEST_START, LATEST_END)
+    updated = _render_planned_parent_link(updated, node, nodes, texts)
     return _normalize_h1_spacing(updated).rstrip() + "\n"
+
+
+def strip_local_parent_navigation(text: str) -> str:
+    """Remove the local-only edge; the public sidebar owns this navigation."""
+
+    if PARENT_START not in text and PARENT_END not in text:
+        return text
+    if _optional_marker_block(text, PARENT_START, PARENT_END) is None:
+        raise WoonError(f"malformed managed markers: {PARENT_START}")
+    return _normalize_h1_spacing(_strip_marker_block(text, PARENT_START, PARENT_END))
+
+
+def _is_public_planned_keyword(metadata: dict[str, Any]) -> bool:
+    return (
+        str(metadata.get("canonical_id", "")).startswith("Wiki/")
+        and metadata.get("content_status") == "planned"
+        and metadata.get("reader_navigation") == "sidebar-only"
+        and metadata.get("access") == "public"
+        and metadata.get("publication_state") == "publish"
+    )
+
+
+def _render_planned_parent_link(
+    text: str,
+    node: WikiTreeNode,
+    nodes: dict[str, WikiTreeNode],
+    texts: dict[str, str],
+) -> str:
+    """Expose one existing semantic parent, without inventing child lists."""
+
+    metadata, body = split_markdown(text)
+    parent = nodes.get(node.parent_path or "")
+    if not _is_public_planned_keyword(metadata) or parent is None:
+        return text
+    parent_metadata, _ = split_markdown(texts[parent.relative_path])
+    if (
+        parent_metadata.get("access") != "public"
+        or parent_metadata.get("publication_state") != "publish"
+    ):
+        return text
+    targets = {
+        _without_suffix(parent.relative_path),
+        _without_suffix(parent.relative_path).removeprefix("wiki/"),
+        parent.canonical_id,
+    }
+    stem = Path(parent.relative_path).stem
+    if sum(Path(item.relative_path).stem == stem for item in nodes.values()) == 1:
+        targets.add(stem)
+    if any(
+        match.group("target").strip().removesuffix(".md") in targets
+        for match in _BODY_WIKILINK_RE.finditer(body)
+    ):
+        return text
+    block = (
+        f"{PARENT_START}\n"
+        f"상위 주제: [[{_without_suffix(parent.relative_path)}|{parent.title}]]\n"
+        f"{PARENT_END}"
+    )
+    return _replace_or_insert_after_h1(text, PARENT_START, PARENT_END, block)
 
 
 def strip_generated_wiki_views(text: str) -> str:
     """Remove derived view blocks before computing a compiler projection."""
 
-    updated = _strip_ordered_book_navigation(text)
+    updated = _strip_ordered_book_navigation(strip_local_parent_navigation(text))
     updated = _strip_section(updated, "하위 키워드", CHILDREN_START, CHILDREN_END)
     updated = _strip_section(updated, "원자료", SOURCE_INDEX_START, SOURCE_INDEX_END)
     updated = _strip_section(updated, "최신 하위 문서", LATEST_START, LATEST_END)
@@ -775,6 +838,22 @@ def preserve_generated_wiki_views(existing: str, rendered: str) -> str:
                 updated = _replace_or_insert_after_h1(updated, start, end, block)
             else:
                 updated = _replace_or_append_section(updated, heading, start, end, block)
+    parent_link = _optional_marker_block(existing, PARENT_START, PARENT_END)
+    if parent_link is not None:
+        existing_metadata, _ = split_markdown(existing)
+        metadata, body = split_markdown(updated)
+        parent_path = wikilink_path(metadata.get("parent"), "compiled parent view", [])
+        authored_parent = parent_path is not None and _contains_wikilink_to(body, parent_path)
+        # Reparenting, identity changes and a real article invalidate this view.
+        if (
+            not authored_parent
+            and _is_public_planned_keyword(metadata)
+            and all(
+                metadata.get(key) == existing_metadata.get(key)
+                for key in ("canonical_id", "parent")
+            )
+        ):
+            updated = _replace_or_insert_after_h1(updated, PARENT_START, PARENT_END, parent_link)
     source_index = _optional_marker_block(rendered, SOURCE_INDEX_START, SOURCE_INDEX_END)
     if source_index is None:
         source_index = _optional_marker_block(existing, SOURCE_INDEX_START, SOURCE_INDEX_END)

@@ -5,12 +5,16 @@ from woon_core.knowledge.wiki_tree import (
     BOOK_READER_NAVIGATION_START,
     CHILDREN_END,
     CHILDREN_START,
+    PARENT_START,
     SOURCE_INDEX_END,
     SOURCE_INDEX_START,
     apply_wiki_tree_refresh,
     is_wiki_source_archive,
+    load_wiki_tree,
     prepare_wiki_tree_refresh,
     preserve_generated_wiki_views,
+    render_wiki_tree_view,
+    split_markdown,
     strip_generated_wiki_views,
 )
 
@@ -3378,3 +3382,60 @@ def test_book_chapter_map_keeps_source_section_with_direct_content(tmp_path: Pat
     report = prepare_wiki_tree_refresh(tmp_path)
 
     assert not any("wrapper child" in issue for issue in report.issues)
+
+
+def test_planned_parent_link_uses_existing_parent_and_keeps_authored_text(tmp_path: Path) -> None:
+    for name, title, status, parent in (
+        ("structures", "자료구조", "overview", None),
+        ("array", "배열", "planned", "[[wiki/Wiki/structures]]"),
+    ):
+        _write_page(
+            tmp_path,
+            f"wiki/Wiki/{name}.md",
+            title=title,
+            canonical_id=f"Wiki/{name}",
+            node_kind="topic",
+            parent=parent,
+            keywords=(title,),
+            extra=f"content_status: {status}\nreader_navigation: sidebar-only\n"
+            "access: public\npublication_state: publish\n",
+            body="<!-- 작성 예정 -->",
+        )
+    nodes, texts, _ = load_wiki_tree(tmp_path)
+    by_path = {node.relative_path: node for node in nodes}
+    node = by_path["wiki/Wiki/array.md"]
+    original = texts[node.relative_path]
+
+    def render(text: str, current_node=node, current_texts=texts) -> str:
+        return render_wiki_tree_view(
+            text,
+            node=current_node,
+            nodes=by_path,
+            children={},
+            texts=current_texts,
+        )
+
+    rendered = render(original)
+    assert rendered.count("상위 주제: [[wiki/Wiki/structures|자료구조]]") == 1
+    assert "하위 키워드" not in rendered and CHILDREN_START not in rendered
+    assert split_markdown(rendered)[0] == split_markdown(original)[0]
+    assert strip_generated_wiki_views(rendered).strip() == original.strip()
+    assert render(rendered) == rendered
+    assert preserve_generated_wiki_views(rendered, original) == rendered
+    assert PARENT_START not in preserve_generated_wiki_views(
+        rendered, original + "\n[[wiki/Wiki/structures|자료구조]]\n"
+    )
+    assert render(original + "\n[[Wiki/structures|자료구조]]\n").count(PARENT_START) == 0
+
+    ready = rendered.replace("content_status: planned", "content_status: ready")
+    assert PARENT_START not in render(ready)
+    assert PARENT_START not in preserve_generated_wiki_views(rendered, ready)
+    moved = original.replace("[[wiki/Wiki/structures]]", "[[wiki/Wiki/other]]")
+    assert PARENT_START not in preserve_generated_wiki_views(rendered, moved)
+    private_parent = dict(texts)
+    private_parent["wiki/Wiki/structures.md"] = texts["wiki/Wiki/structures.md"].replace(
+        "access: public", "access: local-only"
+    )
+    assert PARENT_START not in render(rendered, current_texts=private_parent)
+    private_child = original.replace("access: public", "access: local-only")
+    assert PARENT_START not in render(private_child)
