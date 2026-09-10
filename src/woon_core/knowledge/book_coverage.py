@@ -8,7 +8,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
+from woon_core.errors import WoonError
 from woon_core.knowledge.book_contract import (
     BOOK_CONTRACT_SHA256,
     BOOK_CONTRACT_VERSION,
@@ -17,12 +19,24 @@ from woon_core.knowledge.book_contract import (
     book_workflow_evidence_phases,
     book_workflow_phase_index,
 )
+from woon_core.knowledge.book_semantic_delivery import (
+    heading_delivery,
+    repeated_span_delivery,
+    static_parts_source_mapping,
+    upgraded_run_payload,
+)
+from woon_core.knowledge.book_supplements import (
+    audit_supplemental_runnable_partition,
+    personal_footnote_coverage_pages,
+)
 from woon_core.knowledge.source_boundary import private_source_relative
 from woon_core.knowledge.wiki_tree import (
     BOOK_READER_NAVIGATION_END,
     BOOK_READER_NAVIGATION_START,
     CHILDREN_END,
     CHILDREN_START,
+    private_reader_target,
+    render_book_toc_group,
     split_markdown,
     strip_generated_wiki_views,
 )
@@ -268,6 +282,8 @@ def _audit_book_coverage(
         path, manifest = manifests[book_id]
         prefix = path.relative_to(vault).as_posix()
         base_node_ids_for_scope: set[str] = set()
+        navigation_scope_nodes: frozenset[str] = frozenset()
+        scope_base: dict[str, Any] | None = None
         if scope_manifest_path is not None:
             scope = manifest.get("coverage_scope")
             if not isinstance(scope, dict) or set(scope) != {
@@ -340,6 +356,11 @@ def _audit_book_coverage(
                                     if isinstance(node, dict)
                                     and isinstance(canonical_id := node.get("canonical_id"), str)
                                 }
+                            if isinstance(base_payload, dict):
+                                scope_base = base_payload
+                                navigation_scope_nodes = navigation_group_scope_nodes(
+                                    base_payload, scope_root_id
+                                )
         manifest_schema = manifest.get("schema_version")
         if scope_manifest_path is None and manifest_schema == 1:
             pending_books.add(book_id)
@@ -384,7 +405,24 @@ def _audit_book_coverage(
                         f"{prefix}: toc_evidence[{index}] requires locator and verified_on"
                     )
         nodes = manifest.get("nodes")
-        if not isinstance(nodes, list) or not nodes:
+        assignments = manifest.get("source_structure_assignments")
+        private_navigation_only = (
+            scope_manifest_path is None
+            and workflow_phase == "toc-indexed"
+            and isinstance(assignments, list)
+            and bool(assignments)
+            and any(
+                isinstance(item, dict) and item.get("disposition") == "private-reader"
+                for item in assignments
+            )
+            and all(
+                isinstance(item, dict)
+                and item.get("disposition")
+                in {"private-reader", "book-root-heading", "metadata-only"}
+                for item in assignments
+            )
+        )
+        if not isinstance(nodes, list) or (not nodes and not private_navigation_only):
             errors.append(f"{prefix}: nodes must contain the complete verified TOC")
             continue
         expected_node_count += len(nodes)
@@ -401,8 +439,12 @@ def _audit_book_coverage(
         if scope_manifest_path is not None:
             scope = manifest.get("coverage_scope")
             scope_root_id = _text(scope.get("root_id")) if isinstance(scope, dict) else ""
-            if scope_root_id not in node_ids:
+            if scope_root_id not in node_ids and not navigation_scope_nodes:
                 errors.append(f"{prefix}: coverage_scope.root_id must be present in nodes")
+            if navigation_scope_nodes and node_ids != navigation_scope_nodes:
+                errors.append(
+                    f"{prefix}: navigation heading scope must contain exactly its pinned nodes"
+                )
             for node_id in sorted(node_ids):
                 if (
                     scope_root_id
@@ -431,6 +473,17 @@ def _audit_book_coverage(
             and node.get("leaf") is True
             and (canonical_id := _text(node.get("canonical_id")))
         }
+        try:
+            presentation_pages = personal_footnote_coverage_pages(
+                vault,
+                {owner: pages[owner][2] for owner in node_ids if owner in pages},
+            )
+        except WoonError as error:
+            errors.append(f"{prefix}: {error}")
+        else:
+            for owner, coverage_body in presentation_pages.items():
+                path, metadata, _ = pages[owner]
+                pages[owner] = (path, metadata, coverage_body)
         _audit_source_structure_contract(
             prefix,
             manifest,
@@ -439,6 +492,8 @@ def _audit_book_coverage(
             node_order,
             pages,
             errors,
+            scope_base=scope_base,
+            vault=vault,
         )
         _audit_retired_source_section_wrappers(
             prefix,
@@ -461,6 +516,17 @@ def _audit_book_coverage(
                 vault,
                 errors,
             )
+        original_runnable_counts: dict[str, int] | None = None
+        if "supplemental_runnables" in manifest:
+            try:
+                original_runnable_counts = audit_supplemental_runnable_partition(
+                    vault,
+                    manifest,
+                    {owner: _reader_body(pages[owner][2]) for owner in node_ids if owner in pages},
+                )
+            except WoonError as error:
+                errors.append(f"{prefix}: {error}")
+                element_contract_valid = False
         if not element_contract_valid:
             errors.append(
                 f"{prefix}: runnable audit is incomplete because the source element "
@@ -621,7 +687,19 @@ def _audit_book_coverage(
                     fully_covered = False
                 elif expected != verified:
                     fully_covered = False
-                elif actual_runnable_count is not None and expected != actual_runnable_count:
+                elif original_runnable_counts is not None and expected != (
+                    original_runnable_counts.get(canonical_id, 0)
+                ):
+                    errors.append(
+                        f"{label}: runnable.expected={expected} does not match original "
+                        f"source runs={original_runnable_counts.get(canonical_id, 0)}"
+                    )
+                    fully_covered = False
+                elif (
+                    original_runnable_counts is None
+                    and actual_runnable_count is not None
+                    and expected != actual_runnable_count
+                ):
                     errors.append(
                         f"{label}: runnable.expected={expected} does not match "
                         f"reader run-* blocks={actual_runnable_count}"
@@ -1117,6 +1195,9 @@ def _audit_source_structure_contract(
     node_order: list[str],
     pages: dict[str, tuple[Path, dict[str, Any], str]],
     errors: list[str],
+    *,
+    scope_base: dict[str, Any] | None = None,
+    vault: Path | None = None,
 ) -> None:
     """Require exact source-order ownership for front/body/back matter and appendices."""
 
@@ -1186,6 +1267,7 @@ def _audit_source_structure_contract(
             errors.append(f"{label}: duplicate source structure {structure_id}")
         elements[structure_id] = element
 
+    navigation_deliveries: dict[str, tuple[int, str, int]] = {}
     assignment_counts: dict[str, int] = {}
     canonical_nodes: set[str] = set()
     owned_nodes: set[str] = set()
@@ -1210,7 +1292,36 @@ def _audit_source_structure_contract(
             errors.append(f"{label}: assignment references unknown source structure")
             continue
         assignment_by_structure[structure_id] = assignment
-        if disposition == "canonical-node":
+        if disposition in {"private-reader", "book-root-heading"}:
+            source_order = list(elements).index(structure_id) + 1
+            if scope_base is not None:
+                pinned_elements = scope_base.get("source_structure_elements", [])
+                pinned = [
+                    row
+                    for row in scope_base.get("source_structure_assignments", [])
+                    if isinstance(row, dict) and row.get("structure_id") == structure_id
+                ]
+                positions = [
+                    index for index, row in enumerate(pinned_elements, 1) if row == element
+                ]
+                if pinned != [assignment] or len(positions) != 1:
+                    errors.append(
+                        f"{label}: scoped navigation delivery must equal its full pinned manifest"
+                    )
+                    continue
+                source_order = positions[0]
+            try:
+                navigation_deliveries[structure_id] = _audit_navigation_delivery(
+                    vault,
+                    _text(manifest.get("book_id")),
+                    assignment,
+                    element,
+                    pages,
+                    source_order=source_order,
+                )
+            except (WoonError, UnicodeError) as error:
+                errors.append(f"{label}: {error}")
+        elif disposition == "canonical-node":
             _audit_exact_fields(
                 label,
                 assignment,
@@ -1374,7 +1485,27 @@ def _audit_source_structure_contract(
                     f"{label}.label must exactly match the source title: {expected_label}"
                 )
             owner_headings = navigation_group_headings.setdefault(owner_id, [])
-            expected_source_order = len(owner_headings) + 1
+            expected_source_order = sum(
+                item.get("kind") == "chapter"
+                for item in raw_elements[: list(elements).index(structure_id) + 1]
+                if isinstance(item, dict)
+            )
+            if scope_base is not None:
+                pinned = [
+                    item
+                    for item in scope_base.get("source_structure_assignments", [])
+                    if isinstance(item, dict) and item.get("structure_id") == structure_id
+                ]
+                if len(pinned) != 1 or pinned[0] != assignment:
+                    errors.append(
+                        f"{label}: scoped chapter heading must equal its pinned base assignment"
+                    )
+                pinned_order = pinned[0].get("source_order") if len(pinned) == 1 else None
+                expected_source_order = (
+                    pinned_order
+                    if isinstance(pinned_order, int) and not isinstance(pinned_order, bool)
+                    else -1
+                )
             if (
                 not isinstance(heading_source_order, int)
                 or isinstance(heading_source_order, bool)
@@ -1442,7 +1573,7 @@ def _audit_source_structure_contract(
         else:
             errors.append(
                 f"{label}.disposition must be canonical-node, in-page-h2, toc-heading, "
-                "navigation-group-heading, or metadata-only"
+                "navigation-group-heading, private-reader, book-root-heading, or metadata-only"
             )
 
     for structure_id in sorted(elements.keys() - assignment_counts.keys()):
@@ -1527,6 +1658,9 @@ def _audit_source_structure_contract(
                 f"{owner_id}"
             )
 
+    ordered_deliveries = list(navigation_deliveries.values())
+    if len(set(ordered_deliveries)) != len(ordered_deliveries):
+        errors.append(f"{prefix}: navigation delivery is reused by multiple source structures")
     extra_nodes = node_ids - owned_nodes
     if extra_nodes:
         errors.append(
@@ -2112,6 +2246,7 @@ def _audit_source_element_contract(
                 reader_body,
                 errors,
                 vault=vault,
+                element=element,
                 local_only=manifest_schema == SCHEMA_VERSION
                 and isinstance(manifest.get("source_archive"), dict)
                 and manifest["source_archive"].get("privacy") == "local-only",
@@ -2120,7 +2255,7 @@ def _audit_source_element_contract(
                 label, owner_id, "runnable", signature, reader_deliveries, errors
             )
         elif kind in {"example", "code"} and support == "static-exception":
-            signature = _audit_static_exception(
+            static_signatures = _audit_static_exception(
                 label,
                 element,
                 assignment,
@@ -2130,10 +2265,14 @@ def _audit_source_element_contract(
                 manifest_schema=manifest_schema,
                 workflow_phase=workflow_phase,
                 reader_language=reader_languages.get(owner_id, ""),
+                vault=vault,
             )
-            _audit_unique_reader_delivery(
-                label, owner_id, "static-exception", signature, reader_deliveries, errors
-            )
+            for signature in (
+                static_signatures if isinstance(static_signatures, tuple) else (static_signatures,)
+            ):
+                _audit_unique_reader_delivery(
+                    label, owner_id, "static-exception", signature, reader_deliveries, errors
+                )
         elif kind == "example" and support == "not-applicable":
             signature = _audit_reader_span_assignment(
                 label,
@@ -2146,6 +2285,25 @@ def _audit_source_element_contract(
             _audit_unique_reader_delivery(
                 label, owner_id, kind, signature, reader_deliveries, errors
             )
+        elif kind in {"claim", "caution"} and delivery in {
+            "reader-heading",
+            "reader-span-occurrence",
+        }:
+            try:
+                if delivery == "reader-heading":
+                    target, signature = heading_delivery(
+                        assignment, element, manifest, pages, vault
+                    )
+                else:
+                    target = owner_id
+                    signature = repeated_span_delivery(
+                        assignment, element, manifest, reader_body, vault
+                    )
+                _audit_unique_reader_delivery(
+                    label, target, kind, signature, reader_deliveries, errors
+                )
+            except (WoonError, KeyError, TypeError, ValueError) as error:
+                errors.append(f"{label}: {error}")
         elif kind in {"claim", "caution"}:
             signature = _audit_reader_span_assignment(
                 label,
@@ -2222,19 +2380,25 @@ def _audit_supported_assignment(
     *,
     vault: Path,
     local_only: bool,
+    element: dict[str, Any] | None = None,
 ) -> str:
+    fields = {
+        "element_id",
+        "owner_id",
+        "delivery",
+        "run_language",
+        "run_block_index",
+        "verification_evidence",
+        "verification_sha256",
+    }
+    if "execution_kind" in assignment:
+        fields.add("execution_kind")
+        if assignment["execution_kind"] != "source-standalone":
+            errors.append(f"{label}: run execution_kind must be source-standalone")
     _audit_exact_fields(
         label,
         assignment,
-        {
-            "element_id",
-            "owner_id",
-            "delivery",
-            "run_language",
-            "run_block_index",
-            "verification_evidence",
-            "verification_sha256",
-        },
+        fields,
         errors,
     )
     if delivery != "run-block":
@@ -2263,6 +2427,13 @@ def _audit_supported_assignment(
     )
     if local_only:
         _audit_local_only_execution_evidence(label, assignment, vault, errors)
+        if element is not None and isinstance(block_index, int):
+            payload = _fence_body(reader_body, language, block_index)
+            if payload is not None:
+                try:
+                    upgraded_run_payload(vault, assignment, element, payload)
+                except WoonError as error:
+                    errors.append(f"{label}: {error}")
     return f"{language}#{block_index}" if language and isinstance(block_index, int) else ""
 
 
@@ -2327,7 +2498,8 @@ def _audit_static_exception(
     manifest_schema: object,
     workflow_phase: str,
     reader_language: str,
-) -> str:
+    vault: Path,
+) -> str | tuple[str, ...]:
     source_static_fields = {
         "element_id",
         "owner_id",
@@ -2342,7 +2514,11 @@ def _audit_static_exception(
         "original_test_evidence",
         "original_test_sha256",
     }
-    if set(assignment) == source_static_fields:
+    multipart_fields = source_static_fields - {"static_language", "static_block_index"} | {
+        "static_parts",
+        "source_payload_evidence",
+    }
+    if set(assignment) in (source_static_fields, multipart_fields):
         return _audit_static_source_assignment(
             label,
             element,
@@ -2351,6 +2527,7 @@ def _audit_static_exception(
             reader_body,
             errors,
             manifest_schema=manifest_schema,
+            vault=vault,
         )
 
     _audit_exact_fields(
@@ -2459,7 +2636,8 @@ def _audit_static_source_assignment(
     errors: list[str],
     *,
     manifest_schema: object,
-) -> str:
+    vault: Path,
+) -> str | tuple[str, ...]:
     """Accept an exact source code fence when running it would change its meaning."""
 
     if manifest_schema != SCHEMA_VERSION:
@@ -2468,19 +2646,31 @@ def _audit_static_source_assignment(
         errors.append(f"{label}: unsupported runnable requires delivery=static-exception")
         return ""
 
-    language = _text(assignment.get("static_language"))
-    block_index = assignment.get("static_block_index")
-    if not language or language.startswith("run-"):
-        errors.append(f"{label}.static_language must name a non-run code fence")
-    if not isinstance(block_index, int) or isinstance(block_index, bool) or block_index < 1:
-        errors.append(f"{label}.static_block_index must be a positive integer")
-        static_body = None
+    signatures: tuple[str, ...] = ()
+    if "static_parts" in assignment:
+        try:
+            static_body, signatures = static_parts_payload(assignment, reader_body)
+            validate_static_parts_source_evidence(vault, element, assignment, static_body)
+        except WoonError as error:
+            errors.append(f"{label}: {error}")
+            static_body = None
     else:
-        static_body = _fence_body(reader_body, language, block_index) if language else None
-        if static_body is None:
-            errors.append(
-                f"{label}: referenced reader static block does not exist: {language}#{block_index}"
-            )
+        language = _text(assignment.get("static_language"))
+        block_index = assignment.get("static_block_index")
+        if not language or language.startswith("run-"):
+            errors.append(f"{label}.static_language must name a non-run code fence")
+        if type(block_index) is not int or block_index < 1:
+            errors.append(f"{label}.static_block_index must be a positive integer")
+            static_body = None
+        else:
+            static_body = _fence_body(reader_body, language, block_index) if language else None
+            if static_body is None:
+                errors.append(
+                    f"{label}: referenced reader static block does not exist: "
+                    f"{language}#{block_index}"
+                )
+            else:
+                signatures = (f"{language}#{block_index}",)
     if static_body is not None:
         if not _code_block_has_executable_content(static_body):
             errors.append(f"{label}: referenced source code block is a comment-only placeholder")
@@ -2507,9 +2697,7 @@ def _audit_static_source_assignment(
         "original_test_sha256",
         errors,
     )
-    if not language or not isinstance(block_index, int):
-        return ""
-    return f"{language}#{block_index}"
+    return signatures
 
 
 def _audit_static_harness_fidelity(
@@ -2837,6 +3025,7 @@ def _audit_book_map_ui(
 ) -> None:
     """Verify the rendered managed map, not only its source metadata contract."""
 
+    parent_ids = {_canonical_parent(metadata.get("parent")) for _, metadata, _ in pages.values()}
     for canonical_id, (path, metadata, body) in pages.items():
         if canonical_id != book_id and not canonical_id.startswith(book_id + "/"):
             continue
@@ -2878,9 +3067,22 @@ def _audit_book_map_ui(
                 continue
             group_label = _text(group.get("label"))
             children = group.get("children")
+            single_leaf_link = False
+            if (
+                canonical_id != book_id
+                and not section_reader_map
+                and isinstance(children, list)
+                and len(children) == 1
+                and (child := pages.get(_text(children[0]))) is not None
+            ):
+                rows = render_book_toc_group(
+                    group_label,
+                    ((_text(child[1].get("title")), "", _text(children[0]) in parent_ids),),
+                )
+                single_leaf_link = not any(row.startswith("## ") for row in rows)
             if not group_label:
                 errors.append(f"{label}.label is required")
-            elif not section_reader_map:
+            elif not section_reader_map and not single_leaf_link:
                 expected_group_labels.append(group_label)
             if group_label in {
                 "하위 키워드",
@@ -2910,7 +3112,7 @@ def _audit_book_map_ui(
                 _, child_metadata, _ = actual
                 if _canonical_parent(child_metadata.get("parent")) != canonical_id:
                     errors.append(f"{label}: UI child is not direct: {child_id}")
-                if _text(child_metadata.get("title")) == group_label:
+                if _text(child_metadata.get("title")) == group_label and not single_leaf_link:
                     errors.append(
                         f"{label}: duplicate-title wrapper child is forbidden: {child_id}"
                     )
@@ -3224,6 +3426,7 @@ def _lane_audits(errors: list[str]) -> dict[str, BookCoverageLaneAudit]:
                 "run_block",
                 "static-exception",
                 "static_language",
+                "static_parts",
                 "static_block",
                 "test_evidence",
                 "test_sha256",
@@ -3305,3 +3508,419 @@ def _lane_audits(errors: list[str]) -> dict[str, BookCoverageLaneAudit]:
         )
         for lane, lane_errors in grouped.items()
     }
+
+
+def navigation_group_scope_nodes(base: dict[str, Any], root_id: str) -> frozenset[str]:
+    """Resolve a virtual chapter scope from its pinned source chapter.
+
+    A path prefix alone is not evidence of a chapter. Its complete node set
+    must belong to exactly one source chapter delivered by its book root.
+    Reader proof is checked by the coverage audit, not by this node resolver.
+    An empty result means no safe virtual scope was found.
+    """
+
+    book_id = base.get("book_id")
+    elements = base.get("source_structure_elements")
+    assignments = base.get("source_structure_assignments")
+    nodes = base.get("nodes")
+    if (
+        not isinstance(book_id, str)
+        or not root_id.startswith(book_id + "/")
+        or not isinstance(elements, list)
+        or not isinstance(assignments, list)
+        or not isinstance(nodes, list)
+    ):
+        return frozenset()
+    by_structure: dict[str, dict[str, Any]] = {}
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            return frozenset()
+        identity = assignment.get("structure_id")
+        if not isinstance(identity, str) or identity in by_structure:
+            return frozenset()
+        by_structure[identity] = assignment
+    node_ids = {
+        node_id
+        for node in nodes
+        if isinstance(node, dict)
+        and isinstance(node_id := node.get("canonical_id"), str)
+        and node_id.strip()
+    }
+    if len(node_ids) != len(nodes):
+        return frozenset()
+    if root_id in node_ids:
+        return frozenset()
+    expected = {
+        node_id
+        for node_id in node_ids
+        if isinstance(node_id, str) and node_id.startswith(root_id + "/")
+    }
+    if not expected:
+        return frozenset()
+    matches: list[frozenset[str]] = []
+    chapter_order = 0
+    for index, element in enumerate(elements):
+        if not isinstance(element, dict) or element.get("kind") != "chapter":
+            continue
+        chapter_order += 1
+        identity = element.get("structure_id")
+        if not isinstance(identity, str):
+            return frozenset()
+        assignment = by_structure.get(identity, {})
+        order = assignment.get("source_order")
+        disposition = assignment.get("disposition")
+        if (
+            assignment.get("owner_id") != book_id
+            or not element.get("title")
+            or not isinstance(order, int)
+            or isinstance(order, bool)
+        ):
+            continue
+        if disposition == "navigation-group-heading":
+            if assignment.get("label") != element.get("title") or order != chapter_order:
+                continue
+        elif disposition == "private-reader":
+            if order != index + 1:
+                continue
+        else:
+            continue
+        children: list[str] = []
+        valid = True
+        for child_index, child in enumerate(elements[index + 1 :], index + 2):
+            if not isinstance(child, dict):
+                valid = False
+                break
+            if child.get("kind") in {"chapter", "part", "appendix", "back-matter"}:
+                break
+            child_identity = child.get("structure_id")
+            if not isinstance(child_identity, str):
+                valid = False
+                break
+            delivery = by_structure.get(child_identity, {})
+            if delivery.get("disposition") in {"book-root-heading", "private-reader"}:
+                if (
+                    delivery.get("owner_id") != book_id
+                    or type(delivery.get("source_order")) is not int
+                    or delivery.get("source_order") != child_index
+                ):
+                    valid = False
+                    break
+                continue
+            if delivery.get("disposition") != "canonical-node":
+                valid = False
+                break
+            child_id = delivery.get("canonical_id")
+            if not isinstance(child_id, str) or child_id not in expected:
+                valid = False
+                break
+            children.append(child_id)
+        if valid and len(children) == len(set(children)) and set(children) == expected:
+            matches.append(frozenset(children))
+    return matches[0] if len(matches) == 1 else frozenset()
+
+
+def _audit_navigation_delivery(
+    vault: Path | None,
+    book_id: str,
+    assignment: dict[str, Any],
+    element: dict[str, Any],
+    pages: dict[str, tuple[Path, dict[str, Any], str]],
+    *,
+    source_order: int,
+) -> tuple[int, str, int]:
+    """Validate navigation delivery; this does not grant content coverage."""
+    disposition = assignment.get("disposition")
+    fields = {"structure_id", "disposition", "owner_id", "heading", "source_order"}
+    if disposition == "private-reader":
+        fields |= {"reader_path", "reader_anchor", "reader_sha256", "body_sha256"}
+        if "heading_review" in assignment:
+            fields.add("heading_review")
+    if set(assignment) != fields or assignment.get("owner_id") != book_id:
+        raise WoonError("navigation delivery requires the exact book root and proof fields")
+    if (
+        type(assignment.get("source_order")) is not int
+        or assignment["source_order"] != source_order
+    ):
+        raise WoonError("navigation delivery source_order must match the source inventory position")
+    root = pages.get(book_id)
+    if (
+        root is None
+        or root[1].get("entity_kind") != "book"
+        or root[1].get("publish") is not False
+        or root[1].get("access") != "local-only"
+    ):
+        raise WoonError("navigation delivery requires an existing private book root")
+    heading = assignment.get("heading")
+    title = _text(element.get("title"))
+    if not isinstance(heading, str) or not title:
+        raise WoonError("navigation delivery requires an exact source heading")
+    root_body = _reader_body(root[2])
+    if disposition == "book-root-heading":
+        if heading not in (f"## {title}", f"### {title}"):
+            raise WoonError("book-root heading must be the exact source H2 or H3")
+        if root_body.splitlines().count(heading) != 1:
+            raise WoonError("book-root heading must occur exactly once")
+        return root_body.splitlines().index(heading), "", 0
+    if vault is None:
+        raise WoonError("private reader verification requires the Vault root")
+    relative = assignment.get("reader_path")
+    candidate = Path(relative) if isinstance(relative, str) else Path()
+    if (
+        not isinstance(relative, str)
+        or not relative.startswith("private/")
+        or candidate.suffix != ".md"
+        or candidate.as_posix() != relative
+        or any(part in {".", ".."} for part in candidate.parts)
+        or any(char in relative for char in "\\#?\x00")
+    ):
+        raise WoonError("private reader must be one exact private Markdown path")
+    if any((vault / part).is_symlink() for part in (candidate, *candidate.parents)):
+        raise WoonError("private reader must not use symlinks")
+    try:
+        raw = (vault / candidate).read_bytes()
+    except OSError as error:
+        raise WoonError("private reader is missing") from error
+    if hashlib.sha256(raw).hexdigest() != assignment.get("reader_sha256"):
+        raise WoonError("private reader SHA-256 differs")
+    text = raw.decode("utf-8")
+    # Raw private book readers have no Wiki frontmatter. Their existing private
+    # path and private root own visibility; do not rewrite source bytes to add it.
+    metadata, body = split_markdown(text) if text.startswith("---\n") else ({}, text)
+    if metadata and (
+        metadata.get("publish") is not False
+        or metadata.get("access") != "local-only"
+        or metadata.get("publication_state", "private") != "private"
+    ):
+        raise WoonError("private reader publication boundary differs")
+    match_heading = re.fullmatch(r"(#{1,6}) ([^\n]+)", heading)
+    if match_heading is None:
+        raise WoonError("private reader requires an actual Markdown heading")
+    reader_title = match_heading.group(2)
+    if reader_title != title:
+        review = assignment.get("heading_review")
+        source_number = re.match(r"^\d+(?:\.\d+)*\b", title)
+        reader_number = re.match(r"^\d+(?:\.\d+)*\b", reader_title)
+        if (
+            not isinstance(review, dict)
+            or set(review) != {"source_title", "reader_title", "basis"}
+            or review.get("source_title") != title
+            or review.get("reader_title") != reader_title
+            or not _text(review.get("basis"))
+            or source_number is None
+            or reader_number is None
+            or source_number.group() != reader_number.group()
+        ):
+            raise WoonError("different reader title requires an exact reviewed numbered mapping")
+    elif "heading_review" in assignment:
+        raise WoonError("heading_review is only allowed for differing source and reader titles")
+    lines = body.splitlines()
+    actual_headings: list[tuple[int, str]] = []
+    fence = ""
+    for index, line in enumerate(lines):
+        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if marker:
+            run = marker.group(1)
+            if not fence:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence):
+                fence = ""
+        elif not fence and re.match(r"^#{1,6} ", line):
+            actual_headings.append((index, line))
+    positions = [index for index, line in actual_headings if line == heading]
+    if len(positions) != 1:
+        raise WoonError("private reader heading must occur exactly once outside code fences")
+    start = positions[0]
+    level = len(match_heading.group(1))
+    end = next(
+        (
+            index
+            for index, line in actual_headings
+            if index > start and len(line.split(" ", 1)[0]) <= level
+        ),
+        len(lines),
+    )
+    delivered = "\n".join(lines[start + 1 : end]).strip()
+    if not delivered or hashlib.sha256(delivered.encode()).hexdigest() != assignment.get(
+        "body_sha256"
+    ):
+        raise WoonError("private reader section body is missing or its SHA-256 differs")
+    visible = re.sub(r"<!--[\s\S]*?-->", "", delivered)
+    if not any(
+        line.strip()
+        and not re.fullmatch(
+            r"\s*(?:#{1,6}\s+.+|[-*]\s+(?:\[\[[^\]]+\]\]|\[[^\]]+\]\([^)]+\)))\s*",
+            line,
+        )
+        for line in visible.splitlines()
+    ):
+        raise WoonError("private reader section contains navigation only")
+    anchor = assignment.get("reader_anchor")
+    if not isinstance(anchor, str) or (anchor and anchor != reader_title):
+        raise WoonError("private reader anchor must be empty or the exact delivered heading text")
+    if not anchor and level != 1:
+        raise WoonError("a section below H1 requires its explicit reader heading anchor")
+    # Reuse the shared reader target policy for each matching link, including anchors.
+    links = []
+    pattern = r"(?:#{2,3} |\s*- )?(\[[^\]\n]+\]\((<[^<>\n]+>|[^()\n]+)\))"
+    for index, line in enumerate(root_body.splitlines()):
+        match = re.fullmatch(pattern, line)
+        if match is None:
+            continue
+        raw_target = match.group(2)
+        target = unquote(raw_target[1:-1] if raw_target.startswith("<") else raw_target)
+        location, separator, target_anchor = target.partition("#")
+        if (
+            target_anchor != anchor
+            or bool(separator) != bool(anchor)
+            or (root[0].parent / location).resolve() != (vault / candidate).resolve()
+        ):
+            continue
+        verified = private_reader_target(vault, root[0], root[1], match.group(1))
+        if verified == (vault / candidate).resolve():
+            links.append(index)
+    if len(links) != 1:
+        raise WoonError("private reader delivery must be linked exactly once from its book root")
+    return links[0], relative, start
+
+
+def static_parts_payload(
+    assignment: dict[str, Any], reader_body: str
+) -> tuple[str, tuple[str, ...]]:
+    """Read ordered static fences and verify each part and the joined payload.
+
+    A part addresses one page-local language/index pair. No source IDs, code
+    bytes, classifications or execution receipts are created or changed here.
+    Invalid shape, ordering, missing blocks or changed hashes raise WoonError.
+    """
+    parts = assignment.get("static_parts")
+    if (
+        not isinstance(parts, list)
+        or len(parts) < 2
+        or "static_language" in assignment
+        or "static_block_index" in assignment
+    ):
+        raise WoonError("static_parts requires at least two parts instead of single-fence fields")
+    fences: dict[tuple[str, int], tuple[int, str]] = {}
+    counts: dict[str, int] = {}
+    for match in _FENCE_BLOCK.finditer(reader_body):
+        language = match["language"]
+        counts[language] = counts.get(language, 0) + 1
+        fences[(language, counts[language])] = (match.start(), match["body"])
+    payload: list[str] = []
+    signatures: list[str] = []
+    previous_position = -1
+    for part in parts:
+        if not isinstance(part, dict) or set(part) != {"language", "block_index", "body_sha256"}:
+            raise WoonError("static_parts entries require language, block_index and body_sha256")
+        language, index = part["language"], part["block_index"]
+        if (
+            not isinstance(language, str)
+            or re.fullmatch(r"[A-Za-z0-9_+-]+", language) is None
+            or language.startswith("run-")
+            or type(index) is not int
+            or index < 1
+        ):
+            raise WoonError("static_parts must reference non-run languages and positive indices")
+        fence = fences.get((language, index))
+        if fence is None:
+            raise WoonError("static_parts references a missing reader fence")
+        position, body = fence
+        if position <= previous_position:
+            raise WoonError("static_parts reader positions must be ordered and unique")
+        if not body.strip() or hashlib.sha256(body.encode()).hexdigest() != part["body_sha256"]:
+            raise WoonError("static_parts body_sha256 differs from a non-empty exact fence")
+        previous_position = position
+        payload.append(body)
+        signatures.append(f"{language}#{index}")
+    joined = "".join(payload)
+    if hashlib.sha256(joined.encode()).hexdigest() != assignment.get("static_body_sha256"):
+        raise WoonError("static_parts joined payload differs from static_body_sha256")
+    return joined, tuple(signatures)
+
+
+def validate_static_parts_source_evidence(
+    vault: Path, element: dict[str, Any], assignment: dict[str, Any], payload: str
+) -> None:
+    """Bind displayed parts to one hash-pinned, reviewed extraction record.
+
+    This reads existing source-blocks evidence; it never re-extracts the book
+    or treats print callouts in an older reader as executable source bytes.
+    """
+    proof = assignment.get("source_payload_evidence")
+    if isinstance(proof, dict) and set(proof) == {"source_mapping_evidence"}:
+        static_parts_source_mapping(
+            vault, proof["source_mapping_evidence"], element, assignment["owner_id"], payload
+        )
+        return
+    if not isinstance(proof, dict) or set(proof) != {
+        "relative_path",
+        "sha256",
+        "block_id",
+        "canonical_locator",
+        "extracted_locator",
+    }:
+        raise WoonError("static_parts source_payload_evidence fields are invalid")
+    relative, digest, block_id = proof["relative_path"], proof["sha256"], proof["block_id"]
+    if (
+        not isinstance(relative, str)
+        or not relative.startswith("private/")
+        or "\\" in relative
+        or Path(relative).as_posix() != relative
+        or ".." in Path(relative).parts
+        or not isinstance(digest, str)
+        or _LOWER_SHA256.fullmatch(digest) is None
+        or not isinstance(block_id, str)
+        or not block_id
+    ):
+        raise WoonError(
+            "static_parts source evidence requires a private Vault path, hash and block ID"
+        )
+    parts = Path(relative).parts
+    if any((vault / Path(*parts[:i])).is_symlink() for i in range(1, len(parts) + 1)):
+        raise WoonError("static_parts source evidence must not traverse symlinks")
+    try:
+        raw = (vault / relative).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise WoonError("static_parts source evidence file hash differs")
+        records = json.loads(raw)
+    except (OSError, ValueError) as error:
+        raise WoonError("static_parts source evidence file is unreadable") from error
+    if not isinstance(records, list):
+        raise WoonError("static_parts source evidence must contain source-block records")
+    matches = [row for row in records if isinstance(row, dict) and row.get("id") == block_id]
+    if len(matches) != 1:
+        raise WoonError("static_parts source evidence block ID must occur exactly once")
+    record = matches[0]
+    markdown = record.get("english_md")
+    canonical, extracted = proof["canonical_locator"], proof["extracted_locator"]
+    same_source = canonical == extracted
+    if isinstance(canonical, str) and isinstance(extracted, str) and not same_source:
+        old_address = re.fullmatch(r"(.+):(block|dom-child)-[0-9]+", canonical)
+        new_address = re.fullmatch(r"(.+):(block|dom-child)-[0-9]+", extracted)
+        same_source = bool(
+            old_address
+            and new_address
+            and old_address[1] == new_address[1]
+            and old_address[2] != new_address[2]
+        )
+    if (
+        not isinstance(canonical, str)
+        or not canonical
+        or not same_source
+        or canonical != element.get("source_locator")
+        or extracted != record.get("source_locator")
+        or record.get("kind") != "code"
+        or record.get("source_html_sha256") != element.get("source_sha256")
+        or not isinstance(markdown, str)
+        or hashlib.sha256(markdown.encode()).hexdigest() != record.get("english_md_sha256")
+    ):
+        raise WoonError("static_parts source record identity or Markdown hash differs")
+    source_parts: list[str] = []
+    cursor = 0
+    for fence in _FENCE_BLOCK.finditer(markdown):
+        if markdown[cursor : fence.start()].strip():
+            raise WoonError("static_parts source code record contains uncovered prose")
+        source_parts.append(fence["body"])
+        cursor = fence.end()
+    if not source_parts or markdown[cursor:].strip() or "".join(source_parts) != payload:
+        raise WoonError("static_parts payload differs from the pinned source extraction")

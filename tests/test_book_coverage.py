@@ -2485,42 +2485,8 @@ def test_book_coverage_accepts_source_pinned_static_code_without_synthetic_harne
     tmp_path: Path,
 ) -> None:
     vault = tmp_path / "vault"
-    target, manifest = _verified_fixture(vault)
-    _write_verified_root_map(vault)
-    _upgrade_manifest_to_v7(vault, manifest)
-    leaf = vault / "wiki/books/kotlin/chapter-01.md"
-    static_body = "externalCall(42)\n"
-    leaf.write_text(
-        leaf.read_text(encoding="utf-8").replace(
-            "```run-kotlin\nfun main() = println(2)\n```",
-            f"```kotlin\n{static_body}```",
-        ),
-        encoding="utf-8",
-    )
-    elements = manifest["source_elements"]
+    target, manifest, leaf, _ = _source_pinned_static_fixture(vault)
     assignments = manifest["source_element_assignments"]
-    nodes = manifest["nodes"]
-    assert isinstance(elements, list) and isinstance(assignments, list)
-    assert isinstance(nodes, list) and isinstance(nodes[0], dict)
-    assert isinstance(elements[2], dict) and isinstance(assignments[2], dict)
-    elements[2]["runnable_support"] = "static-exception"
-    assignments[2] = {
-        "element_id": elements[2]["element_id"],
-        "owner_id": "books/kotlin/chapter-01",
-        "delivery": "static-exception",
-        "static_language": "kotlin",
-        "static_block_index": 1,
-        "static_body_sha256": hashlib.sha256(static_body.encode("utf-8")).hexdigest(),
-        "exception_reason_code": "dependency",
-        "runnable_required": False,
-        "source_locator": elements[2]["source_locator"],
-        "source_sha256": elements[2]["source_sha256"],
-        "original_test_evidence": "evidence/source-code-inventory.json",
-        "original_test_sha256": "d" * 64,
-    }
-    nodes[0]["runnable"] = {"expected": 1, "verified": 1}
-    target.write_text(json.dumps(manifest), encoding="utf-8")
-
     accepted = audit_book_coverage(vault)
     assert accepted.complete
     assert "synthetic harness" not in leaf.read_text(encoding="utf-8")
@@ -3067,4 +3033,177 @@ def test_book_coverage_rejects_generated_semantic_ledger_and_broken_korean(
     assert any(
         "reader body contains workflow or completion metadata" in error
         for error in report.quality.errors
+    )
+
+
+def _source_pinned_static_fixture(vault: Path):
+    target, manifest = _verified_fixture(vault)
+    _write_verified_root_map(vault)
+    _upgrade_manifest_to_v7(vault, manifest)
+    leaf = vault / "wiki/books/kotlin/chapter-01.md"
+    static_body = "externalCall(42)\notherCall();\n"
+    leaf.write_text(
+        leaf.read_text(encoding="utf-8").replace(
+            "```run-kotlin\nfun main() = println(2)\n```",
+            f"```kotlin\n{static_body}```",
+        ),
+        encoding="utf-8",
+    )
+    elements = manifest["source_elements"]
+    assignments = manifest["source_element_assignments"]
+    nodes = manifest["nodes"]
+    assert isinstance(elements, list) and isinstance(assignments, list)
+    assert isinstance(nodes, list) and isinstance(nodes[0], dict)
+    assert isinstance(elements[2], dict) and isinstance(assignments[2], dict)
+    elements[2]["runnable_support"] = "static-exception"
+    assignments[2] = {
+        "element_id": elements[2]["element_id"],
+        "owner_id": "books/kotlin/chapter-01",
+        "delivery": "static-exception",
+        "static_language": "kotlin",
+        "static_block_index": 1,
+        "static_body_sha256": hashlib.sha256(static_body.encode("utf-8")).hexdigest(),
+        "exception_reason_code": "dependency",
+        "runnable_required": False,
+        "source_locator": elements[2]["source_locator"],
+        "source_sha256": elements[2]["source_sha256"],
+        "original_test_evidence": "evidence/source-code-inventory.json",
+        "original_test_sha256": "d" * 64,
+    }
+    nodes[0]["runnable"] = {"expected": 1, "verified": 1}
+    target.write_text(json.dumps(manifest), encoding="utf-8")
+
+    return target, manifest, leaf, static_body
+
+
+def test_ordered_static_parts_keep_one_source_and_all_payload_bytes(tmp_path: Path) -> None:
+    import copy
+
+    vault = tmp_path / "vault"
+    target, manifest, leaf, original = _source_pinned_static_fixture(vault)
+    (vault / "wiki/private/_sources").rename(vault / "private")
+    archive = manifest["source_archive"]
+    archive["relative_path"] = archive["relative_path"].replace(
+        "wiki/private/_sources/",
+        "private/",
+    )
+    previous = copy.deepcopy(manifest)
+    assignments = manifest["source_element_assignments"]
+    assignment = assignments[2]
+    assignment.pop("static_language")
+    assignment.pop("static_block_index")
+    codes = original.splitlines(keepends=True)
+    assignment["static_parts"] = [
+        {
+            "language": language,
+            "block_index": 1,
+            "body_sha256": hashlib.sha256(code.encode()).hexdigest(),
+        }
+        for language, code in zip(("kotlin", "java"), codes, strict=True)
+    ]
+    markdown = "```kotlin\n" + original + "```"
+    evidence = vault / "private/source-blocks.json"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "mixed-code",
+                    "kind": "code",
+                    "source_locator": manifest["source_elements"][2]["source_locator"],
+                    "source_html_sha256": manifest["source_elements"][2]["source_sha256"],
+                    "english_md": markdown,
+                    "english_md_sha256": hashlib.sha256(markdown.encode()).hexdigest(),
+                }
+            ]
+        )
+    )
+    assignment["source_payload_evidence"] = {
+        "relative_path": "private/source-blocks.json",
+        "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        "block_id": "mixed-code",
+        "canonical_locator": assignment["source_locator"],
+        "extracted_locator": assignment["source_locator"],
+    }
+    rendered = leaf.read_text().replace(
+        "```kotlin\n" + original + "```",
+        "```kotlin\n" + codes[0] + "```\n\n```java\n" + codes[1] + "```",
+    )
+    leaf.write_text(rendered)
+    target.write_text(json.dumps(manifest))
+    accepted = audit_book_coverage(vault)
+    assert accepted.complete, accepted.errors
+    assert manifest["source_elements"] == previous["source_elements"]
+    assert len(assignments) == len(previous["source_element_assignments"])
+    assert (
+        assignment["static_body_sha256"]
+        == (previous["source_element_assignments"][2]["static_body_sha256"])
+    )
+
+    valid = copy.deepcopy(manifest)
+    for fault in (
+        "order",
+        "duplicate",
+        "missing",
+        "part-hash",
+        "joined-hash",
+        "part-reuse",
+        "proof-hash",
+        "proof-path",
+        "proof-block",
+        "proof-locator",
+    ):
+        candidate = copy.deepcopy(valid)
+        changed = candidate["source_element_assignments"][2]
+        parts = changed["static_parts"]
+        if fault == "order":
+            parts.reverse()
+        elif fault == "duplicate":
+            parts[1] = copy.deepcopy(parts[0])
+        elif fault == "missing":
+            parts[1]["block_index"] = 99
+        elif fault == "part-hash":
+            parts[1]["body_sha256"] = "0" * 64
+        elif fault == "joined-hash":
+            changed["static_body_sha256"] = "0" * 64
+        elif fault.startswith("proof-"):
+            key, value = {
+                "proof-hash": ("sha256", "0" * 64),
+                "proof-path": ("relative_path", "private/../escape.json"),
+                "proof-block": ("block_id", "wrong-code"),
+                "proof-locator": ("extracted_locator", "source://a-different-book:block-1"),
+            }[fault]
+            changed["source_payload_evidence"][key] = value
+        else:
+            # A second original element cannot claim either fence, even if its
+            # own joined payload would otherwise be valid.
+            candidate["source_elements"][1]["runnable_support"] = "static-exception"
+            other = copy.deepcopy(changed)
+            other["element_id"] = candidate["source_elements"][1]["element_id"]
+            other["source_locator"] = candidate["source_elements"][1]["source_locator"]
+            other["source_sha256"] = candidate["source_elements"][1]["source_sha256"]
+            candidate["source_element_assignments"][1] = other
+        target.write_text(json.dumps(candidate))
+        rejected = audit_book_coverage(vault)
+        assert not rejected.complete
+        if fault == "part-reuse":
+            assert any("reuse the same reader delivery" in error for error in rejected.errors)
+        else:
+            assert any("static_parts" in error for error in rejected.errors)
+    # Rewriting a part and all display hashes cannot change the frozen source
+    # payload; the extraction evidence remains an independent input.
+    changed_source = copy.deepcopy(valid)
+    changed = changed_source["source_element_assignments"][2]
+    replacement_code = "differentCall();\n"
+    changed["static_parts"][1]["body_sha256"] = hashlib.sha256(
+        replacement_code.encode(),
+    ).hexdigest()
+    changed["static_body_sha256"] = hashlib.sha256(
+        (codes[0] + replacement_code).encode(),
+    ).hexdigest()
+    leaf.write_text(rendered.replace(codes[1], replacement_code))
+    target.write_text(json.dumps(changed_source))
+    rejected = audit_book_coverage(vault)
+    assert any(
+        "payload differs from the pinned source extraction" in error for error in rejected.errors
     )

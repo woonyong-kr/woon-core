@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from woon_core.knowledge.wiki_tree import (
     BOOK_READER_NAVIGATION_END,
     BOOK_READER_NAVIGATION_START,
@@ -13,6 +15,7 @@ from woon_core.knowledge.wiki_tree import (
     load_wiki_tree,
     prepare_wiki_tree_refresh,
     preserve_generated_wiki_views,
+    render_book_toc_group,
     render_wiki_tree_view,
     split_markdown,
     strip_generated_wiki_views,
@@ -1077,6 +1080,23 @@ def test_book_chapter_shows_only_direct_toc_depth_without_latest_descendants(
 def test_book_root_and_chapter_render_source_topics_as_h2_with_direct_links(
     tmp_path: Path,
 ) -> None:
+    leaf = (("1.1 LLM이란?", "[1.1 LLM이란?](1-1.md)", False),)
+    assert render_book_toc_group("1.1 LLM이란?", leaf) == ("- [1.1 LLM이란?](1-1.md)",)
+    children = (("1.5.1 가져오기", "[1.5.1 가져오기](1-5-1.md)", False),)
+    assert render_book_toc_group("1.5 넘파이", children) == (
+        "## 1.5 넘파이",
+        "- [1.5.1 가져오기](1-5-1.md)",
+    )
+    owner = (("1.5 넘파이", "[1.5 넘파이](1-5.md)", True),)
+    assert render_book_toc_group("1.5 넘파이", owner + children) == (
+        "## [1.5 넘파이](1-5.md)",
+        "- [1.5.1 가져오기](1-5-1.md)",
+    )
+    assert render_book_toc_group("1.5 넘파이", owner + children, owner_has_body=False) == (
+        "## 1.5 넘파이",
+        "- [1.5.1 가져오기](1-5-1.md)",
+    )
+
     _write_page(
         tmp_path,
         "wiki/README.md",
@@ -1192,9 +1212,10 @@ def test_book_root_and_chapter_render_source_topics_as_h2_with_direct_links(
     assert "- [[wiki/books/software/refactoring/chapter-02|2장]]" in book
     assert "## 부록\n- [[wiki/books/software/refactoring/appendix-a|부록 A]]" in book
     assert (
-        "## 1.1 시작점\n- [[wiki/books/software/refactoring/chapter-01/1-1-start|1.1.1 시작]]"
+        "## [[wiki/books/software/refactoring/chapter-01/1-1|1.1 시작점]]\n"
+        "- [[wiki/books/software/refactoring/chapter-01/1-1-start|1.1.1 시작]]"
     ) in chapter
-    assert "[[wiki/books/software/refactoring/chapter-01/1-1|1.1 시작점]]" not in chapter
+    assert "- [[wiki/books/software/refactoring/chapter-01/1-1|1.1 시작점]]" not in chapter
     assert ("- [[wiki/books/software/refactoring/chapter-01/1-1-tests|1.1.2 테스트]]") in chapter
     assert "## 하위 키워드" not in book
     assert "## 하위 키워드" not in chapter
@@ -1205,6 +1226,110 @@ def test_book_root_and_chapter_render_source_topics_as_h2_with_direct_links(
     rerun = prepare_wiki_tree_refresh(tmp_path)
     assert rerun.issues == ()
     assert rerun.changed_count == 0
+
+    # Opt in one book only; preserve the source and note layer through replay.
+    book_path = tmp_path / "wiki/books/software/refactoring.md"
+    book_path.write_text(
+        book_path.read_text().replace(
+            "entity_kind: book\n", "entity_kind: book\nreader_leaf_navigation: true\n"
+        )
+    )
+    prefix = "wiki/books/software/refactoring/"
+    reader_paths = [
+        prefix + value + ".md"
+        for value in (
+            "chapter-01/1-1",
+            "chapter-01/1-1-start",
+            "chapter-01/1-1-tests",
+            "appendix-a",
+        )
+    ]
+    source_bodies = {}
+    for relative in reader_paths:
+        path = tmp_path / relative
+        path.write_text(
+            path.read_text().rstrip() + "\n\n본문.[^personal]\n\n"
+            "```kotlin\nval keep = 1\n```\n\n[^personal]: 개인 설명.\n"
+        )
+        source_bodies[relative] = strip_generated_wiki_views(path.read_text())
+    footers = prepare_wiki_tree_refresh(tmp_path)
+    assert footers.issues == ()
+    marker = "<!-- woon-book-reader-footer:start -->"
+    assert sum(marker in value.decode() for value in footers.pages.values()) == 4
+    for relative in reader_paths:
+        rendered_leaf = footers.pages[tmp_path / relative].decode()
+        assert strip_generated_wiki_views(rendered_leaf) == source_bodies[relative]
+        assert (
+            preserve_generated_wiki_views(rendered_leaf, source_bodies[relative]) == rendered_leaf
+        )
+        assert rendered_leaf.index(marker) > rendered_leaf.index("[^personal]: 개인 설명.")
+    first = footers.pages[tmp_path / reader_paths[0]].decode().split(marker)[1]
+    final = footers.pages[tmp_path / reader_paths[-1]].decode().split(marker)[1]
+    assert "←" not in first and "1.1.1 시작 →" in first
+    assert "→" not in final and "← 1.1.2 테스트" in final
+    assert "[[wiki/books/software/refactoring|책 목차]]" in final
+    assert marker not in footers.pages[book_path].decode()
+    assert marker not in footers.pages[tmp_path / prefix / "chapter-01.md"].decode()
+    apply_wiki_tree_refresh(tmp_path, footers)
+    assert prepare_wiki_tree_refresh(tmp_path).changed_count == 0
+
+    # A single-leaf refresh still derives its neighbors from the whole book.
+    selected = prepare_wiki_tree_refresh(
+        tmp_path, canonical_prefix="books/refactoring-2e/chapter-01/1-1-tests"
+    )
+    assert selected.issues == () and len(selected.pages) == 1
+    assert selected.pages[tmp_path / reader_paths[2]] == footers.pages[tmp_path / reader_paths[2]]
+
+    # An invalid opt-in elsewhere must not block this book or an unrelated genre.
+    broken = "wiki/books/software/broken.md"
+    _write_page(
+        tmp_path,
+        broken,
+        title="다른 책",
+        canonical_id="books/broken",
+        node_kind="entity",
+        parent="[[wiki/books/software|소프트웨어]]",
+        keywords=("다른 책",),
+        extra=(
+            "entity_kind: book\nreader_leaf_navigation: true\n"
+            "navigation_groups:\n- label: 본문\n  children: [books/broken/missing]\n"
+        ),
+    )
+    assert prepare_wiki_tree_refresh(tmp_path, canonical_prefix="books/refactoring-2e").issues == ()
+    assert prepare_wiki_tree_refresh(tmp_path, canonical_prefix="README").issues == ()
+    (tmp_path / broken).unlink()
+
+    # Headings and either link syntax alone are not reader content.
+    shell_path = tmp_path / reader_paths[1]
+    shell_original = shell_path.read_text()
+    for shell in (
+        "## 소제목만 존재",
+        "[[private/long-resource-original-archive|English]]",
+        "[English](private/long-resource-original-archive.md)",
+    ):
+        shell_path.write_text(shell_original.split("\n# ", 1)[0] + "\n# 절 제목\n\n" + shell + "\n")
+        shells = prepare_wiki_tree_refresh(tmp_path, canonical_prefix="books/refactoring-2e")
+        assert shells.issues == ()
+        assert marker not in shells.pages[shell_path].decode()
+        next_link = shells.pages[tmp_path / reader_paths[0]].decode().split(marker)[1]
+        assert "1.1.2 테스트 →" in next_link and "1.1.1 시작" not in next_link
+    shell_path.write_text(shell_original)
+
+    # Removing the opt-in removes derived links without changing reader payloads.
+    book_path.write_text(book_path.read_text().replace("reader_leaf_navigation: true\n", ""))
+    disabled = prepare_wiki_tree_refresh(tmp_path)
+    assert disabled.issues == ()
+    for relative in reader_paths:
+        assert disabled.pages[tmp_path / relative].decode() == source_bodies[relative]
+    book_path.write_text(
+        book_path.read_text().replace(
+            "entity_kind: book\n", "entity_kind: book\nreader_leaf_navigation: yes-please\n"
+        )
+    )
+    invalid = prepare_wiki_tree_refresh(tmp_path)
+    assert any(
+        "reader_leaf_navigation requires a boolean on a book root" in e for e in invalid.issues
+    )
 
 
 def test_nested_book_navigation_map_renders_h2_topics_with_direct_links(
@@ -1309,15 +1434,10 @@ def test_nested_book_navigation_map_renders_h2_topics_with_direct_links(
 
     assert report.issues == ()
     nested = report.pages[tmp_path / "wiki/books/software/llm/chapter-03/3-3.md"].decode("utf-8")
-    assert (
-        "## 3.3.1 단어 단위 토큰화\n"
-        "- [[wiki/books/software/llm/chapter-03/3-3/3-3-1|3.3.1 단어 단위 토큰화]]"
-    ) in nested
-    assert (
-        "## 3.3.2 부분 단어 토큰화\n"
-        "- [[wiki/books/software/llm/chapter-03/3-3/3-3-2|3.3.2 부분 단어 토큰화]]"
-    ) in nested
+    assert ("- [[wiki/books/software/llm/chapter-03/3-3/3-3-1|3.3.1 단어 단위 토큰화]]") in nested
+    assert ("- [[wiki/books/software/llm/chapter-03/3-3/3-3-2|3.3.2 부분 단어 토큰화]]") in nested
     assert "- 3.3.1 단어 단위 토큰화" not in nested
+    assert "## 3.3.1" not in nested and "## 3.3.2" not in nested
 
 
 def test_book_chapter_interleaves_source_body_and_deep_navigation_in_source_order(
@@ -1675,8 +1795,10 @@ def test_toc_heading_rejects_authored_body_and_mixed_reader_kinds(tmp_path: Path
     )
 
 
+@pytest.mark.parametrize("direct_title", ["3.1 긴 시퀀스 모델링의 문제점", "3.1.1 긴 시퀀스"])
 def test_book_root_can_index_sections_directly_and_section_can_index_subsections(
     tmp_path: Path,
+    direct_title: str,
 ) -> None:
     _write_page(
         tmp_path,
@@ -1730,11 +1852,11 @@ def test_book_root_can_index_sections_directly_and_section_can_index_subsections
     _write_page(
         tmp_path,
         "wiki/books/ai/example/3-1.md",
-        title="3.1 긴 시퀀스 모델링의 문제점",
+        title=direct_title,
         canonical_id=direct_id,
         node_kind="detail",
         parent="[[wiki/books/ai/example|예제 책]]",
-        keywords=("3.1 긴 시퀀스 모델링의 문제점",),
+        keywords=(direct_title,),
         body="원문에서 검증한 절 본문이다.",
     )
     section_path = "wiki/books/ai/example/3-3.md"
@@ -1772,7 +1894,7 @@ def test_book_root_can_index_sections_directly_and_section_can_index_subsections
     assert report.issues == ()
     root = report.pages[tmp_path / book_path].decode("utf-8")
     assert "## 3장 어텐션 메커니즘 구현하기" in root
-    assert "[[wiki/books/ai/example/3-1|3.1 긴 시퀀스 모델링의 문제점]]" in root
+    assert f"[[wiki/books/ai/example/3-1|{direct_title}]]" in root
     assert "[[wiki/books/ai/example/3-3|3.3 셀프 어텐션으로 주의 기울이기]]" in root
     section = report.pages[tmp_path / section_path].decode("utf-8")
     assert section.count("## 3.3 셀프 어텐션으로 주의 기울이기") == 0
@@ -3439,3 +3561,120 @@ def test_planned_parent_link_uses_existing_parent_and_keeps_authored_text(tmp_pa
     assert PARENT_START not in render(rendered, current_texts=private_parent)
     private_child = original.replace("access: public", "access: local-only")
     assert PARENT_START not in render(private_child)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "group",
+        "section",
+        "linked-section",
+        "valid-anchor",
+        "leaf",
+        "sidebar",
+        "missing",
+        "outside",
+        "prose",
+        "public",
+        "parent",
+        "anchor",
+        "symlink",
+    ],
+)
+def test_private_reader_pointer_preserves_book_structure_rules(tmp_path: Path, case: str) -> None:
+    for relative, title, canonical_id, kind, parent in (
+        ("wiki/README.md", "Wiki", "README", "root", None),
+        ("wiki/books/README.md", "책", "books/README", "hub", "[[wiki/README]]"),
+        (
+            "wiki/books/database.md",
+            "데이터베이스",
+            "books/database",
+            "hub",
+            "[[wiki/books/README]]",
+        ),
+    ):
+        _write_page(
+            tmp_path,
+            relative,
+            title=title,
+            canonical_id=canonical_id,
+            node_kind=kind,
+            parent=parent,
+            keywords=(title,),
+        )
+    target = tmp_path / "private/reader.md"
+    target.parent.mkdir()
+    if case != "missing":
+        target.write_text("# 독립 목차\n")
+    body = "[원문 목차](../../private/reader.md)"
+    if case == "anchor":
+        body = "[원문 목차](../../private/reader.md#없는-절)"
+    if case == "valid-anchor":
+        body = "[독립 목차](<../../private/reader.md#독립 목차>)"
+    if case == "symlink":
+        alias = target.with_name("linked.md")
+        alias.symlink_to(target)
+        body = "[원문 목차](../../private/linked.md)"
+    if case == "outside":
+        body = "[외부 대상](../README.md)"
+    if case != "leaf":
+        body = "## 목차\n\n- " + body
+    if case == "section":
+        body = body.replace("\n\n- ", "\n\n### 1.2 설치\n\n- ")
+    if case == "linked-section":
+        body = body.replace("\n\n- ", "\n\n### ")
+    if case == "prose":
+        body += "\n\n원전 내용을 승격한 본문이다."
+    extra = "entity_kind: book\naccess: local-only\npublish: false\n"
+    if case == "public":
+        extra = "entity_kind: book\naccess: public\npublish: true\n"
+    if case != "leaf":
+        extra += "navigation_groups:\n- label: 목차\n  children: [books/example/chapter-01]\n"
+    if case == "sidebar":
+        extra += "reader_navigation: sidebar-only\n"
+        _write_page(
+            tmp_path,
+            "wiki/related.md",
+            title="관련 개념",
+            canonical_id="related",
+            node_kind="topic",
+            parent="[[wiki/README]]",
+            keywords=("관련 개념",),
+            extra="related_to:\n- '[[wiki/books/example]]'\n",
+        )
+    _write_page(
+        tmp_path,
+        "wiki/books/example.md",
+        title="예시 책",
+        canonical_id="books/example",
+        node_kind="entity",
+        parent="[[wiki/missing]]" if case == "parent" else "[[wiki/books/database]]",
+        keywords=("예시 책",),
+        view_mode="linear",
+        body=body,
+        extra=extra,
+    )
+    if case != "leaf":
+        _write_page(
+            tmp_path,
+            "wiki/books/example/chapter-01.md",
+            title="1장",
+            canonical_id="books/example/chapter-01",
+            node_kind="topic",
+            parent="[[wiki/books/example]]",
+            keywords=("1장",),
+            view_mode="linear",
+        )
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.md")}
+    report = prepare_wiki_tree_refresh(tmp_path)
+    if case in {"group", "section", "linked-section", "valid-anchor", "leaf", "sidebar"}:
+        assert report.issues == ()
+        assert body in report.pages[tmp_path / "wiki/books/example.md"].decode()
+        assert "## 최신 관련 문서" not in report.pages[tmp_path / "wiki/books/example.md"].decode()
+    elif case in {"missing", "outside", "anchor", "symlink"}:
+        assert any("TOC reader link" in issue for issue in report.issues)
+    elif case == "parent":
+        assert any("parent is missing" in issue for issue in report.issues)
+    else:
+        assert any("authored body must be empty" in issue for issue in report.issues)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.md")} == before

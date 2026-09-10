@@ -1285,6 +1285,7 @@ def test_book_dry_run_uses_resolved_temporary_vault_and_removes_it(
         del args, kwargs
         seen["vault"] = self.vault
         assert self.vault == self.vault.resolve()
+        assert self.vault.name == vault.name  # Pinned evidence locators include this name.
         (self.vault / "catalog/sentinel.txt").write_text("dry-run", encoding="utf-8")
         return VerifiedBookUpdateReport(0, 0, 0, 0, (), (), ())
 
@@ -2157,51 +2158,6 @@ def test_atomic_verified_book_update_promotes_retires_compiles_and_reindexes_onc
     assert retired_source["lifecycle"] == "archived"
     assert retired_source["superseded_by"] in by_id[root_id]["source_ids"]
     assert compiler.audit().complete
-
-
-def test_verified_book_source_supersession_allows_only_explicit_source_free_toc_pages() -> None:
-    prior_source_id = "source://verified-book/books/example/chapter-01/prior"
-    successor_source_id = "source://verified-book/books/example/chapter-01/successor"
-    sources = {
-        prior_source_id: {"lifecycle": "compiled"},
-        successor_source_id: {"lifecycle": "compiled"},
-    }
-    valid_pages = {
-        "books/example/chapter-01": {
-            "source_ids": [prior_source_id],
-            "claim_ids": ["claim://prior"],
-            "render": {"kind": "source-body", "source_id": prior_source_id},
-        },
-        "books/unrelated-map": {
-            "source_ids": [],
-            "claim_ids": [],
-            "render": {"kind": "toc-only"},
-        },
-    }
-
-    CompiledWiki._supersede_unshared_curated_source(
-        prior_source_id,
-        successor_source_id,
-        "books/example/chapter-01",
-        valid_pages,
-        sources,
-    )
-
-    assert sources[prior_source_id] == {
-        "lifecycle": "archived",
-        "superseded_by": successor_source_id,
-    }
-
-    invalid_pages = copy.deepcopy(valid_pages)
-    invalid_pages["books/unrelated-map"]["render"] = {"kind": "source-body"}
-    with pytest.raises(WoonError, match="page source_ids must be a non-empty string list"):
-        CompiledWiki._supersede_unshared_curated_source(
-            prior_source_id,
-            successor_source_id,
-            "books/example/chapter-01",
-            invalid_pages,
-            sources,
-        )
 
 
 def test_atomic_verified_book_update_accepts_empty_authored_book_map_body(
@@ -4894,3 +4850,389 @@ def test_compiled_archive_preserves_session_ownership_and_rejects_duplicates(
             ),
             "## 순서\n\n쓰기와 외부 호출의 실행 순서를 관리한다.",
         )
+
+
+@pytest.mark.parametrize("evidence_state", ["valid", "changed", "missing"])
+def test_book_dry_run_preserves_pinned_shared_source_payload_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_state: str,
+) -> None:
+    vault = tmp_path / "production"
+    (vault / "catalog").mkdir(parents=True)
+    (vault / "wiki").mkdir()
+    relative = "private/books/example/source-blocks.json"
+    source = vault / relative
+    expected = b'[{"id": "block-1", "kind": "code"}]'
+    if evidence_state != "missing":
+        source.parent.mkdir(parents=True)
+        source.write_bytes(expected if evidence_state == "valid" else b"changed")
+    proof = {"relative_path": relative, "sha256": hashlib.sha256(expected).hexdigest()}
+    coverage = BookCoverageManifestUpdate(
+        mode="replace",
+        relative_path="catalog/book-coverage/example.json",
+        expected_sha256=None,
+        replacement={
+            "book_id": "books/example",
+            "source_element_assignments": [
+                {"source_payload_evidence": proof},
+                {"source_payload_evidence": copy.deepcopy(proof)},
+            ],
+        },
+    )
+    applied: list[Path] = []
+
+    def inspect_clone(self: CompiledWiki, *args: object, **kwargs: object) -> object:
+        assert (self.vault / relative).read_bytes() == expected
+        assert self.vault != vault
+        applied.append(self.vault)
+        return VerifiedBookUpdateReport(0, 0, 0, 0, (), (), ())
+
+    monkeypatch.setattr(CompiledWiki, "apply_verified_book_update", inspect_clone)
+    compiler = CompiledWiki(compiled_settings(vault))
+    if evidence_state == "valid":
+        compiler.dry_run_verified_book_update((), {}, {}, coverage)
+        assert len(applied) == 1
+        assert not applied[0].exists()
+        assert source.read_bytes() == expected
+    else:
+        message = "changed after review" if evidence_state == "changed" else "is missing"
+        with pytest.raises(WoonError, match=message):
+            compiler.dry_run_verified_book_update((), {}, {}, coverage)
+        assert not applied
+
+
+@pytest.mark.parametrize("fault", [None, "changed", "missing"])
+def test_book_dry_run_preserves_existing_private_run_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+) -> None:
+    vault = tmp_path / "production"
+    (vault / "catalog").mkdir(parents=True)
+    (vault / "wiki").mkdir()
+    relative = "private/books/execution.json"
+    evidence = vault / relative
+    evidence.parent.mkdir(parents=True)
+    original = b'{"provider":"local","results":[]}'
+    evidence.write_bytes(original)
+    coverage = BookCoverageManifestUpdate(
+        mode="replace",
+        relative_path="catalog/book-coverage/example.json",
+        expected_sha256=None,
+        replacement={
+            "book_id": "books/example",
+            "source_element_assignments": [
+                {
+                    "delivery": "run-block",
+                    "verification_evidence": vault.name + "/" + relative,
+                    "verification_sha256": hashlib.sha256(original).hexdigest(),
+                }
+            ],
+        },
+    )
+    if fault == "changed":
+        evidence.write_bytes(b"changed")
+    elif fault == "missing":
+        evidence.unlink()
+    inspected = []
+
+    def inspect_clone(self: CompiledWiki, *args: object, **kwargs: object) -> object:
+        assert self.vault != vault and self.vault.name == vault.name
+        assert (self.vault / relative).read_bytes() == original
+        inspected.append(self.vault)
+        return VerifiedBookUpdateReport(0, 0, 0, 0, (), (), ())
+
+    monkeypatch.setattr(CompiledWiki, "apply_verified_book_update", inspect_clone)
+    compiler = CompiledWiki(compiled_settings(vault))
+    if fault:
+        with pytest.raises(WoonError, match="hash differs" if fault == "changed" else "is missing"):
+            compiler.dry_run_verified_book_update((), {}, {}, coverage)
+        assert not inspected
+    else:
+        compiler.dry_run_verified_book_update((), {}, {}, coverage)
+        assert len(inspected) == 1 and not inspected[0].exists()
+        assert evidence.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "fault", [None, "source-changed", "source-missing", "result-changed", "result-missing"]
+)
+def test_book_dry_run_preserves_runnable_upgrade_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+) -> None:
+    vault = tmp_path / "production"
+    (vault / "catalog").mkdir(parents=True)
+    (vault / "wiki").mkdir()
+
+    def digest(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    payloads = {
+        "private/source.kt": b'fun main() { println("ok") }\n',
+        "private/results.json": b'[{"block_id":"b1","stdout":"ok\\n"}]',
+        "private/source.html": b'<pre>fun main() { println("ok") }</pre>',
+    }
+    mapping = dict(
+        document_path="private/source.html", document_sha256=digest(payloads["private/source.html"])
+    )
+    payloads["private/mapping.json"] = json.dumps(mapping).encode()
+    evidence = dict(
+        provider="local",
+        external_transmission=False,
+        results=[
+            dict(
+                block_id="b1",
+                executed_source_path="private/source.kt",
+                executed_source_sha256=digest(payloads["private/source.kt"]),
+                original_result_path="private/results.json",
+                original_result_sha256=digest(payloads["private/results.json"]),
+                source_mapping_evidence=dict(
+                    relative_path="private/mapping.json",
+                    sha256=digest(payloads["private/mapping.json"]),
+                ),
+            )
+        ],
+    )
+    payloads["private/correction.json"] = json.dumps(evidence).encode()
+    for relative, data in payloads.items():
+        path = vault / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    if fault:
+        target = vault / (
+            "private/source.kt" if fault.startswith("source") else "private/results.json"
+        )
+        if fault.endswith("missing"):
+            target.unlink()
+        else:
+            target.write_bytes(b"changed")
+    proof = dict(
+        evidence_relative_path="private/correction.json",
+        evidence_sha256=digest(payloads["private/correction.json"]),
+        items=[dict(block_id="b1", after="supported")],
+    )
+    coverage = BookCoverageManifestUpdate(
+        mode="replace",
+        relative_path="catalog/book-coverage/example.json",
+        expected_sha256=None,
+        replacement={"book_id": "books/example"},
+        runnable_support_corrections=proof,
+    )
+    inspected = []
+
+    def inspect_clone(self: CompiledWiki, *args: object, **kwargs: object) -> object:
+        assert self.vault != vault and self.vault.name == vault.name
+        for relative, data in payloads.items():
+            assert (self.vault / relative).read_bytes() == data
+        inspected.append(self.vault)
+        return VerifiedBookUpdateReport(0, 0, 0, 0, (), (), ())
+
+    monkeypatch.setattr(CompiledWiki, "apply_verified_book_update", inspect_clone)
+    compiler = CompiledWiki(compiled_settings(vault))
+    if fault:
+        message = "is missing" if fault.endswith("missing") else "changed after review"
+        with pytest.raises(WoonError, match=message):
+            compiler.dry_run_verified_book_update((), {}, {}, coverage)
+        assert not inspected
+    else:
+        compiler.dry_run_verified_book_update((), {}, {}, coverage)
+        assert len(inspected) == 1 and not inspected[0].exists()
+        for relative, data in payloads.items():
+            assert (vault / relative).read_bytes() == data
+
+
+@pytest.mark.parametrize(
+    "state, message",
+    [
+        ("valid", None),
+        ("mapping-missing", "file is missing"),
+        ("mapping-changed", "hash differs"),
+        ("document-missing", "file is missing"),
+        ("document-changed", "hash differs"),
+        ("mapping-symlink", "must not traverse symlinks"),
+        ("document-symlink", "must not traverse symlinks"),
+        ("invalid-json", "must be JSON"),
+    ],
+)
+def test_book_dry_run_copies_mapping_and_shared_source_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    message: str | None,
+) -> None:
+    vault = tmp_path / "production"
+    (vault / "catalog").mkdir(parents=True)
+    (vault / "wiki").mkdir()
+    relative = "private/books/example/source-mapping.json"
+    other_relative = "private/books/example/other-mapping.json"
+    document_relative = "private/books/example/source.html"
+    mapping_path, document_path = vault / relative, vault / document_relative
+    mapping_path.parent.mkdir(parents=True)
+    source = b"<html><body><p>Original source</p></body></html>"
+    document_path.write_bytes(source)
+    mapping = json.dumps(
+        {
+            "document_path": document_relative,
+            "document_sha256": hashlib.sha256(source).hexdigest(),
+            "records": [],
+        }
+    ).encode()
+    if state == "invalid-json":
+        mapping = b"["
+    mapping_path.write_bytes(mapping)
+    (vault / other_relative).write_bytes(mapping)
+    mapping_digest = hashlib.sha256(mapping).hexdigest()
+    if state.endswith("missing"):
+        (mapping_path if state.startswith("mapping") else document_path).unlink()
+    elif state.endswith("changed"):
+        (mapping_path if state.startswith("mapping") else document_path).write_bytes(b"changed")
+    elif state.endswith("symlink"):
+        target = mapping_path if state.startswith("mapping") else document_path
+        backing = target.with_suffix(".backing")
+        target.rename(backing)
+        target.symlink_to(backing)
+    proof = {"relative_path": relative, "sha256": mapping_digest}
+    coverage = BookCoverageManifestUpdate(
+        mode="replace",
+        relative_path="catalog/book-coverage/example.json",
+        expected_sha256=None,
+        replacement={
+            "book_id": "books/example",
+            "source_element_assignments": [
+                {"source_mapping_evidence": proof},
+                {"source_payload_evidence": {"source_mapping_evidence": copy.deepcopy(proof)}},
+                {
+                    "source_mapping_evidence": {
+                        "relative_path": other_relative,
+                        "sha256": mapping_digest,
+                    }
+                },
+            ],
+        },
+    )
+    applied: list[Path] = []
+
+    def inspect_clone(self: CompiledWiki, *args: object, **kwargs: object) -> object:
+        assert self.vault != vault
+        assert (self.vault / relative).read_bytes() == mapping
+        assert (self.vault / other_relative).read_bytes() == mapping
+        assert (self.vault / document_relative).read_bytes() == source
+        applied.append(self.vault)
+        return VerifiedBookUpdateReport(0, 0, 0, 0, (), (), ())
+
+    monkeypatch.setattr(CompiledWiki, "apply_verified_book_update", inspect_clone)
+    compiler = CompiledWiki(compiled_settings(vault))
+    if message:
+        with pytest.raises(WoonError, match=message):
+            compiler.dry_run_verified_book_update((), {}, {}, coverage)
+        assert not applied
+    else:
+        compiler.dry_run_verified_book_update((), {}, {}, coverage)
+        assert len(applied) == 1 and not applied[0].exists()
+        assert mapping_path.read_bytes() == mapping
+        assert document_path.read_bytes() == source
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_verified_book_promotion_preserves_detached_predecessor_history(
+    tmp_path: Path, shared: bool
+) -> None:
+    root_id = "books/predecessor-book"
+    page_id = f"{root_id}/chapter-01"
+    write_page(tmp_path, f"{root_id}.md", "이전 판본 책", "책의 실제 목차를 따른다.")
+    compiler = CompiledWiki(compiled_settings(tmp_path))
+    compiler.migrate()
+    first = VerifiedBookPage(
+        page_id=page_id,
+        title="1장",
+        body="이전 판본의 본문을 보존한다.\n",
+        statement="이전 판본의 주장이다.",
+        current_use="책의 이전 판본을 추적한다.",
+        source_locator="source://predecessor-book#chapter-01",
+        source_sha256="a" * 64,
+        frontmatter=verified_book_frontmatter(page_id, "1장", root_id),
+    )
+    compiler.promote_verified_book_pages((first,))
+    sources, claims, pages, curations, _ = compiler._load_inputs()
+    prior_source_id = pages[page_id]["source_ids"][0]
+    prior_claim_id = pages[page_id]["claim_ids"][0]
+    source_before = copy.deepcopy(sources[prior_source_id])
+    claim_before = copy.deepcopy(claims[prior_claim_id])
+    root_claim_id = pages[root_id]["claim_ids"][0]
+    root_claim_before = copy.deepcopy(claims[root_claim_id])
+    # Reproduce a known source dependency with its accepted claim detached.
+    pages[page_id]["claim_ids"] = []
+    if shared:
+        pages[root_id]["claim_ids"].append(prior_claim_id)
+        pages[root_id]["source_ids"].append(prior_source_id)
+    compiler._write_inputs(sources, claims, pages, curations)
+
+    compiler.promote_verified_book_pages((replace(first, body="검토한 후속 판본의 본문이다.\n"),))
+
+    sources, claims, pages, _, _ = compiler._load_inputs()
+    successor_source_id = pages[page_id]["render"]["source_id"]
+    successor_claim_id = pages[page_id]["claim_ids"][0]
+    if shared:
+        assert sources[prior_source_id] == source_before
+        assert claims[prior_claim_id] == claim_before
+        assert prior_claim_id in pages[root_id]["claim_ids"]
+    else:
+        assert sources[prior_source_id] == {
+            **source_before,
+            "lifecycle": "archived",
+            "superseded_by": successor_source_id,
+        }
+        assert claims[prior_claim_id] == {
+            **claim_before,
+            "status": "superseded",
+            "superseded_by": successor_claim_id,
+        }
+    assert claims[root_claim_id] == root_claim_before
+    assert prior_source_id not in pages[page_id]["source_ids"]
+    assert prior_claim_id not in pages[page_id]["claim_ids"]
+    # Refresh the root intentionally changed by the shared-reference fixture.
+    compiler.compile(page_ids=(root_id,))
+    assert compiler.audit().complete
+
+
+def test_verified_book_source_supersession_keeps_unknown_refs_and_strict_rights_scan() -> None:
+    prior_source_id = "source://verified-book/books/example/chapter-01/prior"
+    successor_source_id = "source://verified-book/books/example/chapter-01/successor"
+    sources = {
+        prior_source_id: {"lifecycle": "compiled"},
+        successor_source_id: {"lifecycle": "compiled"},
+    }
+    valid_pages = {
+        "books/example/chapter-01": {
+            "source_ids": [prior_source_id],
+            "claim_ids": ["claim://prior"],
+            "render": {"kind": "source-body", "source_id": prior_source_id},
+        },
+        "books/unrelated-map": {
+            "source_ids": [],
+            "claim_ids": [],
+            "render": {"kind": "toc-only"},
+        },
+    }
+
+    CompiledWiki._supersede_unshared_curated_source(
+        prior_source_id,
+        successor_source_id,
+        "books/example/chapter-01",
+        valid_pages,
+        sources,
+    )
+
+    assert sources[prior_source_id] == {
+        "lifecycle": "archived",
+        "superseded_by": successor_source_id,
+    }
+
+    invalid_pages = copy.deepcopy(valid_pages)
+    invalid_pages["books/unrelated-map"]["render"] = {"kind": "source-body"}
+    sources[prior_source_id] = {"lifecycle": "compiled"}
+    CompiledWiki._supersede_unshared_curated_source(
+        prior_source_id, successor_source_id, "books/example/chapter-01", invalid_pages, sources
+    )
+    assert sources[prior_source_id] == {"lifecycle": "compiled"}
+    with pytest.raises(WoonError, match="page source_ids must be a non-empty string list"):
+        compiled_wiki_module._book_rights_scan_source_ids(invalid_pages["books/unrelated-map"])

@@ -23,13 +23,16 @@ from woon_core.knowledge.compiled_wiki import (
     BookCoverageManifestUpdate,
     CompilationAudit,
     CompiledWiki,
+    CompiledWikiPageRetirement,
     CompiledWikiSettings,
     CompiledWikiTransaction,
     CompiledWikiTransactionReport,
+    CompiledWikiWikilinkRewrite,
     LegacyPageAdoption,
     VerifiedBookPage,
     _materialize_book_coverage_scopes,
     _normalize,
+    _sha256_canonical_json,
     _validate_book_workflow_progression,
 )
 from woon_core.knowledge.service import KnowledgeService
@@ -1222,3 +1225,577 @@ def test_apply_compiled_transaction_cli_rejects_non_boolean_audit_error_opt_in(
 
     with pytest.raises(WoonError, match="allow_preexisting_audit_errors must be true or false"):
         run(["knowledge", "apply-compiled-transaction", "--input", str(payload)], StringIO())
+
+
+def test_navigation_manifest_writes_roll_back_when_search_refresh_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler, service, source_id, claim_id = _wikilink_revision_fixture(tmp_path)
+    transaction = _retirement_successor_transaction(compiler, service, source_id, claim_id)
+    manifest = tmp_path / "catalog/book-coverage/example.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_bytes(b'{"state":"before"}\n')
+    before = manifest.read_bytes()
+    predecessor = (tmp_path / "wiki/legacy/topic.md").read_bytes()
+    monkeypatch.setattr(
+        compiler,
+        "validate_compiled_book_navigation_rebindings",
+        lambda _transaction: {manifest: b'{"state":"after"}\n'},
+    )
+    original_reindex = service._reindex_unlocked
+    failed = False
+
+    def fail_once():
+        nonlocal failed
+        if not failed:
+            failed = True
+            assert manifest.read_bytes() != before
+            raise WoonError("injected search failure after navigation manifest write")
+        return original_reindex()
+
+    monkeypatch.setattr(service, "_reindex_unlocked", fail_once)
+    with pytest.raises(WoonError, match="injected search failure"):
+        service.apply_wiki_restructure_transaction(transaction, ())
+    assert manifest.read_bytes() == before
+    assert (tmp_path / "wiki/legacy/topic.md").read_bytes() == predecessor
+
+
+def test_navigation_writes_without_retirement_roll_back_on_output_validation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler, service = _service(tmp_path)
+    transaction = _existing_seed_transaction(compiler, service.get("seed").revision)
+    assert not transaction.page_retirements
+    manifest = tmp_path / "catalog/book-coverage/example.json"
+    scope = tmp_path / "catalog/book-coverage-scopes/example/chapter-01.json"
+    for path in (manifest, scope):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'{"state":"before"}\n')
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    writes = {p: b'{"state":"after"}\n' for p in (manifest, scope)}
+    monkeypatch.setattr(
+        compiler,
+        "validate_compiled_book_navigation_rebindings",
+        lambda _: writes,
+    )
+
+    def reject_actual_delivery(*_):
+        assert all(p.read_bytes() == content for p, content in writes.items())
+        raise WoonError("injected final navigation delivery validation failure")
+
+    monkeypatch.setattr(
+        "woon_core.knowledge.compiled_wiki.validate_book_navigation_outputs",
+        reject_actual_delivery,
+    )
+    with pytest.raises(WoonError, match="injected final navigation delivery"):
+        compiler.apply_compiled_wiki_transaction(transaction)
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("fault", [None, "inventory-pin", "source", "owner", "evidence"])
+def test_runnable_classification_correction_requires_exact_review(
+    tmp_path: Path, fault: str | None
+) -> None:
+    current = _workflow_manifest("source-landed")
+    element = dict(
+        element_id="code:one",
+        kind="code",
+        semantic_unit="code-block",
+        source_locator="source://example/chapter#listing-1",
+        source_sha256="1" * 64,
+        runnable_support="supported",
+    )
+    current["source_elements"].append(element)
+    current["source_element_assignments"].append(
+        dict(
+            element_id="code:one",
+            owner_id="books/example/chapter-01",
+            delivery="runnable",
+            run_language="run-kotlin",
+            run_block_index=1,
+        )
+    )
+    replacement = copy.deepcopy(current)
+    replacement["workflow_phase"] = "translated"
+    replacement["phase_evidence"]["translated"] = {"proof": "translated"}
+    replacement["source_elements"][-1]["runnable_support"] = "static-exception"
+    evidence_path = tmp_path / "private/code-review.json"
+    evidence_path.parent.mkdir()
+    evidence = dict(
+        provider="local",
+        external_transmission=False,
+        results=[
+            dict(block_id="b01", owner="chapter-01", status="static", reason="source fragment")
+        ],
+    )
+    evidence_path.write_text(json.dumps(evidence))
+    evidence_hash = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    replacement["source_element_assignments"][-1] = dict(
+        element_id="code:one",
+        owner_id="books/example/chapter-01",
+        delivery="static-exception",
+        static_language="kotlin",
+        static_block_index=1,
+        static_body_sha256="3" * 64,
+        exception_reason_code="fragment",
+        runnable_required=False,
+        source_locator=element["source_locator"],
+        source_sha256=element["source_sha256"],
+        original_test_evidence="private/code-review.json",
+        original_test_sha256=evidence_hash,
+    )
+    proof = dict(
+        expected_source_elements_sha256=_sha256_canonical_json(current["source_elements"]),
+        evidence_relative_path="private/code-review.json",
+        evidence_sha256=evidence_hash,
+        items=[
+            dict(
+                element_id="code:one",
+                block_id="b01",
+                owner_id="books/example/chapter-01",
+                field="runnable_support",
+                before="supported",
+                after="static-exception",
+                source_sha256=element["source_sha256"],
+                reason="source fragment",
+            )
+        ],
+    )
+    path = tmp_path / "catalog/book-coverage/example.json"
+    path.parent.mkdir(parents=True)
+    original = json.dumps(current).encode()
+    path.write_bytes(original)
+    payload = dict(
+        mode="replace",
+        relative_path="catalog/book-coverage/example.json",
+        expected_sha256=hashlib.sha256(original).hexdigest(),
+        replacement=replacement,
+        runnable_support_corrections=proof,
+    )
+    compiler = CompiledWiki(_settings(tmp_path))
+    if fault == "inventory-pin":
+        proof["expected_source_elements_sha256"] = "0" * 64
+    elif fault == "source":
+        replacement["source_elements"][-1]["source_sha256"] = "2" * 64
+    elif fault == "owner":
+        replacement["source_element_assignments"][-1]["owner_id"] = "books/other/chapter-01"
+    elif fault == "evidence":
+        evidence_path.write_text("changed after review")
+    update = cli._parse_book_coverage_manifest_update(payload, tmp_path)
+    assert update is not None
+    if fault:
+        message = {
+            "inventory-pin": "inventory hash",
+            "source": "unreviewed source",
+            "owner": "leaf ownership",
+            "evidence": "evidence hash",
+        }[fault]
+        with pytest.raises(WoonError, match=message):
+            compiler._validated_coverage_manifest_update(update)
+    else:
+        target, proposed = compiler._validated_coverage_manifest_update(update)
+        assert target == path
+        assert json.loads(proposed) == replacement
+        with pytest.raises(WoonError, match="immutable source_elements"):
+            compiler._validated_coverage_manifest_update(
+                replace(update, runnable_support_corrections=None)
+            )
+    assert path.read_bytes() == original
+
+
+def _navigation_service(tmp_path: Path) -> tuple[CompiledWiki, KnowledgeService]:
+    compiler, service = _service(tmp_path)
+    (tmp_path / "wiki/README.md").write_text(
+        "---\n"
+        "type: Wiki\n"
+        "canonical_id: README\n"
+        "title: Wiki\n"
+        "node_kind: root\n"
+        "view_mode: tree\n"
+        "keywords:\n- Wiki\n"
+        "aliases: []\n"
+        "updated: 2026-09-03\n"
+        "summary: 테스트 Wiki다.\n"
+        "knowledge_state: 확인 필요\n"
+        "---\n\n"
+        "# Wiki\n",
+        encoding="utf-8",
+    )
+    _, _, pages, curations, _ = compiler._load_inputs()
+    child = _transaction()
+    child_page = copy.deepcopy(child.pages_upsert[0])
+    child_page["page_id"] = "seed/child"
+    child_page["output_path"] = "seed/child.md"
+    child_frontmatter = child_page["frontmatter"]
+    assert isinstance(child_frontmatter, dict)
+    child_frontmatter.update(
+        {
+            "canonical_id": "seed/child",
+            "node_kind": "topic",
+            "view_mode": "tree",
+            "parent": "[[wiki/seed|시드]]",
+            "sequence": 1,
+        }
+    )
+    child_curation = copy.deepcopy(child.curations_upsert[0])
+    child_curation["page_id"] = "seed/child"
+    seed_page = copy.deepcopy(pages["seed"])
+    seed_page["frontmatter"].update(
+        {
+            "node_kind": "topic",
+            "view_mode": "tree",
+            "parent": "[[wiki/README|Wiki]]",
+            "sequence": 1,
+            "navigation_groups": [
+                {"label": "검증", "children": ["seed/child"]},
+            ],
+        }
+    )
+
+    report = service.apply_compiled_wiki_transaction(
+        CompiledWikiTransaction(
+            expected_revisions={"seed": service.get("seed").revision, "seed/child": None},
+            sources_upsert=child.sources_upsert,
+            claims_upsert=child.claims_upsert,
+            pages_upsert=(seed_page, child_page),
+            curations_upsert=(copy.deepcopy(curations["seed"]), child_curation),
+        )
+    )
+
+    assert report.pages_upserted == 2
+    assert "[[wiki/seed/child|개발 참고 0]]" in (tmp_path / "wiki/seed.md").read_text(
+        encoding="utf-8"
+    )
+    assert compiler.audit().complete
+    return compiler, service
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "body",
+        "structure",
+        "full-refresh",
+        "public",
+        "stale",
+        "index-failure",
+        "toc-link",
+        "toc-missing",
+        "toc-outside",
+        "toc-prose",
+    ],
+)
+def test_pinned_body_update_preserves_navigation_without_rebuilding_broken_appendix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    compiler, service = _navigation_service(tmp_path)
+    sources, claims, pages, curations, _ = compiler._load_inputs()
+    if change.startswith("toc-"):
+        toc = copy.deepcopy(pages["seed"])
+        toc["render"] = {"kind": "toc-only"}
+        service.apply_compiled_wiki_transaction(
+            CompiledWikiTransaction(
+                expected_revisions={"seed": service.get("seed").revision},
+                sources_upsert=(),
+                claims_upsert=(),
+                pages_upsert=(toc,),
+                curations_upsert=(copy.deepcopy(curations["seed"]),),
+            )
+        )
+        sources, claims, pages, curations, _ = compiler._load_inputs()
+    orphan = tmp_path / "wiki/seed/appendix/orphan.md"
+    orphan.parent.mkdir(parents=True)
+    metadata = copy.deepcopy(pages["seed/child"]["frontmatter"])
+    metadata.update(
+        canonical_id="seed/appendix/orphan",
+        title="기존 부록",
+        parent="[[wiki/seed/appendix/missing]]",
+        keywords=["기존 부록"],
+        knowledge_state="확인 필요",
+        updated="2026-09-09",
+    )
+    orphan.write_text(
+        "---\n"
+        + yaml.safe_dump(metadata, allow_unicode=True)
+        + "---\n\n# 기존 부록\n\n기존 부록을 보존한다.\n"
+    )
+    reader = tmp_path / "private/reader/index.md"
+    reader.parent.mkdir(parents=True)
+    reader.write_text("# 원문 목차\n")
+    body = "[원문 목차](../private/reader/index.md)\n"
+    assert (tmp_path / "wiki" / "../private/reader/index.md").resolve() == reader
+    assert reader.is_file()
+    if change == "toc-outside":
+        body = "[목차](seed/child.md)\n"
+    if change == "toc-prose":
+        body += "목차 연결이 아닌 새로운 본문 설명이다.\n"
+    digest = _digest(body)
+    source_id = f"source://curated-wiki/seed/{digest[:24]}"
+    claim_id = f"claim://curated-wiki/seed/{digest[:24]}"
+    source = dict(
+        source_id=source_id,
+        kind="curated-wiki",
+        locator="curation/seed/reader",
+        original_sha256=digest,
+        normalized_sha256=digest,
+        privacy="local-only",
+        lifecycle="compiled",
+        title="시드",
+        purpose="원문 목차를 찾는다.",
+        body=body,
+    )
+    claim = dict(
+        claim_id=claim_id,
+        kind="curated-document",
+        status="accepted",
+        statement="원문 목차를 찾는다.",
+        source_ids=[source_id],
+        markdown=body,
+    )
+    page = copy.deepcopy(pages["seed"])
+    page["source_ids"].append(source_id)
+    page["claim_ids"].append(claim_id)
+    page["render"] = {"kind": "source-body", "source_id": source_id}
+    page["frontmatter"].update(summary="원문 목차를 찾는다.", updated="2026-09-09")
+    if change == "structure":
+        page["frontmatter"]["navigation_groups"][0]["label"] = "바뀐 목차"
+    if change == "public":
+        page["frontmatter"]["access"] = "public"
+    transaction = CompiledWikiTransaction(
+        expected_catalog_revision=compiler.catalog_revision(),
+        expected_revisions={"seed": service.get("seed").revision},
+        expected_page_spec_sha256={
+            "seed": "0" * 64 if change == "stale" else _sha256_canonical_json(pages["seed"])
+        },
+        sources_upsert=(source,),
+        claims_upsert=(claim,),
+        pages_upsert=(page,),
+        curations_upsert=(copy.deepcopy(curations["seed"]),),
+        refresh_wiki_tree=change == "full-refresh",
+        allow_preexisting_audit_errors=True,
+    )
+    inputs = compiler.snapshot_inputs()
+    outputs = compiler.snapshot_outputs()
+    before_orphan = orphan.read_bytes()
+    before_reader = reader.read_bytes()
+    if change == "toc-missing":
+        reader.unlink()
+    if change == "index-failure":
+        reindex = service._reindex_unlocked
+        calls = 0
+
+        def fail_once() -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("injected reader-link index failure")
+            return reindex()
+
+        monkeypatch.setattr(service, "_reindex_unlocked", fail_once)
+    if change in {"structure", "full-refresh"}:
+
+        def unexpected_write(*args, **kwargs):
+            pytest.fail("tree preflight failure must not start writes or rollback")
+
+        monkeypatch.setattr(compiler, "_write_inputs", unexpected_write)
+        monkeypatch.setattr(compiler, "restore_inputs", unexpected_write)
+        monkeypatch.setattr(service, "_reindex_unlocked", unexpected_write)
+    if change not in {"body", "toc-link"}:
+        with pytest.raises(
+            (WoonError, RuntimeError),
+            match=(
+                "parent is missing|public.*provenance|spec changed|injected reader-link|"
+                "TOC reader link"
+            ),
+        ):
+            service.apply_compiled_wiki_transaction(transaction)
+        assert compiler.snapshot_inputs() == inputs
+        assert compiler.snapshot_outputs() == outputs
+    else:
+        report = service.apply_compiled_wiki_transaction(transaction)
+        assert report.page_ids == ("seed",)
+        after = (tmp_path / "wiki/seed.md").read_text()
+        before = outputs[tmp_path / "wiki/seed.md"].decode()
+        marker = "<!-- woon-wiki-children:start -->"
+        end = "<!-- woon-wiki-children:end -->"
+        assert before.split(marker)[1].split(end)[0] == after.split(marker)[1].split(end)[0]
+        assert body.strip() in after
+        after_sources, after_claims, after_pages, _, _ = compiler._load_inputs()
+        assert all(after_sources[key] == value for key, value in sources.items())
+        assert all(after_claims[key] == value for key, value in claims.items())
+        assert after_pages["seed"]["frontmatter"]["access"] == "local-only"
+        assert compiler.audit().complete
+    assert orphan.read_bytes() == before_orphan
+    if change == "toc-missing":
+        assert not reader.exists()
+    else:
+        assert reader.read_bytes() == before_reader
+
+
+def _wikilink_revision_fixture(
+    vault: Path,
+    *,
+    alias: str = "|이전 토픽",
+) -> tuple[CompiledWiki, KnowledgeService, str, str]:
+    compiler, service = _service(vault)
+    source_id = "source://transaction/shared-wikilink"
+    claim_id = "claim://transaction/shared-wikilink"
+    source_body = f"![[wiki/legacy/topic#details{alias}]]\n"
+    source = {
+        "source_id": source_id,
+        "kind": "official-reference",
+        "locator": "https://example.com/shared-wikilink",
+        "original_sha256": _digest(source_body),
+        "normalized_sha256": _digest(_normalize(source_body)),
+        "privacy": "public",
+        "lifecycle": "compiled",
+        "title": "공유 Wiki 링크",
+        "purpose": "구조 이관 전 링크를 검증한다.",
+        "body": source_body,
+    }
+    claim = {
+        "claim_id": claim_id,
+        "kind": "reference-evidence",
+        "status": "accepted",
+        "statement": f"[[wiki/legacy/topic{alias}]]을 참조한다.",
+        "source_ids": [source_id],
+        "markdown": f"[[wiki/legacy/topic#details{alias}]]\n",
+    }
+
+    def page(page_id: str, output_path: str, render: dict[str, object]) -> dict[str, object]:
+        return {
+            "page_id": page_id,
+            "output_path": output_path,
+            "title": page_id,
+            "frontmatter": {
+                "type": "Wiki",
+                "canonical_id": page_id,
+                "title": page_id,
+                "domain": "concepts",
+                "summary": "공유 링크를 이관한다.",
+                "status": "Canonical",
+                "publish": False,
+                "access": "public",
+                "difficulty": "foundation",
+                "prerequisites": [],
+                "next_concepts": [],
+                "related": [],
+                "source_ids": [],
+            },
+            "source_ids": [source_id],
+            "claim_ids": [claim_id],
+            "render": render,
+        }
+
+    initial = CompiledWikiTransaction(
+        expected_revisions={"articles/one": None, "legacy/topic": None},
+        sources_upsert=(source,),
+        claims_upsert=(claim,),
+        pages_upsert=(
+            page("articles/one", "articles/one.md", {"kind": "claims"}),
+            page(
+                "legacy/topic",
+                "legacy/topic.md",
+                {"kind": "source-body", "source_id": source_id},
+            ),
+        ),
+        curations_upsert=(
+            {
+                "page_id": "articles/one",
+                "current_use": "공유 링크를 찾는다.",
+                "basis": "curated-revision",
+                "status": "confirmed",
+            },
+            {
+                "page_id": "legacy/topic",
+                "current_use": "이전 토픽을 확인한다.",
+                "basis": "curated-revision",
+                "status": "confirmed",
+            },
+        ),
+    )
+    service.apply_compiled_wiki_transaction(initial)
+    return compiler, service, source_id, claim_id
+
+
+def _retirement_successor_transaction(
+    compiler: CompiledWiki, service: KnowledgeService, source_id: str, claim_id: str
+) -> CompiledWikiTransaction:
+    sources, claims, pages, curations, receipts = compiler._load_inputs()
+    successor_body = "이전 문서를 학습 흐름에 맞게 새 키워드로 재구성한다.\n"
+    successor_source_id = "source://transaction/learning-topic"
+    successor_claim_id = "claim://transaction/learning-topic"
+    successor_source = {
+        "source_id": successor_source_id,
+        "kind": "official-reference",
+        "locator": "https://example.com/learning-topic",
+        "original_sha256": _digest(successor_body),
+        "normalized_sha256": _digest(_normalize(successor_body)),
+        "privacy": "public",
+        "lifecycle": "compiled",
+        "title": "재구성 학습 근거",
+        "purpose": "새 학습 문서의 현재 근거를 남긴다.",
+        "body": successor_body,
+    }
+    successor_claim = {
+        "claim_id": successor_claim_id,
+        "kind": "reference-evidence",
+        "status": "accepted",
+        "statement": "새 키워드 문서는 실행 가능한 학습 판단을 연결한다.",
+        "source_ids": [successor_source_id],
+        "markdown": "새 문서가 기존 경계를 그대로 보존할 필요는 없다.\n",
+    }
+    article = copy.deepcopy(pages["articles/one"])
+    successor = copy.deepcopy(pages["legacy/topic"])
+    successor.update(
+        {
+            "page_id": "learning/topic",
+            "output_path": "learning/topic.md",
+            "title": "learning topic",
+            "source_ids": [successor_source_id],
+            "claim_ids": [successor_claim_id],
+            "render": {"kind": "source-body", "source_id": successor_source_id},
+        }
+    )
+    successor["frontmatter"].update({"canonical_id": "learning/topic", "title": "learning topic"})
+    successor_curation = {
+        "page_id": "learning/topic",
+        "current_use": "기존 문서를 새 학습 키워드로 병합한다.",
+        "basis": "curated-revision",
+        "status": "confirmed",
+    }
+    retirement = CompiledWikiPageRetirement(
+        page_id="legacy/topic",
+        successor_page_id="learning/topic",
+        current_wikilink_target="wiki/legacy/topic",
+        expected_output_sha256=service.get("legacy/topic").revision,
+        expected_page_spec_sha256=_sha256_canonical_json(pages["legacy/topic"]),
+        expected_receipt_sha256=_sha256_canonical_json(receipts["legacy/topic"]),
+    )
+    return CompiledWikiTransaction(
+        expected_revisions={
+            "articles/one": service.get("articles/one").revision,
+            "learning/topic": None,
+        },
+        sources_upsert=(successor_source,),
+        claims_upsert=(successor_claim,),
+        pages_upsert=(article, successor),
+        curations_upsert=(copy.deepcopy(curations["articles/one"]), successor_curation),
+        expected_page_spec_sha256={
+            "articles/one": _sha256_canonical_json(pages["articles/one"]),
+            "learning/topic": None,
+        },
+        wikilink_rewrites=(
+            CompiledWikiWikilinkRewrite(
+                current_target="wiki/legacy/topic",
+                replacement_target="wiki/learning/topic",
+                expected_source_occurrences=1,
+                expected_claim_occurrences=2,
+            ),
+        ),
+        expected_source_record_sha256={source_id: _sha256_canonical_json(sources[source_id])},
+        expected_claim_record_sha256={claim_id: _sha256_canonical_json(claims[claim_id])},
+        page_retirements=(retirement,),
+    )

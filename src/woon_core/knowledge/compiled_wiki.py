@@ -42,12 +42,27 @@ from woon_core.knowledge.book_coverage import (
 from woon_core.knowledge.book_coverage import (
     SCHEMA_VERSION as BOOK_COVERAGE_SCHEMA_VERSION,
 )
-from woon_core.knowledge.book_coverage import audit_book_coverage, audit_book_coverage_scope
+from woon_core.knowledge.book_coverage import (
+    STATIC_EXCEPTION_REASON_CODES,
+    audit_book_coverage,
+    audit_book_coverage_scope,
+    navigation_group_scope_nodes,
+)
 from woon_core.knowledge.book_intake import audit_book_intake
+from woon_core.knowledge.book_navigation_rebinding import (
+    BookNavigationCoverageRebinding,
+    prepare_book_navigation_rebindings,
+    validate_book_navigation_outputs,
+)
+from woon_core.knowledge.book_prose_edits import prepare_korean_prose_edits
+from woon_core.knowledge.book_reader_presentation import _fenced_lines, render_personal_footnotes
 from woon_core.knowledge.book_rights import (
     BookRightsDemotion,
     BookRightsDemotionReport,
 )
+from woon_core.knowledge.book_semantic_delivery import _private_bytes as _book_mapping_bytes
+from woon_core.knowledge.book_semantic_delivery import runnable_upgrade
+from woon_core.knowledge.book_supplements import load_supplemental_runnables
 from woon_core.knowledge.domain import DocumentMetadata
 from woon_core.knowledge.source_boundary import (
     SOURCE_ARCHIVE_RELATIVE,
@@ -60,6 +75,7 @@ from woon_core.knowledge.wiki_tree import (
     iter_wiki_pages,
     load_wiki_tree,
     prepare_wiki_tree_refresh,
+    private_reader_target,
     split_markdown,
     strip_generated_wiki_views,
     validate_wiki_tree_inputs,
@@ -238,6 +254,11 @@ class BookCoverageManifestUpdate:
     base_expected_sha256: str | None = None
     scope_root_id: str | None = None
     materialized_scopes: tuple[BookCoverageScopeRevision, ...] = ()
+    runnable_support_corrections: dict[str, Any] | None = None
+    # Remove explicitly pinned, author-added editorial callouts from a
+    # translated reader, retaining the historical source and all book content.
+    editorial_line_removals: dict[str, dict[str, Any]] | None = None
+    korean_prose_edits: dict[str, dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +298,9 @@ class VerifiedBookUpdateReport:
     staged_asset_count: int = 0
     unchanged_asset_count: int = 0
 
+    audit_scope: str = "all"
+    remaining_audit_errors: int = 0
+
 
 @dataclass(frozen=True, slots=True)
 class VerifiedBookPreflightReport:
@@ -290,6 +314,9 @@ class VerifiedBookPreflightReport:
     base_manifest_preserved: bool
     staged_asset_count: int = 0
     unchanged_asset_count: int = 0
+
+    audit_scope: str = "all"
+    remaining_audit_errors: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +371,16 @@ class CompiledWikiTransaction:
     # Prior source/claim bytes remain historical; only lifecycle and successor
     # pointers change through the same helpers used by curate_revisions.
     curated_successor_page_ids: tuple[str, ...] = ()
+    # Append verified supplements without rewriting original book evidence.
+    # Only a pinned existing translated chapter scope is supported here.
+    coverage_manifest: BookCoverageManifestUpdate | None = None
+    # Navigation-only retirement preserves original evidence and chapter progress.
+    book_navigation_rebindings: tuple[BookNavigationCoverageRebinding, ...] = ()
+    # Explicit prose-only footnote successors/removals. Historical source and
+    # claim records stay immutable; untouched notes retain IDs, anchors and order.
+    personal_footnote_revision_ids: dict[str, tuple[str, ...]] = dataclass_field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1021,6 +1058,7 @@ class CompiledWiki:
         retirement_body_sha256: dict[str, str],
         coverage_manifest: BookCoverageManifestUpdate | None = None,
         *,
+        audit_scope: str = "all",
         rights_restore_book_id: str | None = None,
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
         retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
@@ -1035,6 +1073,57 @@ class CompiledWiki:
         lock and reindexes only after the compiler transaction succeeds.
         """
 
+        if audit_scope not in {"all", "affected"}:
+            raise WoonError("book audit_scope must be all or affected")
+        if coverage_manifest is not None and coverage_manifest.editorial_line_removals is not None:
+            bodies = self._editorial_removed_bodies(coverage_manifest)
+            if (
+                replacements
+                or set(bodies) != {record.page_id for record in records}
+                or any(record.body != bodies[record.page_id] for record in records)
+            ):
+                raise WoonError("editorial removal must preserve the exact remaining reader body")
+        if coverage_manifest is not None and coverage_manifest.korean_prose_edits is not None:
+            if (
+                replacements
+                or retirement_body_sha256
+                or rights_restore_book_id
+                or retirement_image_replacements
+                or retirement_content_relocations
+            ):
+                raise WoonError("Korean prose edit cannot combine restoration or retirement")
+            scope_path, _ = self._validated_coverage_manifest_update(coverage_manifest)
+            current_scope = json.loads(scope_path.read_bytes())
+            bodies, _ = self._prepare_korean_prose_edits(current_scope, coverage_manifest)
+            old_sources, old_claims, old_pages, old_curations, _ = self._load_inputs()
+            prior_statements = {
+                page_id: [
+                    old_claims[claim_id]["statement"]
+                    for claim_id in old_pages[page_id]["claim_ids"]
+                    if old_claims[claim_id].get("source_ids")
+                    == [old_pages[page_id]["render"]["source_id"]]
+                ]
+                for page_id in bodies
+            }
+            if (
+                len(records) != len(bodies)
+                or set(bodies) != {r.page_id for r in records}
+                or any(
+                    r.body != bodies[r.page_id]
+                    or prior_statements[r.page_id] != [r.statement]
+                    or r.current_use != old_curations[r.page_id]["current_use"]
+                    or r.title != old_pages[r.page_id]["title"]
+                    or r.frontmatter != old_pages[r.page_id]["frontmatter"]
+                    or r.source_locator
+                    != old_sources[old_pages[r.page_id]["render"]["source_id"]]["locator"]
+                    or r.source_sha256
+                    != old_sources[old_pages[r.page_id]["render"]["source_id"]]["original_sha256"]
+                    or r.expected_revision is None
+                    for r in records
+                )
+            ):
+                raise WoonError("Korean prose edit must preserve the exact body and page metadata")
+        baseline_errors = Counter(self.audit().errors) if audit_scope == "affected" else Counter()
         if set(retirement_body_sha256) != set(replacements):
             raise WoonError("verified book update retirement_body_sha256 must match replacements")
         if any(
@@ -1168,6 +1257,21 @@ class CompiledWiki:
             changed = self._apply_verified_book_records(
                 active_records, sources, claims, pages, curations
             )
+            if coverage_manifest is not None and coverage_manifest.korean_prose_edits is not None:
+                for page_id in changed:
+                    previous_render = old_pages[page_id]["render"]
+                    if "personal_footnotes" in previous_render:
+                        if any(
+                            claims[cid] != old_claims[cid] or cid not in pages[page_id]["claim_ids"]
+                            for cid in previous_render["supplemental_claim_ids"]
+                        ):
+                            raise WoonError(
+                                "Korean prose edit must preserve personal footnote claims"
+                            )
+                        pages[page_id]["render"] = {
+                            **copy.deepcopy(previous_render),
+                            "source_id": pages[page_id]["render"]["source_id"],
+                        }
             if rights_restore_book_id is not None:
                 self._retire_book_rights_decisions(
                     rights_restore_book_id,
@@ -1211,7 +1315,7 @@ class CompiledWiki:
                 }
                 for source_id in _book_rights_scan_source_ids(retired_page):
                     used_elsewhere = any(
-                        source_id in _book_rights_scan_source_ids(other_page)
+                        _page_may_reference(other_page, "source_ids", source_id)
                         for other_page in remaining_pages.values()
                     )
                     if not used_elsewhere and sources[source_id].get("lifecycle") == "compiled":
@@ -1220,7 +1324,7 @@ class CompiledWiki:
                         )
                 for claim_id in _book_rights_scan_claim_ids(retired_page):
                     used_elsewhere = any(
-                        claim_id in _book_rights_scan_claim_ids(other_page)
+                        _page_may_reference(other_page, "claim_ids", claim_id)
                         for other_page in remaining_pages.values()
                     )
                     if not used_elsewhere and claims[claim_id].get("status") == "accepted":
@@ -1263,11 +1367,21 @@ class CompiledWiki:
                 raise WoonError(
                     f"verified book update could not refresh its Wiki tree: {tree_report.issues[0]}"
                 )
+            tree_changed_paths = tuple(
+                path for path, content in tree_report.pages.items() if path.read_bytes() != content
+            )
             apply_wiki_tree_refresh(self._settings.vault, tree_report)
-            self._refresh_generated_view_receipts(tuple(tree_report.pages))
+            self._refresh_generated_view_receipts(tree_changed_paths)
             audit = self.audit()
-            if not audit.complete:
-                raise WoonError(f"verified book update left a stale catalog: {audit.errors[0]}")
+            new_errors = Counter(audit.errors) - baseline_errors
+            if new_errors:
+                raise WoonError(
+                    f"verified book update left a stale catalog: {next(iter(new_errors))}"
+                )
+            if audit_scope == "affected":
+                self.assert_affected_pages_current(
+                    tuple(sorted(affected)), extra_paths=tree_changed_paths
+                )
             if coverage_manifest is not None:
                 if coverage_manifest.mode == "merge-scope":
                     if coverage_path is None:  # pragma: no cover - validated above
@@ -1326,6 +1440,8 @@ class CompiledWiki:
             raise
 
         return VerifiedBookUpdateReport(
+            audit_scope=audit_scope,
+            remaining_audit_errors=len(audit.errors),
             curated=len(changed),
             retired=len(normalized),
             compiled=compile_report.compiled,
@@ -1343,6 +1459,7 @@ class CompiledWiki:
         coverage_manifest: BookCoverageManifestUpdate,
         staged_assets: tuple[StagedBookAsset, ...] = (),
         *,
+        audit_scope: str = "all",
         rights_restore_book_id: str | None = None,
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
         retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
@@ -1350,7 +1467,7 @@ class CompiledWiki:
         """Execute the exact writer and post-write audits in an isolated Vault clone."""
 
         with tempfile.TemporaryDirectory(prefix="woon-book-preflight-") as temporary:
-            dry_vault = (Path(temporary) / "vault").resolve()
+            dry_vault = (Path(temporary) / self._settings.vault.name).resolve()
             shutil.copytree(self._settings.vault / "catalog", dry_vault / "catalog")
             for source_path in self._settings.output_root.rglob("*.md"):
                 if "_sources" in source_path.parts:
@@ -1377,7 +1494,104 @@ class CompiledWiki:
             for page_replacements in (retirement_image_replacements or {}).values():
                 for current_relative in page_replacements:
                     self._copy_dry_run_source_file(current_relative, dry_vault)
-
+            payload_evidence: set[tuple[str, str]] = set()
+            mapping_evidence: set[tuple[str, str]] = set()
+            assignments = replacement.get("source_element_assignments")
+            if isinstance(assignments, list):
+                for assignment in assignments:
+                    if not isinstance(assignment, dict):
+                        continue
+                    locator = assignment.get("verification_evidence")
+                    prefix = self._settings.vault.name + "/"
+                    if isinstance(locator, str) and locator.startswith(prefix + "private/"):
+                        relative = locator[len(prefix) :]
+                        digest = _required_string(assignment, "verification_sha256")
+                        # Existing run blocks remain audited during prose-only edits.
+                        # Keep their pinned evidence available in the isolated clone.
+                        _book_mapping_bytes(self._settings.vault, relative, digest)
+                        payload_evidence.add((relative, digest))
+                    proof = assignment.get("source_payload_evidence")
+                    if isinstance(proof, dict) and "relative_path" in proof:
+                        payload_evidence.add(
+                            (
+                                _required_string(proof, "relative_path"),
+                                _required_string(proof, "sha256"),
+                            )
+                        )
+                    mapping_proofs = (
+                        assignment.get("source_mapping_evidence"),
+                        proof.get("source_mapping_evidence") if isinstance(proof, dict) else None,
+                    )
+                    for mapping_proof in mapping_proofs:
+                        if isinstance(mapping_proof, dict):
+                            mapping_evidence.add(
+                                (
+                                    _required_string(mapping_proof, "relative_path"),
+                                    _required_string(mapping_proof, "sha256"),
+                                )
+                            )
+            correction_proof = coverage_manifest.runnable_support_corrections
+            if correction_proof is not None:
+                relative = _required_string(correction_proof, "evidence_relative_path")
+                digest = _required_string(correction_proof, "evidence_sha256")
+                self._copy_dry_run_source_file(relative, dry_vault, expected_sha256=digest)
+                try:
+                    correction_evidence = json.loads(
+                        _book_mapping_bytes(self._settings.vault, relative, digest)
+                    )
+                except (ValueError, UnicodeError) as error:
+                    raise WoonError("runnable correction evidence must be JSON") from error
+                if not isinstance(correction_evidence, dict) or not isinstance(
+                    correction_evidence.get("results"), list
+                ):
+                    raise WoonError("runnable correction evidence results must be a list")
+                upgraded_blocks = {
+                    item.get("block_id")
+                    for item in correction_proof.get("items", ())
+                    if isinstance(item, dict) and item.get("after") == "supported"
+                }
+                for result in correction_evidence["results"]:
+                    if (
+                        not isinstance(result, dict)
+                        or result.get("block_id") not in upgraded_blocks
+                    ):
+                        continue
+                    mapping_proof = result.get("source_mapping_evidence")
+                    if isinstance(mapping_proof, dict):
+                        mapping_evidence.add(
+                            (
+                                _required_string(mapping_proof, "relative_path"),
+                                _required_string(mapping_proof, "sha256"),
+                            )
+                        )
+                    for path_key, hash_key in (
+                        ("executed_source_path", "executed_source_sha256"),
+                        ("original_result_path", "original_result_sha256"),
+                    ):
+                        payload_evidence.add(
+                            (
+                                _required_string(result, path_key),
+                                _required_string(result, hash_key),
+                            )
+                        )
+            if coverage_manifest.korean_prose_edits is not None:
+                for supplement in load_supplemental_runnables(self._settings.vault, replacement):
+                    payload_evidence.update(supplement.evidence_files)
+            for relative, digest in sorted(mapping_evidence):
+                try:
+                    mapping = json.loads(
+                        _book_mapping_bytes(self._settings.vault, relative, digest)
+                    )
+                except (ValueError, UnicodeError) as error:
+                    raise WoonError("source mapping evidence must be JSON") from error
+                if not isinstance(mapping, dict):
+                    raise WoonError("source mapping evidence must be an object")
+                document = _required_string(mapping, "document_path")
+                document_digest = _required_string(mapping, "document_sha256")
+                _book_mapping_bytes(self._settings.vault, document, document_digest)
+                payload_evidence.update(((relative, digest), (document, document_digest)))
+            for relative, digest in sorted(payload_evidence):
+                self._copy_dry_run_source_file(relative, dry_vault, expected_sha256=digest)
             dry_settings = CompiledWikiSettings(
                 vault=dry_vault,
                 output_root=dry_vault
@@ -1403,23 +1617,35 @@ class CompiledWiki:
                 replacements,
                 retirement_body_sha256,
                 coverage_manifest,
+                **({"audit_scope": audit_scope} if audit_scope != "all" else {}),
                 rights_restore_book_id=rights_restore_book_id,
                 retirement_image_replacements=retirement_image_replacements,
                 retirement_content_relocations=retirement_content_relocations,
             )
 
-    def _copy_dry_run_source_file(self, relative: str, dry_vault: Path) -> None:
+    def _copy_dry_run_source_file(
+        self, relative: str, dry_vault: Path, *, expected_sha256: str | None = None
+    ) -> None:
         """Copy one immutable source artifact needed by a cloned coverage audit."""
 
         source = _inside(self._settings.vault, relative, "dry-run source artifact")
         if not source.is_file():
+            if expected_sha256 is not None:
+                raise WoonError("pinned dry-run source artifact is missing")
             return
+        if expected_sha256 is not None and _sha256_bytes(source.read_bytes()) != expected_sha256:
+            raise WoonError("pinned dry-run source artifact changed after review")
         destination = _inside(dry_vault, relative, "dry-run source artifact")
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
             destination.hardlink_to(source)
         except OSError:
             shutil.copy2(source, destination)
+        if (
+            expected_sha256 is not None
+            and _sha256_bytes(destination.read_bytes()) != expected_sha256
+        ):
+            raise WoonError("pinned dry-run source artifact copy differs")
 
     @staticmethod
     def _retire_book_rights_decisions(
@@ -3121,6 +3347,12 @@ class CompiledWiki:
         retirement_replacements: dict[str, str] | None = None,
         retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> tuple[Path, bytes]:
+        if update.korean_prose_edits is not None and (
+            update.mode != "merge-scope"
+            or update.editorial_line_removals is not None
+            or update.runnable_support_corrections is not None
+        ):
+            raise WoonError("Korean prose edit requires a separate pinned scoped update")
         if update.mode not in {"replace", "merge-scope", "materialize-scopes"}:
             raise WoonError(
                 "book coverage manifest mode must be replace, merge-scope, or materialize-scopes"
@@ -3128,6 +3360,10 @@ class CompiledWiki:
         if update.mode == "merge-scope":
             return self._validated_scoped_coverage_manifest_update(update)
         if update.mode == "materialize-scopes":
+            if update.runnable_support_corrections is not None:
+                raise WoonError(
+                    "runnable corrections cannot be combined with scope materialization"
+                )
             return self._validated_materialized_coverage_manifest_update(update)
         if (
             any(
@@ -3209,7 +3445,7 @@ class CompiledWiki:
             retirement_replacements or {},
         )
         _validate_book_workflow_progression(
-            current_manifest,
+            self._current_with_runnable_corrections(current_manifest, update),
             update.replacement,
             "book coverage manifest",
             allow_source_landed_expansion=True,
@@ -3647,7 +3883,12 @@ class CompiledWiki:
                 f"{LEGACY_BOOK_COVERAGE_SCHEMA_VERSION} or {BOOK_COVERAGE_SCHEMA_VERSION}"
             )
         _validate_book_workflow_progression(
-            current_scope,
+            self._current_with_korean_prose_edits(
+                self._current_with_editorial_removals(
+                    self._current_with_runnable_corrections(current_scope, update), update
+                ),
+                update,
+            ),
             replacement,
             "scoped book coverage manifest",
         )
@@ -3672,10 +3913,13 @@ class CompiledWiki:
             for node in nodes
             if isinstance(node, dict) and isinstance(canonical_id := node.get("canonical_id"), str)
         }
-        if len(node_ids) != len(nodes) or scope_root_id not in node_ids:
+        navigation_nodes = navigation_group_scope_nodes(base, scope_root_id)
+        if len(node_ids) != len(nodes) or (scope_root_id not in node_ids and not navigation_nodes):
             raise WoonError(
                 "merge-scope replacement nodes must be unique and include scope_root_id"
             )
+        if navigation_nodes and node_ids != navigation_nodes:
+            raise WoonError("merge-scope navigation heading must contain exactly its pinned nodes")
         outside = sorted(
             node_id
             for node_id in node_ids
@@ -3956,6 +4200,48 @@ class CompiledWiki:
                 for value in claim_ids
                 if value.startswith(f"claim://verified-book/{page_id}/") and value != claim_id
             ]
+            # A predecessor claim can be detached from page.claim_ids while its
+            # source is still an explicit dependency of this exact reader. Only
+            # recover the compiler-owned matching revision; never sweep orphans.
+            for prior_source_id in prior_book_source_ids:
+                prefix = f"source://verified-book/{page_id}/"
+                if re.fullmatch(re.escape(prefix) + r"[0-9a-f]{24}", prior_source_id) is None:
+                    continue
+                prior_source = sources.get(prior_source_id, {})
+                prior_claim_id = prior_source_id.replace("source://", "claim://", 1)
+                prior_claim = claims.get(prior_claim_id, {})
+                if (
+                    prior_source.get("source_id") == prior_source_id
+                    and prior_source.get("kind") == "verified-book"
+                    and prior_source.get("lifecycle") == "compiled"
+                    and prior_claim.get("claim_id") == prior_claim_id
+                    and prior_claim.get("kind") == "verified-book-summary"
+                    and prior_claim.get("status") == "accepted"
+                    and prior_claim.get("source_ids") == [prior_source_id]
+                    and not any(
+                        other_id != page_id
+                        and _page_may_reference(other_page, "claim_ids", prior_claim_id)
+                        for other_id, other_page in pages.items()
+                    )
+                ):
+                    prior_book_claim_ids.append(prior_claim_id)
+            curated_sources, curated_claims = _verified_book_curated_predecessors(
+                page_id, source_ids, claim_ids, sources, claims
+            )
+            prior_book_claim_ids = list(dict.fromkeys([*prior_book_claim_ids, *curated_claims]))
+            retained_claim_sources = {
+                evidence_id
+                for retained_id in claim_ids
+                if retained_id not in prior_book_claim_ids
+                for evidence_id in _string_list(
+                    claims[retained_id].get("source_ids"), "claim source_ids"
+                )
+            }
+            prior_book_source_ids = [
+                value
+                for value in dict.fromkeys([*prior_book_source_ids, *curated_sources])
+                if value not in retained_claim_sources
+            ]
             source_ids = [value for value in source_ids if value not in prior_book_source_ids]
             claim_ids = [value for value in claim_ids if value not in prior_book_claim_ids]
             source_ids = list(dict.fromkeys([*source_ids, source_id]))
@@ -3979,11 +4265,20 @@ class CompiledWiki:
                 changed.append(page_id)
             pages[page_id] = replacement
             curations[page_id] = replacement_curation
+            self._supersede_unshared_claims(prior_book_claim_ids, claim_id, page_id, pages, claims)
             for prior_source_id in prior_book_source_ids:
+                # A source can remain evidence for a shared or otherwise retained
+                # accepted claim even when no page directly lists that source.
+                # Do not archive that evidence, including ambiguous references.
+                if any(
+                    candidate.get("status") == "accepted"
+                    and _page_may_reference(candidate, "source_ids", prior_source_id)
+                    for candidate in claims.values()
+                ):
+                    continue
                 self._supersede_unshared_curated_source(
                     prior_source_id, source_id, page_id, pages, sources
                 )
-            self._supersede_unshared_claims(prior_book_claim_ids, claim_id, page_id, pages, claims)
 
         known = self._known_relation_targets(pages)
         for record in records:
@@ -4003,7 +4298,8 @@ class CompiledWiki:
         sources: dict[str, dict[str, Any]],
     ) -> None:
         used_elsewhere = any(
-            other_page_id != page_id and prior_source_id in _book_rights_scan_source_ids(other_page)
+            other_page_id != page_id
+            and _page_may_reference(other_page, "source_ids", prior_source_id)
             for other_page_id, other_page in pages.items()
         )
         if not used_elsewhere:
@@ -4029,7 +4325,7 @@ class CompiledWiki:
             )
             used_elsewhere = any(
                 other_page_id != page_id
-                and prior_claim_id in _book_rights_scan_claim_ids(other_page)
+                and _page_may_reference(other_page, "claim_ids", prior_claim_id)
                 for other_page_id, other_page in pages.items()
             )
             if not is_prior_curated_claim or used_elsewhere:
@@ -4049,7 +4345,7 @@ class CompiledWiki:
         for prior_claim_id in claim_ids:
             used_elsewhere = any(
                 other_page_id != page_id
-                and prior_claim_id in _book_rights_scan_claim_ids(other_page)
+                and _page_may_reference(other_page, "claim_ids", prior_claim_id)
                 for other_page_id, other_page in pages.items()
             )
             if not used_elsewhere:
@@ -4246,6 +4542,8 @@ class CompiledWiki:
             raise WoonError(
                 "compiled Wiki transaction allow_preexisting_audit_errors must be boolean"
             )
+        coverage_update = self._validated_transaction_book_coverage(transaction)
+        navigation_updates = self.validate_compiled_book_navigation_rebindings(transaction)
         preexisting_audit_errors = (
             Counter(self.audit().errors)
             if transaction.allow_preexisting_audit_errors
@@ -4295,6 +4593,9 @@ class CompiledWiki:
                 )
 
         sources, claims, pages, curations, receipts = self._load_inputs()
+        preserved_navigation = self._preserved_navigation_pages(
+            transaction, sources, claims, pages, curations, receipts
+        )
         page_upserts = {str(record["page_id"]): record for record in transaction.pages_upsert}
         native_survivors = _native_survivors or {}
         for canonical_id, proof in native_survivors.items():
@@ -4406,6 +4707,52 @@ class CompiledWiki:
                 replacement_output_path = _required_string(page_upserts[page_id], "output_path")
                 if current_output_path != replacement_output_path:
                     migrated_output_paths.add(current_output_path)
+            next_render = page_upserts[page_id].get("render", {})
+            old_render = current_page.get("render", {}) if current_page is not None else {}
+            if (
+                any(
+                    next_render.get(key) != old_render.get(key)
+                    for key in ("supplemental_claim_ids", "personal_footnotes")
+                )
+                and coverage_update is None
+            ):
+                raise WoonError("supplemental reader changes require a scoped coverage transaction")
+            if coverage_update is not None:
+                next_page = page_upserts[page_id]
+                if current_page is None or any(
+                    current_page.get(key) != next_page.get(key)
+                    for key in set(current_page) | set(next_page)
+                    if key not in {"source_ids", "claim_ids", "render"}
+                ):
+                    raise WoonError("book supplements must preserve the existing reader page")
+                if {
+                    key: value
+                    for key, value in old_render.items()
+                    if key not in {"supplemental_claim_ids", "personal_footnotes"}
+                } != {
+                    key: value
+                    for key, value in next_render.items()
+                    if key not in {"supplemental_claim_ids", "personal_footnotes"}
+                }:
+                    raise WoonError("book supplements must preserve the original source renderer")
+                for key in ("source_ids", "claim_ids"):
+                    before_ids = _string_list(current_page.get(key), f"page {key}")
+                    after_ids = _string_list(next_page.get(key), f"page {key}")
+                    if after_ids[: len(before_ids)] != before_ids:
+                        raise WoonError("book supplements must preserve original page dependencies")
+                before_ids = old_render.get("supplemental_claim_ids", [])
+                after_ids = next_render.get("supplemental_claim_ids", [])
+                revised_ids = transaction.personal_footnote_revision_ids.get(page_id)
+                if revised_ids:
+                    _validate_prose_footnote_revisions(
+                        old_render,
+                        next_render,
+                        revised_ids,
+                        claims,
+                        transaction.claims_upsert,
+                    )
+                elif not isinstance(after_ids, list) or after_ids[: len(before_ids)] != before_ids:
+                    raise WoonError("book supplements must preserve rendered claim order")
 
         declared_retired_paths = tuple(sorted(set(transaction.retired_output_paths)))
         if len(declared_retired_paths) != len(transaction.retired_output_paths):
@@ -4482,13 +4829,22 @@ class CompiledWiki:
                 self._page_curation(page, curations),
             )
 
+        if coverage_update is not None:
+            assert transaction.coverage_manifest is not None
+            load_supplemental_runnables(
+                self._settings.vault,
+                transaction.coverage_manifest.replacement,
+                sources=sources,
+                claims=claims,
+            )
         tree_scopes: tuple[str | None, ...] = (
             (None,)
             if transaction.refresh_wiki_tree
             else tuple(
                 page_id
                 for page_id in page_ids
-                if isinstance(pages[page_id].get("frontmatter"), dict)
+                if page_id not in preserved_navigation
+                and isinstance(pages[page_id].get("frontmatter"), dict)
                 and pages[page_id]["frontmatter"].get("navigation_groups")
             )
         )
@@ -4540,7 +4896,12 @@ class CompiledWiki:
                         tree_plan.expected_inputs,
                         tree_plan.previous_inputs,
                     )
-        input_snapshot = self.snapshot_inputs()
+        input_snapshot = self.snapshot_inputs(
+            extra_paths=(
+                *navigation_updates,
+                *((coverage_update[0],) if coverage_update is not None else ()),
+            )
+        )
         output_snapshot = self.snapshot_outputs(
             extra_relative_paths=tuple(
                 sorted(
@@ -4576,6 +4937,10 @@ class CompiledWiki:
                 ):
                     raise WoonError("native retirement survivor after hash was not written")
             self._write_inputs(sources, claims, pages, curations)
+            if coverage_update is not None:
+                atomic_write(*coverage_update)
+            for navigation_path, navigation_content in navigation_updates.items():
+                atomic_write(navigation_path, navigation_content)
             if updated_retirement_receipts != existing_retirement_receipts:
                 self._write_retirement_receipts(updated_retirement_receipts)
                 self._write_retirement_receipts_anchor(
@@ -4601,6 +4966,10 @@ class CompiledWiki:
             self._refresh_generated_view_receipts(
                 tuple(sorted(tree_changed_paths & compiler_paths))
             )
+            if navigation_updates:
+                validate_book_navigation_outputs(
+                    self._settings.vault, transaction.book_navigation_rebindings, pages
+                )
             audit = self.audit()
             unexpected_audit_errors = Counter(audit.errors) - preexisting_audit_errors
             if unexpected_audit_errors:
@@ -4612,6 +4981,16 @@ class CompiledWiki:
                 raise WoonError(
                     "compiled Wiki transaction final audit failed: " + "; ".join(audit.errors)
                 )
+            if coverage_update is not None:
+                coverage_audit = audit_book_coverage_scope(
+                    self._settings.vault,
+                    coverage_update[0].relative_to(self._settings.vault).as_posix(),
+                )
+                if not coverage_audit.complete:
+                    detail = (
+                        coverage_audit.errors[0] if coverage_audit.errors else "scope incomplete"
+                    )
+                    raise WoonError(f"book supplement scoped coverage failed: {detail}")
         except Exception:
             self.restore_inputs(input_snapshot)
             self.restore_outputs(output_snapshot)
@@ -5314,6 +5693,565 @@ class CompiledWiki:
 
         return self._settings.output_root
 
+    def _current_with_runnable_corrections(
+        self, current: dict[str, Any] | None, update: BookCoverageManifestUpdate
+    ) -> dict[str, Any] | None:
+        """Validate reviewed classification deltas before the immutable comparison.
+
+        The comparison view changes only runnable_support. Original content,
+        identities, locators, hashes, inventory order and leaf owners remain
+        immutable; the normal static delivery and execution audits still run.
+        """
+
+        proof = update.runnable_support_corrections
+        if proof is None:
+            return current
+        replacement = update.replacement
+        if (
+            current is None
+            or update.expected_sha256 is None
+            or current.get("schema_version") != BOOK_COVERAGE_SCHEMA_VERSION
+            or replacement.get("schema_version") != BOOK_COVERAGE_SCHEMA_VERSION
+            or current.get("workflow_phase") != "source-landed"
+            or replacement.get("workflow_phase") != "translated"
+        ):
+            raise WoonError(
+                "runnable corrections require a pinned source-landed to translated review"
+            )
+        if not isinstance(proof, dict) or set(proof) != {
+            "expected_source_elements_sha256",
+            "evidence_relative_path",
+            "evidence_sha256",
+            "items",
+        }:
+            raise WoonError("runnable correction proof fields are invalid")
+        before, after = current.get("source_elements"), replacement.get("source_elements")
+        if (
+            not isinstance(before, list)
+            or not isinstance(after, list)
+            or not before
+            or len(before) != len(after)
+            or proof["expected_source_elements_sha256"] != _sha256_canonical_json(before)
+        ):
+            raise WoonError("runnable correction source inventory hash or length differs")
+        if _source_owner_bindings(current) != _source_owner_bindings(replacement):
+            raise WoonError("runnable correction cannot change source element leaf ownership")
+        items = proof["items"]
+        if not isinstance(items, list) or not items:
+            raise WoonError("runnable corrections require explicit non-empty items")
+        corrections: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or set(item)
+                != {
+                    "element_id",
+                    "block_id",
+                    "owner_id",
+                    "field",
+                    "before",
+                    "after",
+                    "source_sha256",
+                    "reason",
+                }
+                or not all(isinstance(value, str) and value.strip() for value in item.values())
+            ):
+                raise WoonError("runnable correction item fields are invalid")
+            if item["element_id"] in corrections:
+                raise WoonError("runnable correction repeats an element")
+            if item["field"] != "runnable_support" or (item["before"], item["after"]) not in {
+                ("supported", "static-exception"),
+                ("static-exception", "supported"),
+            }:
+                raise WoonError(
+                    "runnable correction only accepts reviewed support classification changes"
+                )
+            corrections[item["element_id"]] = item
+
+        relative = proof["evidence_relative_path"]
+        if not isinstance(relative, str):
+            raise WoonError("runnable correction evidence path must be relative")
+        evidence_path = _inside(self._settings.vault, relative, "runnable correction evidence")
+        cursor = self._settings.vault
+        for part in Path(relative).parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise WoonError("runnable correction evidence must not use symlinks")
+        if not evidence_path.is_file():
+            raise WoonError("runnable correction evidence file is missing")
+        evidence_bytes = evidence_path.read_bytes()
+        if _sha256_bytes(evidence_bytes) != proof["evidence_sha256"]:
+            raise WoonError("runnable correction evidence hash differs")
+        try:
+            evidence = json.loads(evidence_bytes)
+        except ValueError as error:
+            raise WoonError("runnable correction evidence must be JSON") from error
+        if (
+            not isinstance(evidence, dict)
+            or evidence.get("provider") != "local"
+            or evidence.get("external_transmission") is not False
+            or not isinstance(evidence.get("results"), list)
+        ):
+            raise WoonError("runnable correction requires local source classification evidence")
+        results: dict[str, dict[str, Any]] = {}
+        for result in evidence["results"]:
+            if not isinstance(result, dict) or not isinstance(result.get("block_id"), str):
+                raise WoonError("runnable correction evidence result is invalid")
+            if result["block_id"] in results:
+                raise WoonError("runnable correction evidence repeats a block")
+            results[result["block_id"]] = result
+
+        assignments = _assignment_map(replacement.get("source_element_assignments"))
+        changed: set[str] = set()
+        used_blocks: set[str] = set()
+        for previous, following in zip(before, after, strict=True):
+            if not isinstance(previous, dict) or not isinstance(following, dict):
+                raise WoonError("runnable correction source inventory entries must be objects")
+            if previous == following:
+                continue
+            element_id = str(previous.get("element_id", ""))
+            item = corrections.get(element_id)
+            if (
+                item is None
+                or previous.get("kind") not in {"code", "example"}
+                or previous.get("runnable_support") != item["before"]
+                or following != {**previous, "runnable_support": item["after"]}
+                or item["source_sha256"] != previous.get("source_sha256")
+            ):
+                raise WoonError("runnable correction changed unreviewed source identity or fields")
+            assignment = assignments.get(element_id, {})
+            result = results.get(item["block_id"], {})
+            if item["after"] == "supported":
+                if item["block_id"] in used_blocks:
+                    raise WoonError("runnable correction repeats its original source block")
+                if assignment.get("verification_evidence") != (
+                    self._settings.vault.name + "/" + relative
+                ):
+                    raise WoonError(
+                        "runnable upgrade must use the exact correction evidence locator"
+                    )
+                runnable_upgrade(
+                    self._settings.vault,
+                    previous,
+                    item,
+                    result,
+                    assignment,
+                    proof["evidence_sha256"],
+                )
+                used_blocks.add(item["block_id"])
+                changed.add(element_id)
+                continue
+            if (
+                item["block_id"] in used_blocks
+                or result.get("status") != "static"
+                or result.get("reason") != item["reason"]
+                or not item["owner_id"].endswith("/" + str(result.get("owner", "")))
+                or assignment.get("owner_id") != item["owner_id"]
+                or assignment.get("delivery") != "static-exception"
+                or assignment.get("runnable_required") is not False
+                or assignment.get("exception_reason_code") not in STATIC_EXCEPTION_REASON_CODES
+                or assignment.get("source_locator") != previous.get("source_locator")
+                or assignment.get("source_sha256") != previous.get("source_sha256")
+                or assignment.get("original_test_sha256") != proof["evidence_sha256"]
+            ):
+                raise WoonError("runnable correction does not match its static source evidence")
+            used_blocks.add(item["block_id"])
+            changed.add(element_id)
+        if changed != set(corrections):
+            raise WoonError("runnable correction items must exactly match changed source elements")
+        comparison = copy.deepcopy(current)
+        comparison["source_elements"] = copy.deepcopy(after)
+        return comparison
+
+    def _preserved_navigation_pages(
+        self,
+        transaction: CompiledWikiTransaction,
+        sources: dict[str, dict[str, Any]],
+        claims: dict[str, dict[str, Any]],
+        pages: dict[str, dict[str, Any]],
+        curations: dict[str, dict[str, Any]],
+        receipts: dict[str, dict[str, Any]],
+    ) -> frozenset[str]:
+        """Reuse a current navigation block for one pinned prose-only update.
+
+        Changing a reader pointer does not change its existing child tree. New
+        pages, structural edits, and unpinned updates retain the normal refresh.
+        """
+        if (
+            len(transaction.pages_upsert) != 1
+            or transaction.refresh_wiki_tree
+            or transaction.page_retirements
+            or transaction.retired_output_paths
+            or transaction.wikilink_rewrites
+            or transaction.expected_catalog_revision is None
+        ):
+            return frozenset()
+        replacement = transaction.pages_upsert[0]
+        page_id = str(replacement.get("page_id", ""))
+        current = pages.get(page_id)
+        if current is None or not transaction.expected_page_spec_sha256.get(page_id):
+            return frozenset()
+
+        def navigation_spec(page: dict[str, Any]) -> dict[str, Any]:
+            record = copy.deepcopy(page)
+            for key in ("source_ids", "claim_ids", "render"):
+                record.pop(key, None)
+            metadata = record.get("frontmatter")
+            if isinstance(metadata, dict):
+                for key in ("summary", "updated"):
+                    metadata.pop(key, None)
+            return record
+
+        metadata = current.get("frontmatter", {})
+        if (
+            not isinstance(metadata, dict)
+            or not metadata.get("navigation_groups")
+            or metadata.get("canonical_id") != page_id
+            or navigation_spec(current) != navigation_spec(replacement)
+            or current.get("render", {}).get("kind") not in {"source-body", "toc-only"}
+            or replacement.get("render", {}).get("kind") != "source-body"
+        ):
+            return frozenset()
+        current_sources = self._page_sources(current, sources)
+        current_claims = self._page_claims(current, claims)
+        current_curation = self._page_curation(current, curations)
+        _validate_page(current, current_sources, current_claims, current_curation)
+        path = _inside(self._settings.output_root, current["output_path"], "page output_path")
+        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+        receipt = receipts.get(page_id, {})
+        if (
+            "<!-- woon-wiki-children:start -->" not in existing
+            or receipt.get("output_sha256") != _sha256_text(existing)
+            or receipt.get("input_sha256")
+            != _input_hash(current, current_sources, current_claims, current_curation)
+        ):
+            return frozenset()
+        available = {
+            **sources,
+            **{str(item.get("source_id")): item for item in transaction.sources_upsert},
+        }
+        after_source = available.get(str(replacement["render"].get("source_id")), {})
+        after_body = str(after_source.get("body", ""))
+        before_body = ""
+        if current["render"]["kind"] == "source-body":
+            before_body = str(sources[current["render"]["source_id"]].get("body", ""))
+        else:
+            # A TOC has no rendered source body to compare. Reuse its tree only
+            # for one existing private Markdown pointer, not a prose promotion.
+            if private_reader_target(self._settings.vault, path, metadata, after_body) is None:
+                return frozenset()
+        # Body wikilinks can affect generated relationships, unlike a plain
+        # Markdown pointer to an independent private reader.
+        if WIKILINK_RE.findall(before_body) != WIKILINK_RE.findall(after_body):
+            return frozenset()
+        return frozenset({page_id})
+
+    def _prepare_korean_prose_edits(
+        self,
+        current: dict[str, Any] | None,
+        update: BookCoverageManifestUpdate,
+    ) -> tuple[dict[str, str], dict[str, Any]]:
+        if (
+            update.mode != "merge-scope"
+            or update.expected_sha256 is None
+            or update.korean_prose_edits is None
+            or update.editorial_line_removals is not None
+            or update.runnable_support_corrections is not None
+        ):
+            raise WoonError("Korean prose edit requires a separate pinned scoped update")
+        sources, claims, pages, _, _ = self._load_inputs()
+        return prepare_korean_prose_edits(
+            self._settings.vault,
+            current,
+            update.replacement,
+            update.korean_prose_edits,
+            sources,
+            pages,
+            claims,
+        )
+
+    def _current_with_korean_prose_edits(
+        self,
+        current: dict[str, Any] | None,
+        update: BookCoverageManifestUpdate,
+    ) -> dict[str, Any] | None:
+        if update.korean_prose_edits is None:
+            return current
+        return self._prepare_korean_prose_edits(current, update)[1]
+
+    def _editorial_removed_bodies(self, update: BookCoverageManifestUpdate) -> dict[str, str]:
+        """Derive exact bodies from immutable, pinned authoring records."""
+        proofs = update.editorial_line_removals
+        if (
+            update.mode != "merge-scope"
+            or update.runnable_support_corrections is not None
+            or not isinstance(proofs, dict)
+            or not proofs
+            or update.expected_sha256 is None
+        ):
+            raise WoonError("editorial removal requires a pinned, separate scoped update")
+        sources, _, pages, _, _ = self._load_inputs()
+        bodies: dict[str, str] = {}
+        for page_id, proof in proofs.items():
+            if not isinstance(proof, dict) or set(proof) != {
+                "source_id",
+                "source_record_sha256",
+                "lines",
+                "body_sha256",
+            }:
+                raise WoonError("editorial removal requires exact source and body pins")
+            page = pages.get(page_id, {})
+            render = page.get("render", {})
+            source = sources.get(render.get("source_id"), {})
+            if (
+                render.get("kind") != "source-body"
+                or render.get("personal_footnotes")
+                or render.get("supplemental_claim_ids")
+                or proof["source_id"] != render.get("source_id")
+                or proof["source_record_sha256"] != _sha256_canonical_json(source)
+                or source.get("privacy") != "local-only"
+                or page.get("frontmatter", {}).get("reader_language") != "ko"
+            ):
+                raise WoonError("editorial removal source changed or contains personal notes")
+            body = source.get("body")
+            lines = proof["lines"]
+            if (
+                not isinstance(body, str)
+                or not isinstance(lines, list)
+                or not lines
+                or any(not isinstance(line, str) for line in lines)
+                or len(set(lines)) != len(lines)
+            ):
+                raise WoonError("editorial removal requires distinct exact callout lines")
+            if re.search(r"(?m)^[ \t]*>(?:[ \t]*>)*[ \t]*(?:`{3,}|~{3,})", body):
+                raise WoonError("editorial removal does not support quoted code fences")
+            for line in lines:
+                matches = list(re.finditer(r"^" + re.escape(line) + r"$", body, re.M))
+                if (
+                    re.fullmatch(r"> \*\*원문 정정:\*\* [^\r\n]+", line) is None
+                    or re.search(r"`{3,}|~{3,}", line)
+                    or len(matches) != 1
+                ):
+                    raise WoonError("editorial removal must name one exact editorial callout")
+                start = matches[0].start()
+                if any(
+                    start < end and begin < start + len(line) for begin, end in _fenced_lines(body)
+                ):
+                    raise WoonError("editorial removal must not enter a code fence")
+                body = _remove_editorial_line(body, matches[0])
+            if _sha256_text(body) != proof["body_sha256"]:
+                raise WoonError("editorial removal must preserve every other source byte")
+            bodies[page_id] = body
+        return bodies
+
+    def _current_with_editorial_removals(
+        self,
+        current: dict[str, Any] | None,
+        update: BookCoverageManifestUpdate,
+    ) -> dict[str, Any] | None:
+        """Permit only the corresponding editorial suffixes in delivery spans."""
+        if update.editorial_line_removals is None:
+            return current
+        bodies = self._editorial_removed_bodies(update)
+        if (
+            not isinstance(current, dict)
+            or current.get("workflow_phase") != "translated"
+            or update.replacement.get("workflow_phase") != "translated"
+        ):
+            raise WoonError("editorial removal requires an existing translated scope")
+        expected = copy.deepcopy(current.get("source_element_assignments", []))
+        owners = {row.get("owner_id") for row in expected}
+        if not set(bodies).issubset(owners):
+            raise WoonError("editorial removal owner is outside the pinned scope")
+        for row in expected:
+            owner = row.get("owner_id")
+            if owner not in bodies or not isinstance(row.get("delivery_span"), str):
+                continue
+            span = row["delivery_span"]
+            lines = update.editorial_line_removals[owner]["lines"]
+            for line in lines:
+                matches = list(re.finditer(r"^" + re.escape(line) + r"$", span, re.M))
+                if not matches:
+                    continue
+                if len(matches) != 1:
+                    raise WoonError("editorial span must contain one exact callout line")
+                span = _remove_editorial_line(span, matches[0], trailing_separator=True)
+            if span != row["delivery_span"]:
+                if not span.strip() or span not in bodies[owner]:
+                    raise WoonError("editorial removal cannot remove a source meaning unit")
+                row.update(delivery_span=span, delivery_span_sha256=_sha256_text(span))
+        if update.replacement.get("source_element_assignments") != expected:
+            raise WoonError("editorial removal changed unrelated delivery or code bindings")
+        return {**current, "source_element_assignments": expected}
+
+    def validate_compiled_book_coverage_update(
+        self, transaction: CompiledWikiTransaction
+    ) -> Path | None:
+        """Return the pinned scope to snapshot for an additive book supplement."""
+
+        validated = self._validated_transaction_book_coverage(transaction)
+        return validated[0] if validated is not None else None
+
+    def validate_compiled_book_navigation_rebindings(
+        self, transaction: CompiledWikiTransaction
+    ) -> dict[Path, bytes]:
+        if not transaction.book_navigation_rebindings:
+            return {}
+        if (
+            transaction.coverage_manifest is not None
+            or transaction.expected_catalog_revision is None
+            or set(transaction.expected_page_spec_sha256) != set(transaction.expected_revisions)
+            or not transaction.refresh_wiki_tree
+        ):
+            raise WoonError("book navigation rebinding requires a separate pinned restructure")
+        _, _, pages, _, _ = self._load_inputs()
+        return prepare_book_navigation_rebindings(
+            self._settings.vault,
+            transaction.book_navigation_rebindings,
+            pages,
+            {page["page_id"]: page for page in transaction.pages_upsert},
+            frozenset(item.page_id for item in transaction.page_retirements),
+        )
+
+    def _validated_transaction_book_coverage(
+        self, transaction: CompiledWikiTransaction
+    ) -> tuple[Path, bytes] | None:
+        update = transaction.coverage_manifest
+        if update is not None and update.korean_prose_edits is not None:
+            raise WoonError("Korean prose edits require the verified-book update service")
+        revisions = transaction.personal_footnote_revision_ids
+        if not isinstance(revisions, dict) or any(
+            page_id not in transaction.expected_revisions
+            or not isinstance(note_ids, tuple)
+            or not note_ids
+            or any(not isinstance(note_id, str) or not note_id for note_id in note_ids)
+            or len(set(note_ids)) != len(note_ids)
+            for page_id, note_ids in revisions.items()
+        ):
+            raise WoonError("footnote revisions require explicit page owners and distinct note IDs")
+        if revisions and update is None:
+            raise WoonError("footnote revisions require a scoped coverage transaction")
+        if update is None:
+            return None
+        if (
+            update.mode != "merge-scope"
+            or update.expected_sha256 is None
+            or update.runnable_support_corrections is not None
+            or transaction.expected_catalog_revision is None
+            or set(transaction.expected_page_spec_sha256) != set(transaction.expected_revisions)
+            or transaction.page_retirements
+            or transaction.wikilink_rewrites
+            or transaction.curated_successor_page_ids
+            or transaction.retired_output_paths
+            or transaction.refresh_wiki_tree
+        ):
+            raise WoonError("book supplements require a pinned, additive scoped transaction")
+        path, content = self._validated_coverage_manifest_update(update)
+        current = json.loads(path.read_bytes())
+        replacement = update.replacement
+        if book_workflow_phase_index(current.get("workflow_phase")) < book_workflow_phase_index(
+            "translated"
+        ) or {key: value for key, value in current.items() if key != "supplemental_runnables"} != {
+            key: value for key, value in replacement.items() if key != "supplemental_runnables"
+        }:
+            raise WoonError(
+                "book supplements must preserve the translated scope and original counts"
+            )
+        before = current.get("supplemental_runnables", [])
+        after = replacement.get("supplemental_runnables", [])
+        if (
+            not isinstance(before, list)
+            or not isinstance(after, list)
+            or after[: len(before)] != before
+        ):
+            raise WoonError("book supplements must preserve existing runnable bindings in order")
+        owners = set(transaction.expected_revisions)
+        for row in after[len(before) :]:
+            if not isinstance(row, dict) or row.get("owner_id") not in owners:
+                raise WoonError("new supplemental runnable owner must be an explicit page upsert")
+        return path, content
+
+    def assert_affected_pages_current(
+        self, page_ids: tuple[str, ...], *, extra_paths: tuple[Path, ...] = ()
+    ) -> None:
+        """Require current receipts for changed pages and their compiled navigation ancestors."""
+        _sources, _claims, pages, _curations, _receipts = self._load_inputs()
+        by_path = {"wiki/" + page["output_path"]: page_id for page_id, page in pages.items()}
+        selected = set(page_ids)
+        for path in extra_paths:
+            relative = path.resolve().relative_to(self._settings.vault.resolve()).as_posix()
+            if relative in by_path:
+                selected.add(by_path[relative])
+        pending = list(selected)
+        while pending:
+            page_id = pending.pop()
+            if page_id not in pages:
+                raise WoonError(f"affected compiled page is missing: {page_id}")
+            parent = pages[page_id].get("frontmatter", {}).get("parent")
+            if not isinstance(parent, str):
+                continue
+            target = parent.removeprefix("[[").removesuffix("]]").split("|", 1)[0]
+            target = target.removesuffix(".md") + ".md"
+            parent_id = by_path.get(target)
+            if parent_id is not None and parent_id not in selected:
+                selected.add(parent_id)
+                pending.append(parent_id)
+        for page_id in sorted(selected):
+            relative = "wiki/" + pages[page_id]["output_path"]
+            state = self.page_verification(page_id, relative)
+            if state != "receipt-verified":
+                raise WoonError(f"affected page {page_id} is {state}")
+
+    def page_verification(self, page_id: str | None, relative_path: str) -> str:
+        """Verify a retrieved page's inputs and receipt without auditing unrelated pages.
+
+        This read-only status is not publication approval or a semantic truth claim.
+        Whole-catalog validation remains mandatory for a full publication.
+        """
+        try:
+            sources, claims, pages, curations, receipts = self._load_inputs()
+            if page_id is None or page_id not in pages:
+                target = (self._settings.vault / relative_path).resolve()
+                matches = [
+                    key
+                    for key, value in pages.items()
+                    if _inside(self._settings.output_root, value["output_path"], "page output_path")
+                    == target
+                ]
+                if not matches:
+                    return "not-compiler-owned"
+                if len(matches) != 1:
+                    return "unverified-inputs"
+                page_id = matches[0]
+            page = pages[page_id]
+            source_records = self._page_sources(page, sources)
+            claim_records = self._page_claims(page, claims)
+            curation = self._page_curation(page, curations)
+            _validate_page(page, source_records, claim_records, curation)
+            review_items = _load_yaml_list(self._settings.review_queue_path, "items")
+            for source in source_records:
+                _validate_source(source)
+                _validate_archive_review_binding(source, review_items)
+            for claim in claim_records:
+                _validate_claim_record(claim)
+            receipt = receipts.get(page_id, {})
+            input_hash = _input_hash(page, source_records, claim_records, curation)
+            path = _inside(self._settings.output_root, page["output_path"], "page output_path")
+            actual = path.read_text(encoding="utf-8")
+            if receipt.get("input_sha256") != input_hash:
+                return "stale-inputs"
+            if receipt.get("output_sha256") != _sha256_text(actual):
+                return "unverified-output"
+            rendered = _render_page(page, source_records, claim_records, curation, input_hash)
+            projection = _sha256_text(preserve_managed_context("", rendered))
+            if receipt.get("compiler_projection_sha256") != projection:
+                return "stale-compiler"
+            if preserve_managed_context(actual, rendered) != actual:
+                return "stale-compiler"
+            return "receipt-verified"
+        except (KeyError, OSError, UnicodeError, WoonError):
+            return "unverified-inputs"
+
 
 def _validate_page(
     page: dict[str, Any],
@@ -5344,17 +6282,50 @@ def _validate_page(
         source_id = _required_string(render, "source_id")
         if source_id not in {record.get("source_id") for record in sources}:
             raise WoonError("source-body render source_id must be included in page source_ids")
+    supplemental_claim_ids = render.get("supplemental_claim_ids", [])
+    if "supplemental_claim_ids" in render:
+        if kind != "source-body":
+            raise WoonError("supplemental claims require source-body rendering")
+        _string_list(supplemental_claim_ids, "render supplemental_claim_ids")
+        if len(set(supplemental_claim_ids)) != len(supplemental_claim_ids):
+            raise WoonError("render supplemental_claim_ids must be unique")
+        by_claim = {record["claim_id"]: record for record in claims}
+        by_source = {record["source_id"]: record for record in sources}
+        for claim_id in supplemental_claim_ids:
+            claim = by_claim.get(claim_id)
+            if claim is None or claim.get("kind") != "curated-document":
+                raise WoonError("supplemental render requires an attached curated claim")
+            evidence_ids = _string_list(claim.get("source_ids"), "claim source_ids")
+            if (
+                len(evidence_ids) != 1
+                or evidence_ids[0] == render["source_id"]
+                or by_source.get(evidence_ids[0], {}).get("kind") != "curated-wiki"
+                or by_source.get(evidence_ids[0], {}).get("privacy") != "local-only"
+            ):
+                raise WoonError("supplemental claim must have separate local-only curated evidence")
     for source in sources:
         _validate_source(source)
         if source.get("lifecycle") != "compiled":
             raise WoonError("compiled page may only use compiled sources")
     for claim in claims:
         _validate_claim(claim, sources)
-        if kind == "claims" and len(claim["markdown"].strip()) > MAX_COMPOSED_CLAIM_MARKDOWN_CHARS:
+        if (kind == "claims" or claim["claim_id"] in supplemental_claim_ids) and len(
+            claim["markdown"].strip()
+        ) > MAX_COMPOSED_CLAIM_MARKDOWN_CHARS:
             raise WoonError(
                 "composed claim markdown exceeds "
                 f"{MAX_COMPOSED_CLAIM_MARKDOWN_CHARS} characters; split it by revisitable claim"
             )
+    if "personal_footnotes" in render:
+        source_body = next(
+            (
+                record["body"]
+                for record in sources
+                if record["source_id"] == render.get("source_id")
+            ),
+            "",
+        )
+        render_personal_footnotes(source_body, render, claims)
     access = str(frontmatter.get("access", "local-only"))
     if access == "public" and any(str(source.get("privacy")) != "public" for source in sources):
         raise WoonError("public compiled page requires public source provenance")
@@ -5934,6 +6905,12 @@ def _render_page(
     if render["kind"] == "source-body":
         source_id = render["source_id"]
         body = next(record["body"] for record in sources if record["source_id"] == source_id)
+        by_claim = {record["claim_id"]: record for record in claims}
+        if "personal_footnotes" in render:
+            body = render_personal_footnotes(body, render, claims)
+        else:
+            for claim_id in render.get("supplemental_claim_ids", []):
+                body = body.rstrip() + "\n\n" + by_claim[claim_id]["markdown"].strip() + "\n"
     elif render["kind"] == "claims":
         body = "\n\n".join(
             record["markdown"].strip() for record in claims if record["markdown"].strip()
@@ -7060,20 +8037,26 @@ def _materialize_book_coverage_scopes(
                 scope.get("source_asset_inventory"),
                 old_image_paths,
             )
-        wrappers = merged.get("retired_source_section_wrappers")
-        scope_wrappers = scope.get("retired_source_section_wrappers")
-        if not isinstance(wrappers, list) or not isinstance(scope_wrappers, list):
-            raise WoonError("materialize-scopes wrapper inventories must be arrays")
-        seen_wrappers: set[bytes] = set()
-        combined_wrappers: list[Any] = []
-        for item in (*wrappers, *scope_wrappers):
-            encoded = json.dumps(
-                item, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-            ).encode("utf-8")
-            if encoded not in seen_wrappers:
-                seen_wrappers.add(encoded)
-                combined_wrappers.append(copy.deepcopy(item))
-        merged["retired_source_section_wrappers"] = combined_wrappers
+        wrappers = _indexed_manifest_records(
+            merged.get("retired_source_section_wrappers"), "wrapper_id", "base wrappers"
+        )
+        scope_wrappers = _indexed_manifest_records(
+            scope.get("retired_source_section_wrappers"), "wrapper_id", "scope wrappers"
+        )
+        delivery_fields = {"relocated_delivery_span", "relocated_delivery_span_sha256"}
+        for wrapper_id, item in scope_wrappers.items():
+            previous = wrappers.get(wrapper_id)
+            if previous == item:
+                continue
+            if not _coverage_owner_in_scope(str(item.get("first_leaf_id", "")), root_id):
+                raise WoonError("materialize-scopes wrapper delivery is outside its scope")
+            if previous is not None and (
+                {k: v for k, v in previous.items() if k not in delivery_fields}
+                != {k: v for k, v in item.items() if k not in delivery_fields}
+            ):
+                raise WoonError("materialize-scopes cannot change retired wrapper identity")
+            wrappers[wrapper_id] = copy.deepcopy(item)
+        merged["retired_source_section_wrappers"] = list(wrappers.values())
         base = copy.deepcopy(merged)
 
     nodes = merged.get("nodes")
@@ -7624,6 +8607,21 @@ def _retirement_transaction_sha256(transaction: CompiledWikiTransaction) -> str:
             ],
             "retired_output_paths": sorted(transaction.retired_output_paths),
             "refresh_wiki_tree": transaction.refresh_wiki_tree,
+            **(
+                {
+                    "book_navigation_rebindings": [
+                        {
+                            "relative_path": item.relative_path,
+                            "expected_sha256": item.expected_sha256,
+                            "replacement_sha256": _sha256_canonical_json(item.replacement),
+                            "scope_sha256": item.scope_sha256,
+                        }
+                        for item in transaction.book_navigation_rebindings
+                    ]
+                }
+                if transaction.book_navigation_rebindings
+                else {}
+            ),
         }
     )
 
@@ -8401,3 +9399,140 @@ def _sha256_canonical_json(value: object) -> str:
     except (TypeError, ValueError) as error:
         raise WoonError("compiled Wiki page spec is not canonical JSON") from error
     return _sha256_text(encoded)
+
+
+def _remove_editorial_line(
+    text: str,
+    match: re.Match[str],
+    *,
+    trailing_separator: bool = False,
+) -> str:
+    """Remove only the matched line and its adjacent paragraph separator."""
+    start, end = match.span()
+    if text.startswith("\n\n", end):
+        end += 2
+    elif text.startswith("\n", end):
+        end += 1
+    # A delivery span ending at the callout has no following paragraph.
+    # Preserve unrelated spaces and every nonmatching occurrence verbatim.
+    if trailing_separator and end == len(text):
+        if text[:start].endswith("\n\n"):
+            start -= 2
+        elif text[:start].endswith("\n"):
+            start -= 1
+    return text[:start] + text[end:]
+
+
+def _validate_prose_footnote_revisions(
+    previous: dict[str, Any],
+    replacement: dict[str, Any],
+    revised_ids: tuple[str, ...],
+    claims: dict[str, dict[str, Any]],
+    claim_upserts: tuple[dict[str, Any], ...],
+) -> None:
+    """Allow declared prose edits while preserving anchors, code and other notes."""
+    before = previous.get("personal_footnotes", [])
+    after = replacement.get("personal_footnotes", [])
+    if not isinstance(before, list) or not before or not isinstance(after, list):
+        raise WoonError("footnote revisions require existing personal footnotes")
+    for notes, render in ((before, previous), (after, replacement)):
+        if any(
+            not isinstance(note, dict)
+            or set(note) != {"id", "claim_id", "anchor"}
+            or any(not isinstance(value, str) or not value for value in note.values())
+            for note in notes
+        ) or len({note["id"] for note in notes}) != len(notes):
+            raise WoonError("footnote revisions require unique stable note records")
+        if [note["claim_id"] for note in notes] != render.get("supplemental_claim_ids", []):
+            raise WoonError("footnote revisions must preserve exact rendered claim order")
+    old_notes = {note["id"]: note for note in before}
+    new_notes = {note["id"]: note for note in after}
+    if (
+        not set(revised_ids).issubset(old_notes)
+        or not set(new_notes).issubset(old_notes)
+        or [note["id"] for note in after]
+        != [note["id"] for note in before if note["id"] in new_notes]
+    ):
+        raise WoonError("footnote revisions must retain original IDs and relative order")
+    successors = {claim["claim_id"]: claim for claim in claim_upserts}
+    for note_id, old_note in old_notes.items():
+        new_note = new_notes.get(note_id)
+        if note_id not in revised_ids:
+            if new_note != old_note:
+                raise WoonError("footnote revision changed an undeclared note")
+            continue
+        if new_note == old_note:
+            raise WoonError("declared footnote revision must change or remove its note")
+        old_claim = claims.get(old_note["claim_id"], {})
+        markdowns = [old_claim.get("markdown")]
+        if new_note is not None:
+            if (
+                new_note["anchor"] != old_note["anchor"]
+                or new_note["claim_id"] in claims
+                or new_note["claim_id"] not in successors
+            ):
+                raise WoonError("footnote revision requires the same anchor and a new claim")
+            markdowns.append(successors[new_note["claim_id"]].get("markdown"))
+        if any(
+            not isinstance(markdown, str)
+            or not markdown.strip()
+            or re.search(r"(?m)(?:`{3,}|~{3,})|^(?:[ \t]*>[ \t]*)*(?: {4,}|\t)\S", markdown)
+            for markdown in markdowns
+        ):
+            raise WoonError("prose footnote revisions cannot change or remove code fences")
+
+
+def _verified_book_curated_predecessors(
+    page_id: str,
+    source_ids: list[str],
+    claim_ids: list[str],
+    sources: dict[str, dict[str, Any]],
+    claims: dict[str, dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """Stage an owned curated-to-verified transition without rewriting history.
+
+    An earlier curated claim may be detached from the page's source list. Only
+    an existing, valid same-page source proves that predecessor; missing or
+    foreign evidence is not invented or silently discarded by promotion.
+    """
+
+    def owned_source(source_id: str) -> bool:
+        source = sources.get(source_id)
+        if not _owned_curated_revision(source_id, "source", page_id):
+            return False
+        if source is None:
+            raise WoonError("verified book curated predecessor source is missing")
+        if source.get("kind") != "curated-wiki":
+            return False
+        _validate_source(source)
+        if source.get("source_id") != source_id or source.get("lifecycle") != "compiled":
+            raise WoonError("verified book curated predecessor source must be active and exact")
+        return True
+
+    predecessors = [source_id for source_id in source_ids if owned_source(source_id)]
+    predecessor_claims: list[str] = []
+    for claim_id in claim_ids:
+        if not _owned_curated_revision(claim_id, "claim", page_id):
+            continue
+        claim = claims.get(claim_id)
+        if claim is None:
+            raise WoonError("verified book curated predecessor claim is missing")
+        if claim.get("kind") != "curated-document":
+            continue
+        evidence = _string_list(claim.get("source_ids"), "claim source_ids")
+        if any(source_id not in sources for source_id in evidence):
+            raise WoonError("verified book curated predecessor evidence source is missing")
+        owned_evidence = [source_id for source_id in evidence if owned_source(source_id)]
+        if not owned_evidence:
+            continue
+        if any(
+            source_id not in source_ids and source_id not in owned_evidence
+            for source_id in evidence
+        ):
+            raise WoonError("verified book curated predecessor has detached foreign evidence")
+        _validate_claim(claim, [sources[source_id] for source_id in evidence])
+        if claim.get("claim_id") != claim_id:
+            raise WoonError("verified book curated predecessor claim identity is invalid")
+        predecessors.extend(owned_evidence)
+        predecessor_claims.append(claim_id)
+    return list(dict.fromkeys(predecessors)), predecessor_claims

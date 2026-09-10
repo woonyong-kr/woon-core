@@ -355,44 +355,49 @@ class KnowledgeService:
 
         if _transaction_refreshes_tree(transaction):
             return self.apply_wiki_restructure_transaction(transaction, ()).compiler
-
         if self._compiled_wiki is None:
             raise WoonError("compiled Wiki is not enabled for this knowledge vault")
-        page_ids = tuple(str(page.get("page_id", "")) for page in transaction.pages_upsert)
-        if not page_ids:
-            raise WoonError("compiled Wiki transaction requires at least one page upsert")
         with self._repository.exclusive():
-            for page_id in page_ids:
-                expected_revision = transaction.expected_revisions.get(page_id)
-                current = self._repository.get(page_id)
-                if expected_revision is None:
-                    if current is not None:
-                        raise WoonError(
-                            "compiled Wiki transaction expected a new page but it already exists: "
-                            f"{page_id}"
-                        )
-                    continue
-                if current is None:
-                    raise WoonError(
-                        "compiled Wiki transaction expected an existing page but it is missing: "
-                        f"{page_id}"
-                    )
-                if current.revision != expected_revision:
-                    raise WoonError(
-                        "compiled Wiki transaction page changed after it was read; "
-                        f"reload and merge before writing: {page_id}"
-                    )
+            self._validate_compiled_wiki_transaction_revisions(transaction)
 
-            input_snapshot = self._compiled_wiki.snapshot_inputs()
-            output_snapshot = self._compiled_wiki.snapshot_outputs(
-                extra_relative_paths=tuple(
-                    str(page.get("output_path", "")) for page in transaction.pages_upsert
+            coverage_path = self._compiled_wiki.validate_compiled_book_coverage_update(transaction)
+            navigation_updates = self._compiled_wiki.validate_compiled_book_navigation_rebindings(
+                transaction
+            )
+            input_snapshot = self._compiled_wiki.snapshot_inputs(
+                extra_paths=(
+                    *navigation_updates,
+                    *((coverage_path,) if coverage_path is not None else ()),
                 )
             )
+            output_snapshot = self._compiled_wiki.snapshot_outputs(
+                extra_relative_paths=tuple(
+                    sorted(
+                        {
+                            *(
+                                str(page.get("output_path", ""))
+                                for page in transaction.pages_upsert
+                            ),
+                            *transaction.retired_output_paths,
+                        }
+                    )
+                )
+            )
+            mutation_started = False
+
+            def before_write() -> None:
+                nonlocal mutation_started
+                self._validate_compiled_wiki_transaction_revisions(transaction)
+                mutation_started = True
+
             try:
-                report = self._compiled_wiki.apply_compiled_wiki_transaction(transaction)
+                report = self._compiled_wiki.apply_compiled_wiki_transaction(
+                    transaction, _before_write=before_write
+                )
                 self._reindex_unlocked()
             except Exception as transaction_error:
+                if not mutation_started:
+                    raise
                 try:
                     self._compiled_wiki.restore_inputs(input_snapshot)
                     self._compiled_wiki.restore_outputs(output_snapshot)
@@ -458,6 +463,7 @@ class KnowledgeService:
         coverage_manifest: BookCoverageManifestUpdate | None = None,
         staged_assets: tuple[StagedBookAsset, ...] = (),
         *,
+        audit_scope: str = "all",
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
         retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> VerifiedBookUpdateReport:
@@ -512,6 +518,7 @@ class KnowledgeService:
                     coverage_manifest,
                     retirement_image_replacements=retirement_image_replacements,
                     retirement_content_relocations=retirement_content_relocations,
+                    **({"audit_scope": audit_scope} if audit_scope != "all" else {}),
                 )
                 self._reindex_unlocked()
             except BaseException as update_error:
@@ -541,6 +548,7 @@ class KnowledgeService:
         coverage_manifest: BookCoverageManifestUpdate,
         staged_assets: tuple[StagedBookAsset, ...] = (),
         *,
+        audit_scope: str = "all",
         retirement_image_replacements: dict[str, dict[str, str]] | None = None,
         retirement_content_relocations: dict[str, tuple[str, ...]] | None = None,
     ) -> VerifiedBookPreflightReport:
@@ -560,7 +568,7 @@ class KnowledgeService:
                 retirement_content_relocations=retirement_content_relocations,
             )
             asset_counts = compiler.validate_staged_book_assets(staged_assets, coverage_manifest)
-            compiler.dry_run_verified_book_update(
+            dry_report = compiler.dry_run_verified_book_update(
                 pages,
                 replacements,
                 retirement_body_sha256,
@@ -568,10 +576,13 @@ class KnowledgeService:
                 staged_assets,
                 retirement_image_replacements=retirement_image_replacements,
                 retirement_content_relocations=retirement_content_relocations,
+                **({"audit_scope": audit_scope} if audit_scope != "all" else {}),
             )
         if coverage_path is None:  # pragma: no cover - public preflight requires coverage
             raise WoonError("verified book preflight requires a coverage manifest")
         return VerifiedBookPreflightReport(
+            audit_scope=audit_scope,
+            remaining_audit_errors=dry_report.remaining_audit_errors,
             ready=True,
             page_count=len(pages),
             retirement_count=len(replacements),
@@ -1446,6 +1457,15 @@ class KnowledgeService:
         compiler = self._compiled_wiki
         if compiler is None:
             raise WoonError("compiled Wiki is not enabled for this knowledge vault")
+        if compiler_transaction.coverage_manifest is not None and (
+            manual_writes
+            or resource_renames
+            or resource_reference_writes
+            or recording_bundle is not None
+        ):
+            raise WoonError(
+                "book supplements cannot be combined with manual or resource relocation"
+            )
         if (
             not manual_writes
             and not compiler_transaction.page_retirements
@@ -1470,7 +1490,16 @@ class KnowledgeService:
                 resource_renames, resource_reference_writes
             )
             recording_writes = prepare_recording_title_bundle(compiler.vault, recording_bundle)
-            input_snapshot = compiler.snapshot_inputs()
+            coverage_path = compiler.validate_compiled_book_coverage_update(compiler_transaction)
+            navigation_updates = compiler.validate_compiled_book_navigation_rebindings(
+                compiler_transaction
+            )
+            input_snapshot = compiler.snapshot_inputs(
+                extra_paths=(
+                    *navigation_updates,
+                    *((coverage_path,) if coverage_path is not None else ()),
+                )
+            )
             output_snapshot = compiler.snapshot_outputs(
                 extra_relative_paths=tuple(
                     sorted(

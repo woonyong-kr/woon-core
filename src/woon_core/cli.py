@@ -2065,7 +2065,12 @@ def _run_apply_compiled_transaction(arguments: list[str], output: TextIO) -> Non
         "pages_upsert",
         "curations_upsert",
     }
-    optional_fields = {"allow_preexisting_audit_errors"}
+    optional_fields = {
+        "allow_preexisting_audit_errors",
+        "expected_catalog_revision",
+        "expected_page_spec_sha256",
+        "coverage_manifest",
+    }
     if (
         not isinstance(payload, dict)
         or not required_fields.issubset(payload)
@@ -2085,6 +2090,18 @@ def _run_apply_compiled_transaction(arguments: list[str], output: TextIO) -> Non
         for key, value in expected_revisions.items()
     ):
         raise WoonError("apply-compiled-transaction expected_revisions are invalid")
+    expected_page_specs = payload.get("expected_page_spec_sha256", {})
+    if not isinstance(expected_page_specs, dict) or not all(
+        isinstance(key, str) and (value is None or isinstance(value, str))
+        for key, value in expected_page_specs.items()
+    ):
+        raise WoonError("apply-compiled-transaction expected_page_spec_sha256 is invalid")
+    vault_option = values.get("--vault")
+    vault = (
+        Path(vault_option).expanduser().resolve()
+        if vault_option is not None
+        else resolve_knowledge_vault()
+    )
 
     arrays: dict[str, tuple[dict[str, object], ...]] = {}
     for field in ("sources_upsert", "claims_upsert", "pages_upsert", "curations_upsert"):
@@ -2099,12 +2116,11 @@ def _run_apply_compiled_transaction(arguments: list[str], output: TextIO) -> Non
         pages_upsert=arrays["pages_upsert"],
         curations_upsert=arrays["curations_upsert"],
         allow_preexisting_audit_errors=allow_preexisting_audit_errors,
-    )
-    vault_option = values.get("--vault")
-    vault = (
-        Path(vault_option).expanduser().resolve()
-        if vault_option is not None
-        else resolve_knowledge_vault()
+        expected_catalog_revision=payload.get("expected_catalog_revision"),
+        expected_page_spec_sha256=expected_page_specs,
+        coverage_manifest=_parse_book_coverage_manifest_update(
+            payload.get("coverage_manifest"), vault
+        ),
     )
     _, service = build_knowledge_service(vault)
     report = service.apply_compiled_wiki_transaction(transaction)
@@ -2430,6 +2446,11 @@ def _parse_book_coverage_manifest_update(
         if mode == "materialize-scopes"
         else replace_fields
     )
+    corrections = raw.get("runnable_support_corrections")
+    if "runnable_support_corrections" in raw:
+        if mode == "materialize-scopes" or not isinstance(corrections, dict) or not corrections:
+            raise WoonError("runnable support corrections require replace or merge-scope proof")
+        expected_fields = expected_fields | {"runnable_support_corrections"}
     if mode not in {"replace", "merge-scope", "materialize-scopes"} or set(raw) != expected_fields:
         raise WoonError(
             "book promotion coverage_manifest fields are invalid; explicitly use replace "
@@ -2521,6 +2542,7 @@ def _parse_book_coverage_manifest_update(
             base_relative_path=base_relative_path,
             base_expected_sha256=base_expected_sha256,
             scope_root_id=scope_root_id.strip(),
+            runnable_support_corrections=corrections,
         )
     if mode == "materialize-scopes":
         raw_scopes = raw.get("scopes")
@@ -2578,6 +2600,7 @@ def _parse_book_coverage_manifest_update(
         relative_path=relative_path,
         expected_sha256=expected_sha256,
         replacement=replacement,
+        runnable_support_corrections=corrections,
     )
 
 
