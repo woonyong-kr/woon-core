@@ -1881,7 +1881,7 @@ class KnowledgeService:
             if not source.exists() and not source.is_symlink():
                 try:
                     with source.open("xb") as stream:
-                        os.fchmod(stream.fileno(), mode)
+                        source.chmod(mode)
                         stream.write(content)
                 except FileExistsError:
                     pass

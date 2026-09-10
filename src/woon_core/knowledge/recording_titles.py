@@ -408,7 +408,7 @@ def _publish_new(path: Path, content: bytes, mode: int) -> None:
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(content)
-            os.fchmod(stream.fileno(), mode)
+        temporary.chmod(mode)
         os.link(temporary, path, follow_symlinks=False)
     finally:
         temporary.unlink(missing_ok=True)
