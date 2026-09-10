@@ -21,6 +21,7 @@ class DocumentMetadata:
     source_ids: tuple[str, ...] = field(default_factory=tuple)
     node_kind: str = ""
     entity_kind: str = ""
+    identity_scope: str = ""
 
 
 @dataclass(frozen=True, slots=True)

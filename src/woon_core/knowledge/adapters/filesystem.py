@@ -178,7 +178,7 @@ class MarkdownDocumentRepository:
     def validate(self) -> list[str]:
         errors: list[str] = []
         identifiers: dict[str, str] = {}
-        titles: dict[str, str] = {}
+        titles: dict[tuple[str, str], str] = {}
         book_titles: dict[tuple[str, str], str] = {}
         book_roots = self._book_root_ids()
         if not self._root.is_dir():
@@ -215,11 +215,12 @@ class MarkdownDocumentRepository:
                     )
                 book_titles[key] = relative
             else:
-                if normalized_title in titles:
+                title_key = (document.metadata.identity_scope, normalized_title)
+                if title_key in titles:
                     errors.append(
-                        f"{relative}: duplicate title also used by {titles[normalized_title]}"
+                        f"{relative}: duplicate title also used by {titles[title_key]}"
                     )
-                titles[normalized_title] = relative
+                titles[title_key] = relative
         return errors
 
     def parse(self, relative_path: str, text: str) -> CanonicalDocument:
@@ -234,6 +235,9 @@ class MarkdownDocumentRepository:
         if not isinstance(raw, dict):
             raise WoonError("canonical document frontmatter must be a mapping")
         canonical_id = _required(raw, "canonical_id")
+        identity_scope = raw.get("identity_scope", "")
+        if not isinstance(identity_scope, str):
+            raise WoonError("canonical document identity_scope must be a string")
         metadata = DocumentMetadata(
             canonical_id=canonical_id,
             title=_required(raw, "title"),
@@ -250,6 +254,7 @@ class MarkdownDocumentRepository:
             source_ids=_strings(raw.get("source_ids")),
             node_kind=str(raw.get("node_kind", "")),
             entity_kind=str(raw.get("entity_kind", "")),
+            identity_scope=identity_scope.strip(),
         )
         heading = f"# {metadata.title}\n"
         if not content.startswith(heading):
@@ -399,6 +404,8 @@ class MarkdownDocumentRepository:
             frontmatter["node_kind"] = metadata.node_kind
         if metadata.entity_kind:
             frontmatter["entity_kind"] = metadata.entity_kind
+        if metadata.identity_scope:
+            frontmatter["identity_scope"] = metadata.identity_scope
         yaml_text = yaml.safe_dump(
             frontmatter, allow_unicode=True, sort_keys=False, default_flow_style=False
         )

@@ -250,6 +250,49 @@ def test_audit_allows_book_scoped_title_to_match_general_concept(tmp_path: Path)
     assert not any("title also used" in error for error in errors)
 
 
+def test_identity_scope_survives_storage_and_keeps_same_scope_titles_unique(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    concept = replace(
+        metadata("os/pintos"), title="PintOS", domain="os", prerequisites=(), identity_scope="os"
+    )
+    project = replace(
+        concept,
+        canonical_id="learning/pintos",
+        domain="learning",
+        identity_scope=" learning-project ",
+    )
+    service.archive(concept, "운영체제 개념.")
+    saved = service.archive(project, "학습 프로젝트 기록.")
+
+    assert saved.document.metadata.identity_scope == "learning-project"
+    assert service.get(project.canonical_id).metadata.identity_scope == "learning-project"
+    assert service.audit() == []
+    duplicate = replace(project, canonical_id="learning/duplicate", title="Pint OS")
+    with pytest.raises(WoonError, match="same normalized title"):
+        service.archive(duplicate, "중복 문서.")
+
+    # Direct file corruption must be caught by both repository and service audits.
+    source = tmp_path / saved.document.relative_path
+    source.with_name("duplicate.md").write_text(
+        source.read_text().replace(
+            "canonical_id: learning/pintos", "canonical_id: learning/duplicate"
+        )
+    )
+    errors = service.audit()
+    assert any("duplicate title also used" in error for error in errors)
+    assert any("normalized title also used" in error for error in errors)
+
+
+def test_identity_scope_rejects_malformed_frontmatter(tmp_path: Path) -> None:
+    repository = MarkdownDocumentRepository(tmp_path, tmp_path / "wiki")
+    with pytest.raises(WoonError, match="identity_scope must be a string"):
+        repository.parse(
+            "wiki/pintos.md",
+            "---\ncanonical_id: os/pintos\ntitle: PintOS\nsummary: 운영체제 학습.\n"
+            "identity_scope: [os]\n---\n\n# PintOS\n\n본문.\n",
+        )
+
+
 def test_audit_allows_same_frontmatter_title_in_different_books(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     for slug, title in (("first-book", "첫 번째 책"), ("second-book", "두 번째 책")):

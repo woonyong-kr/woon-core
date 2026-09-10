@@ -1080,7 +1080,7 @@ class KnowledgeService:
             for document in documents
             if document.metadata.entity_kind == "book"
         }
-        titles: dict[str, str] = {}
+        titles: dict[tuple[str, str], str] = {}
         sources: dict[str, str] = {}
         for document in documents:
             is_book_descendant = any(
@@ -1088,7 +1088,7 @@ class KnowledgeService:
                 for book_root in book_roots
             )
             if not is_book_descendant:
-                title = _fingerprint(document.metadata.title)
+                title = (document.metadata.identity_scope, _fingerprint(document.metadata.title))
                 if previous := titles.get(title):
                     errors.append(
                         f"{document.metadata.canonical_id}: normalized title also used by "
@@ -1173,7 +1173,10 @@ class KnowledgeService:
         for document in self._repository.list_documents():
             if document.metadata.canonical_id == metadata.canonical_id:
                 continue
-            if _fingerprint(document.metadata.title) == _fingerprint(metadata.title):
+            if (
+                document.metadata.identity_scope == metadata.identity_scope
+                and _fingerprint(document.metadata.title) == _fingerprint(metadata.title)
+            ):
                 raise WoonError(
                     "a canonical document with the same normalized title already exists: "
                     f"{document.metadata.canonical_id}"
@@ -1268,6 +1271,8 @@ class KnowledgeService:
         title = " ".join(metadata.title.split())
         summary = " ".join(metadata.summary.split())
         purpose = " ".join(metadata.purpose.split())
+        if not isinstance(metadata.identity_scope, str):
+            raise WoonError("canonical document identity_scope must be a string")
         if not title or not summary or not purpose:
             raise WoonError("title, summary, and purpose must not be empty")
         if metadata.difficulty not in DIFFICULTIES:
@@ -1290,6 +1295,7 @@ class KnowledgeService:
             domain=domain,
             summary=summary,
             purpose=purpose,
+            identity_scope=metadata.identity_scope.strip(),
             prerequisites=normalized_relations["prerequisites"],
             next_concepts=normalized_relations["next_concepts"],
             related=normalized_relations["related"],
