@@ -1522,9 +1522,7 @@ def _run_public_projection(arguments: list[str], output: TextIO) -> None:
                 "output_sha256": report.output_sha256,
                 "content_root": report.content_root.as_posix(),
                 "changed": result.changed if result is not None else False,
-                "receipt_path": (
-                    result.receipt_path.as_posix() if result is not None else None
-                ),
+                "receipt_path": (result.receipt_path.as_posix() if result is not None else None),
             },
             ensure_ascii=False,
             indent=2,

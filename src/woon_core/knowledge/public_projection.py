@@ -251,8 +251,10 @@ def prepare_public_projection(vault: Path, site: Path) -> PublicProjectionReport
     }
     if redirects:
         input_payload["redirects"] = [
-            {**({"path": item.public_path} if item.public_path else {"slug": item.slug}),
-             "target_slug": item.target_slug}
+            {
+                **({"path": item.public_path} if item.public_path else {"slug": item.slug}),
+                "target_slug": item.target_slug,
+            }
             for item in redirects
         ]
     input_sha256 = _sha256_json(input_payload)
@@ -312,8 +314,7 @@ def _prepare_redirects(
     for page_id, (frontmatter, _, _) in sorted(rendered.items()):
         former = frontmatter.get("public_redirect_from", [])
         if not isinstance(former, list) or any(
-            not isinstance(slug, str) or not _PUBLIC_SLUG.fullmatch(slug)
-            for slug in former
+            not isinstance(slug, str) or not _PUBLIC_SLUG.fullmatch(slug) for slug in former
         ):
             raise WoonError(f"public projection redirects require safe public slugs: {page_id}")
         target = _public_slug(frontmatter, page_id)
@@ -330,10 +331,14 @@ def _prepare_redirects(
                 raise WoonError(f"public projection redirect slug conflicts: {slug}")
             reserved_urls.add(url)
             reserved_files.add(_public_output_path(url))
-            redirects.append(PublicProjectionRedirect(
-                slug=slug, target_slug=target, relative_path=Path(f"{slug}.html"),
-                content=_render_redirect(url, target),
-            ))
+            redirects.append(
+                PublicProjectionRedirect(
+                    slug=slug,
+                    target_slug=target,
+                    relative_path=Path(f"{slug}.html"),
+                    content=_render_redirect(url, target),
+                )
+            )
         for path in sorted(former_paths):
             output = _public_output_path(path)
             if path in reserved_urls or output in reserved_files:
@@ -341,10 +346,15 @@ def _prepare_redirects(
             reserved_urls.add(path)
             reserved_files.add(output)
             relative = Path("legacy-paths") / output.relative_to("wiki")
-            redirects.append(PublicProjectionRedirect(
-                slug=None, target_slug=target, relative_path=relative,
-                content=_render_redirect(path, target), public_path=path,
-            ))
+            redirects.append(
+                PublicProjectionRedirect(
+                    slug=None,
+                    target_slug=target,
+                    relative_path=relative,
+                    content=_render_redirect(path, target),
+                    public_path=path,
+                )
+            )
     return sorted(
         redirects, key=lambda item: (item.slug is None, item.slug or item.public_path or "")
     )
@@ -566,8 +576,14 @@ def _verified_compiled_body(
         raise WoonError(f"public projection requires compiler-owned Markdown: {page_id}")
     frontmatter = _mapping(page.get("frontmatter"), f"page {page_id} frontmatter")
     for field in (
-        "title", "canonical_id", "publication_state", "access", "public_slug",
-        "public_redirect_from", "public_redirect_from_paths", "content_status",
+        "title",
+        "canonical_id",
+        "publication_state",
+        "access",
+        "public_slug",
+        "public_redirect_from",
+        "public_redirect_from_paths",
+        "content_status",
     ):
         if metadata.get(field) != frontmatter.get(field):
             raise WoonError(f"public projection compiler output metadata drift: {page_id}.{field}")

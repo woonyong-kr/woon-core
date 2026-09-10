@@ -1173,10 +1173,9 @@ class KnowledgeService:
         for document in self._repository.list_documents():
             if document.metadata.canonical_id == metadata.canonical_id:
                 continue
-            if (
-                document.metadata.identity_scope == metadata.identity_scope
-                and _fingerprint(document.metadata.title) == _fingerprint(metadata.title)
-            ):
+            if document.metadata.identity_scope == metadata.identity_scope and _fingerprint(
+                document.metadata.title
+            ) == _fingerprint(metadata.title):
                 raise WoonError(
                     "a canonical document with the same normalized title already exists: "
                     f"{document.metadata.canonical_id}"

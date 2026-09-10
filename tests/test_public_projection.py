@@ -82,22 +82,35 @@ def test_keyword_preview_does_not_override_private_provenance(tmp_path: Path) ->
     ],
 )
 def test_authored_child_guide_avoids_duplicate_list_without_hiding_navigation(
-    tmp_path: Path, status: str, navigation: str | None,
-    has_groups: bool | None, expected_toc: bool,
+    tmp_path: Path,
+    status: str,
+    navigation: str | None,
+    has_groups: bool | None,
+    expected_toc: bool,
 ) -> None:
     parent = _page(
-        page_id="Wiki/structures", title="자료구조", publication_state="publish", access="public",
-        slug="structures", body="## 위치로 접근하기\n\n- [[Wiki/array|Array]]",
+        page_id="Wiki/structures",
+        title="자료구조",
+        publication_state="publish",
+        access="public",
+        slug="structures",
+        body="## 위치로 접근하기\n\n- [[Wiki/array|Array]]",
     )
     parent["frontmatter"]["content_status"] = status
     if navigation is not None:
         parent["frontmatter"]["reader_navigation"] = navigation
-    parent["frontmatter"]["navigation_groups"] = None if has_groups is None else [
-        {"label": "위치로 접근하기", "children": ["Wiki/array"] if has_groups else []}
-    ]
+    parent["frontmatter"]["navigation_groups"] = (
+        None
+        if has_groups is None
+        else [{"label": "위치로 접근하기", "children": ["Wiki/array"] if has_groups else []}]
+    )
     child = _page(
-        page_id="Wiki/array", title="Array", publication_state="publish", access="public",
-        slug="array", parent="[[Wiki/structures|자료구조]]",
+        page_id="Wiki/array",
+        title="Array",
+        publication_state="publish",
+        access="public",
+        slug="array",
+        parent="[[Wiki/structures|자료구조]]",
     )
     vault, site = _write_fixture(tmp_path, [parent, child])
 
@@ -152,8 +165,13 @@ def test_invalid_public_search_terms_fail(tmp_path: Path, terms: object) -> None
 
 
 def test_redirects_are_separate_deterministic_artifacts_and_replay_safely(tmp_path: Path) -> None:
-    page = _page(page_id="Wiki/observability", title="Observability",
-                 publication_state="publish", access="public", slug="observability")
+    page = _page(
+        page_id="Wiki/observability",
+        title="Observability",
+        publication_state="publish",
+        access="public",
+        slug="observability",
+    )
     page["frontmatter"].update(content_status="planned", public_redirect_from=["old-observability"])
     vault, site = _write_fixture(tmp_path, [page])
     report = prepare_public_projection(vault, site)
@@ -176,8 +194,9 @@ def test_redirects_are_separate_deterministic_artifacts_and_replay_safely(tmp_pa
 def test_flat_redirect_prefix_order_stays_stable_when_legacy_paths_are_added(
     tmp_path: Path,
 ) -> None:
-    page = _page(page_id="Wiki/one", title="One", publication_state="publish",
-                 access="public", slug="one")
+    page = _page(
+        page_id="Wiki/one", title="One", publication_state="publish", access="public", slug="one"
+    )
     page["frontmatter"]["public_redirect_from"] = ["a-b", "a"]
     vault, site = _write_fixture(tmp_path / "flat", [page])
     report = prepare_public_projection(vault, site)
@@ -186,15 +205,25 @@ def test_flat_redirect_prefix_order_stays_stable_when_legacy_paths_are_added(
     vault, site = _write_fixture(tmp_path / "paths", [page])
     report = prepare_public_projection(vault, site)
     assert [(item.slug, item.public_path) for item in report.redirects] == [
-        ("a", None), ("a-b", None), (None, "/wiki/algorithm/a/"), (None, "/wiki/algorithm/z/")
+        ("a", None),
+        ("a-b", None),
+        (None, "/wiki/algorithm/a/"),
+        (None, "/wiki/algorithm/z/"),
     ]
 
 
 def test_legacy_paths_preserve_both_url_forms_and_replay_without_duplicates(tmp_path: Path) -> None:
-    page = _page(page_id="Wiki/structures", title="자료구조", publication_state="publish",
-                 access="public", slug="data-structures")
-    paths = ["/wiki/algorithm/linear-data-structures/",
-             "/wiki/algorithm/linear-data-structures.html"]
+    page = _page(
+        page_id="Wiki/structures",
+        title="자료구조",
+        publication_state="publish",
+        access="public",
+        slug="data-structures",
+    )
+    paths = [
+        "/wiki/algorithm/linear-data-structures/",
+        "/wiki/algorithm/linear-data-structures.html",
+    ]
     page["frontmatter"]["public_redirect_from_paths"] = paths
     vault, site = _write_fixture(tmp_path, [page])
     report = prepare_public_projection(vault, site)
@@ -211,15 +240,33 @@ def test_legacy_paths_preserve_both_url_forms_and_replay_without_duplicates(tmp_
     assert apply_public_projection(prepare_public_projection(vault, site)).changed is False
 
 
-@pytest.mark.parametrize("path", [
-    "/wiki/algorithm/../private/", "/wiki/algorithm/%2e%2e/", "//example.com/wiki/a/b/",
-    "https://example.com/wiki/a/b/", "/wiki/algorithm/a/?q=x", "/wiki/algorithm/a/#x",
-    "/wiki/algorithm/a\\b/", "/wiki/private/item/", "/wiki/algorithm/private.html",
-    "/wiki/algorithm/a//", "/wiki/flat-slug/", "/wiki/algorithm/a.html/", "", None,
-])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/wiki/algorithm/../private/",
+        "/wiki/algorithm/%2e%2e/",
+        "//example.com/wiki/a/b/",
+        "https://example.com/wiki/a/b/",
+        "/wiki/algorithm/a/?q=x",
+        "/wiki/algorithm/a/#x",
+        "/wiki/algorithm/a\\b/",
+        "/wiki/private/item/",
+        "/wiki/algorithm/private.html",
+        "/wiki/algorithm/a//",
+        "/wiki/flat-slug/",
+        "/wiki/algorithm/a.html/",
+        "",
+        None,
+    ],
+)
 def test_legacy_paths_reject_unsafe_or_unapproved_path_forms(tmp_path: Path, path: object) -> None:
-    page = _page(page_id="Wiki/structures", title="자료구조", publication_state="publish",
-                 access="public", slug="data-structures")
+    page = _page(
+        page_id="Wiki/structures",
+        title="자료구조",
+        publication_state="publish",
+        access="public",
+        slug="data-structures",
+    )
     page["frontmatter"]["public_redirect_from_paths"] = [path]
     vault, site = _write_fixture(tmp_path, [page])
     with pytest.raises(WoonError, match="safe legacy public paths"):
@@ -230,8 +277,13 @@ def test_legacy_paths_reject_unsafe_or_unapproved_path_forms(tmp_path: Path, pat
 def test_legacy_paths_reserve_final_output_files_as_well_as_urls(
     tmp_path: Path, collision: str
 ) -> None:
-    page = _page(page_id="Wiki/structures", title="자료구조", publication_state="publish",
-                 access="public", slug="data-structures")
+    page = _page(
+        page_id="Wiki/structures",
+        title="자료구조",
+        publication_state="publish",
+        access="public",
+        slug="data-structures",
+    )
     path = "/wiki/algorithm/index.html"
     page["frontmatter"]["public_redirect_from_paths"] = [path]
     pages = [page]
@@ -241,22 +293,38 @@ def test_legacy_paths_reserve_final_output_files_as_well_as_urls(
         page["frontmatter"]["public_redirect_from"] = ["algorithm"]
     else:
         private = collision == "private"
-        pages.append(_page(page_id="Wiki/algorithm", title="Algorithm", slug="algorithm",
-                           publication_state="private" if private else "publish",
-                           access="local-only" if private else "public"))
+        pages.append(
+            _page(
+                page_id="Wiki/algorithm",
+                title="Algorithm",
+                slug="algorithm",
+                publication_state="private" if private else "publish",
+                access="local-only" if private else "public",
+            )
+        )
     vault, site = _write_fixture(tmp_path, pages)
     with pytest.raises(WoonError, match="redirect path conflicts"):
         prepare_public_projection(vault, site)
 
 
 def test_legacy_paths_require_compiled_metadata_and_ignore_private_owners(tmp_path: Path) -> None:
-    private = _page(page_id="Wiki/private-owner", title="Private", publication_state="private",
-                    access="local-only", slug="private-owner")
+    private = _page(
+        page_id="Wiki/private-owner",
+        title="Private",
+        publication_state="private",
+        access="local-only",
+        slug="private-owner",
+    )
     private["frontmatter"]["public_redirect_from_paths"] = ["/wiki/algorithm/hidden/"]
     vault, site = _write_fixture(tmp_path / "private", [private])
     assert prepare_public_projection(vault, site).redirects == ()
-    public = _page(page_id="Wiki/structures", title="자료구조", publication_state="publish",
-                  access="public", slug="data-structures")
+    public = _page(
+        page_id="Wiki/structures",
+        title="자료구조",
+        publication_state="publish",
+        access="public",
+        slug="data-structures",
+    )
     vault, site = _write_fixture(tmp_path / "public", [public])
     public["frontmatter"]["public_redirect_from_paths"] = ["/wiki/algorithm/old/"]
     _write_yaml(vault / "catalog/llm-wiki/pages.yaml", {"version": 1, "pages": [public]})
@@ -264,11 +332,23 @@ def test_legacy_paths_require_compiled_metadata_and_ignore_private_owners(tmp_pa
         prepare_public_projection(vault, site)
 
 
-@pytest.mark.parametrize("former", ["old-name", None, [None], ["../private"],
-                                   ["https://example.com"], ["Old-Name"], ["%2e%2e"], [""]])
+@pytest.mark.parametrize(
+    "former",
+    [
+        "old-name",
+        None,
+        [None],
+        ["../private"],
+        ["https://example.com"],
+        ["Old-Name"],
+        ["%2e%2e"],
+        [""],
+    ],
+)
 def test_redirect_input_cannot_be_a_path_or_unvalidated_url(tmp_path: Path, former: object) -> None:
-    page = _page(page_id="Wiki/one", title="One", publication_state="publish",
-                 access="public", slug="one")
+    page = _page(
+        page_id="Wiki/one", title="One", publication_state="publish", access="public", slug="one"
+    )
     page["frontmatter"]["public_redirect_from"] = former
     vault, site = _write_fixture(tmp_path, [page])
     with pytest.raises(WoonError, match="safe public slugs"):
@@ -277,13 +357,20 @@ def test_redirect_input_cannot_be_a_path_or_unvalidated_url(tmp_path: Path, form
 
 @pytest.mark.parametrize("former", [["one"], ["old", "old"], ["two"], ["private"]])
 def test_redirects_cannot_shadow_current_or_private_urls(tmp_path: Path, former: list[str]) -> None:
-    one = _page(page_id="Wiki/one", title="One", publication_state="publish",
-                access="public", slug="one")
+    one = _page(
+        page_id="Wiki/one", title="One", publication_state="publish", access="public", slug="one"
+    )
     one["frontmatter"]["public_redirect_from"] = former
-    two = _page(page_id="Wiki/two", title="Two", publication_state="publish",
-                access="public", slug="two")
-    private = _page(page_id="Wiki/private", title="Private", publication_state="private",
-                    access="local-only", slug="private")
+    two = _page(
+        page_id="Wiki/two", title="Two", publication_state="publish", access="public", slug="two"
+    )
+    private = _page(
+        page_id="Wiki/private",
+        title="Private",
+        publication_state="private",
+        access="local-only",
+        slug="private",
+    )
     private["frontmatter"]["public_redirect_from"] = ["private-alias"]
     vault, site = _write_fixture(tmp_path, [one, two, private])
     with pytest.raises(WoonError, match="redirect slug conflicts"):
@@ -291,8 +378,14 @@ def test_redirects_cannot_shadow_current_or_private_urls(tmp_path: Path, former:
 
 
 def test_redirect_owners_require_public_provenance_and_compiled_metadata(tmp_path: Path) -> None:
-    page = _page(page_id="Wiki/one", title="One", publication_state="publish",
-                 access="public", slug="one", source_ids=["source://private/book"])
+    page = _page(
+        page_id="Wiki/one",
+        title="One",
+        publication_state="publish",
+        access="public",
+        slug="one",
+        source_ids=["source://private/book"],
+    )
     page["frontmatter"]["public_redirect_from"] = ["old"]
     vault, site = _write_fixture(tmp_path, [page], source_privacy="local-only")
     with pytest.raises(WoonError, match="non-public provenance"):
@@ -307,8 +400,9 @@ def test_redirect_owners_require_public_provenance_and_compiled_metadata(tmp_pat
 def test_private_owner_produces_no_redirect_and_target_removal_invalidates_apply(
     tmp_path: Path,
 ) -> None:
-    page = _page(page_id="Wiki/one", title="One", publication_state="publish",
-                 access="public", slug="one")
+    page = _page(
+        page_id="Wiki/one", title="One", publication_state="publish", access="public", slug="one"
+    )
     page["frontmatter"]["public_redirect_from"] = ["old"]
     vault, site = _write_fixture(tmp_path, [page])
     report = prepare_public_projection(vault, site)
@@ -747,7 +841,7 @@ def test_public_projection_rejects_link_to_private_page(tmp_path: Path) -> None:
     [
         '```run-python\ncost = [[0]]\nlabel = "[[Wiki/target]]"\n```\n',
         '~~~~python\nlabel = "[literal](example.md)"\n~~~\ncost = [[0]]\n~~~~\n',
-        '   ````python\n```\ncost = [[0]]\n   `````\n',
+        "   ````python\n```\ncost = [[0]]\n   `````\n",
     ],
 )
 def test_fenced_code_is_preserved_while_prose_links_are_projected(
@@ -755,10 +849,21 @@ def test_fenced_code_is_preserved_while_prose_links_are_projected(
 ) -> None:
     body = "[[Wiki/target|앞]]\n\n" + block + "\n[[Wiki/target|뒤]]"
     pages = [
-        _page(page_id="Wiki/example", title="예제", publication_state="publish", access="public",
-              slug="example", body=body),
-        _page(page_id="Wiki/target", title="대상", publication_state="publish", access="public",
-              slug="target"),
+        _page(
+            page_id="Wiki/example",
+            title="예제",
+            publication_state="publish",
+            access="public",
+            slug="example",
+            body=body,
+        ),
+        _page(
+            page_id="Wiki/target",
+            title="대상",
+            publication_state="publish",
+            access="public",
+            slug="target",
+        ),
     ]
     vault, site = _write_fixture(tmp_path, pages)
 
@@ -774,8 +879,14 @@ def test_fenced_code_is_preserved_while_prose_links_are_projected(
 
 @pytest.mark.parametrize("literal", ["source_session_id: private", "[원문](../private/book.md)"])
 def test_fenced_literals_do_not_bypass_private_content_checks(tmp_path: Path, literal: str) -> None:
-    page = _page(page_id="Wiki/example", title="예제", publication_state="publish", access="public",
-                 slug="example", body=f"```text\n{literal}\n```\n")
+    page = _page(
+        page_id="Wiki/example",
+        title="예제",
+        publication_state="publish",
+        access="public",
+        slug="example",
+        body=f"```text\n{literal}\n```\n",
+    )
     vault, site = _write_fixture(tmp_path, [page])
     with pytest.raises(WoonError, match="prohibited"):
         prepare_public_projection(vault, site)

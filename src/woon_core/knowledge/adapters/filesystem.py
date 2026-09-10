@@ -217,9 +217,7 @@ class MarkdownDocumentRepository:
             else:
                 title_key = (document.metadata.identity_scope, normalized_title)
                 if title_key in titles:
-                    errors.append(
-                        f"{relative}: duplicate title also used by {titles[title_key]}"
-                    )
+                    errors.append(f"{relative}: duplicate title also used by {titles[title_key]}")
                 titles[title_key] = relative
         return errors
 
