@@ -66,6 +66,15 @@ from woon_core.knowledge.ports import (
     KnowledgeSearchIndex,
     ReadOnlyKnowledgeCorpus,
 )
+from woon_core.knowledge.recording_titles import (
+    RecordingTitleBundle,
+    RecordingWrite,
+    apply_recording_writes,
+    check_recording_inputs,
+    prepare_recording_title_bundle,
+    restore_recording_writes,
+    verify_recording_writes,
+)
 from woon_core.knowledge.wiki_tree import (
     iter_wiki_pages,
     load_wiki_tree,
@@ -115,6 +124,7 @@ class WikiRestructureTransactionReport:
     indexed_documents: int
     resources_renamed: int = 0
     resource_references_written: int = 0
+    recording_files_written: int = 0
 
 
 def _manual_wikilink_atom(value: str) -> str:
@@ -1415,6 +1425,7 @@ class KnowledgeService:
         *,
         resource_renames: tuple[ResourceFileRename, ...] = (),
         resource_reference_writes: tuple[ManualWikiWrite, ...] = (),
+        recording_bundle: RecordingTitleBundle | None = None,
     ) -> WikiRestructureTransactionReport:
         """Apply reviewed manual relocations with one compiler transaction.
 
@@ -1428,6 +1439,8 @@ class KnowledgeService:
         mode. Their existing source catalog files accept only
         the reviewed locator substitutions; compiler and native references
         still belong to the two existing transaction inputs.
+        A recording bundle joins the same lock, validation, rollback and index
+        boundary; it does not relax resource rename ownership or run its producer.
         """
 
         compiler = self._compiled_wiki
@@ -1438,6 +1451,7 @@ class KnowledgeService:
             and not compiler_transaction.page_retirements
             and not resource_renames
             and not resource_reference_writes
+            and recording_bundle is None
             and not _transaction_refreshes_tree(compiler_transaction)
         ):
             report = self.apply_compiled_wiki_transaction(compiler_transaction)
@@ -1455,6 +1469,7 @@ class KnowledgeService:
             resource_moves, reference_writes = self._prepare_resource_renames(
                 resource_renames, resource_reference_writes
             )
+            recording_writes = prepare_recording_title_bundle(compiler.vault, recording_bundle)
             input_snapshot = compiler.snapshot_inputs()
             output_snapshot = compiler.snapshot_outputs(
                 extra_relative_paths=tuple(
@@ -1468,6 +1483,19 @@ class KnowledgeService:
                 )
             )
             moved_resources: list[tuple[Path, Path, bytes, int]] = []
+            reserved = set(input_snapshot) | set(output_snapshot) | set(manual_snapshot)
+            reserved.update(
+                path
+                for source, target, _content, _mode in resource_moves
+                for path in (source, target)
+            )
+            reserved.update(path for path, _before, _after, _mode in reference_writes)
+            if any(
+                source in reserved or target in reserved
+                for source, target, _before, _after, _mode in recording_writes
+            ):
+                raise WoonError("recording participant overlaps another Wiki transaction owner")
+            written_recordings: list[RecordingWrite] = []
             written_references: list[tuple[Path, bytes, bytes, int]] = []
             native_writes: dict[Path, bytes | None] = {}
             page_overrides: dict[Path, bytes | None] = {
@@ -1507,10 +1535,12 @@ class KnowledgeService:
             def before_write() -> None:
                 nonlocal mutation_started
                 self._validate_compiled_wiki_transaction_revisions(compiler_transaction)
+                check_recording_inputs(recording_writes)
                 for source, _target, _content, _mode in writes:
                     if source.read_bytes() != manual_snapshot[source][0]:
                         raise WoonError("manual Wiki source changed before write; replan")
                 mutation_started = True
+                apply_recording_writes(recording_writes, written_recordings)
                 for source, target, content, mode in resource_moves:
                     if source.is_symlink() or source.read_bytes() != content:
                         raise WoonError(f"resource changed before rename: {source}")
@@ -1534,6 +1564,7 @@ class KnowledgeService:
                     _native_survivors=native_survivors,
                 )
                 indexed_documents = self._reindex_unlocked()
+                verify_recording_writes(recording_writes)
                 for source, target, content, mode in moved_resources:
                     if (
                         source.exists()
@@ -1546,11 +1577,22 @@ class KnowledgeService:
                 if not mutation_started:
                     raise
                 try:
-                    compiler.restore_inputs(input_snapshot)
-                    compiler.restore_outputs(output_snapshot)
-                    self._restore_manual_wiki_snapshot(manual_snapshot, native_writes)
-                    self._restore_resource_renames(moved_resources, written_references)
-                    self._reindex_unlocked()
+                    # A conflict in one owner must not skip recovery of the others.
+                    recovery_errors = []
+                    for recover in (
+                        lambda: compiler.restore_inputs(input_snapshot),
+                        lambda: compiler.restore_outputs(output_snapshot),
+                        lambda: self._restore_manual_wiki_snapshot(manual_snapshot, native_writes),
+                        lambda: self._restore_resource_renames(moved_resources, written_references),
+                        lambda: restore_recording_writes(written_recordings),
+                        self._reindex_unlocked,
+                    ):
+                        try:
+                            recover()
+                        except BaseException as error:
+                            recovery_errors.append(str(error))
+                    if recovery_errors:
+                        raise WoonError("; ".join(recovery_errors))
                 except BaseException as recovery_error:
                     raise WoonError(
                         "mixed Wiki restructure failed and recovery was incomplete: "
@@ -1563,6 +1605,7 @@ class KnowledgeService:
                 indexed_documents=indexed_documents,
                 resources_renamed=len(moved_resources),
                 resource_references_written=len(written_references),
+                recording_files_written=len(written_recordings),
             )
 
     def apply_native_wiki_transaction(
