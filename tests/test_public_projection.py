@@ -742,6 +742,45 @@ def test_public_projection_rejects_link_to_private_page(tmp_path: Path) -> None:
         prepare_public_projection(vault, site)
 
 
+@pytest.mark.parametrize(
+    "block",
+    [
+        '```run-python\ncost = [[0]]\nlabel = "[[Wiki/target]]"\n```\n',
+        '~~~~python\nlabel = "[literal](example.md)"\n~~~\ncost = [[0]]\n~~~~\n',
+        '   ````python\n```\ncost = [[0]]\n   `````\n',
+    ],
+)
+def test_fenced_code_is_preserved_while_prose_links_are_projected(
+    tmp_path: Path, block: str
+) -> None:
+    body = "[[Wiki/target|앞]]\n\n" + block + "\n[[Wiki/target|뒤]]"
+    pages = [
+        _page(page_id="Wiki/example", title="예제", publication_state="publish", access="public",
+              slug="example", body=body),
+        _page(page_id="Wiki/target", title="대상", publication_state="publish", access="public",
+              slug="target"),
+    ]
+    vault, site = _write_fixture(tmp_path, pages)
+
+    report = prepare_public_projection(vault, site)
+    rendered = next(
+        doc.content.decode() for doc in report.documents if doc.page_id == "Wiki/example"
+    )
+    assert block in rendered
+    assert "[앞](/wiki/target/)" in rendered and "[뒤](/wiki/target/)" in rendered
+    assert report.link_checks == ("Wiki/example:public:Wiki/target",)
+    assert report.receipt == prepare_public_projection(vault, site).receipt
+
+
+@pytest.mark.parametrize("literal", ["source_session_id: private", "[원문](../private/book.md)"])
+def test_fenced_literals_do_not_bypass_private_content_checks(tmp_path: Path, literal: str) -> None:
+    page = _page(page_id="Wiki/example", title="예제", publication_state="publish", access="public",
+                 slug="example", body=f"```text\n{literal}\n```\n")
+    vault, site = _write_fixture(tmp_path, [page])
+    with pytest.raises(WoonError, match="prohibited"):
+        prepare_public_projection(vault, site)
+
+
 def test_cli_preflight_does_not_write_and_apply_requires_explicit_flag(tmp_path: Path) -> None:
     vault, site = _write_fixture(tmp_path, [_hidden_wiki_hub()])
     output = StringIO()

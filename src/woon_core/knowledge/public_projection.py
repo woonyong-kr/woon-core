@@ -15,6 +15,7 @@ import re
 import shutil
 import tempfile
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ _WIKILINK = re.compile(
 )
 _ANY_WIKILINK = re.compile(r"!?\[\[[^\]]+\]\]")
 _MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]*\]\((?P<target>[^)]+)\)")
+_CODE_FENCE = re.compile(r"(?m)^ {0,3}(?P<marker>`{3,}|~{3,})(?P<info>[^\n]*)(?:\n|$)")
 _PRIVATE_CONTENT = (
     ("Obsidian wikilink", _ANY_WIKILINK),
     ("local file path", re.compile(r"(?:file://|/Users/|~/)")),
@@ -772,18 +774,45 @@ def _project_body(
         url = f"/wiki/{projection_targets[target_page_id]}/{_jekyll_heading_fragment(anchor)}"
         return f"[{label}]({url})"
 
-    projected = _WIKILINK.sub(replace, body)
-    if _ANY_WIKILINK.search(projected):
-        raise WoonError(f"public projection body contains an unresolved Obsidian link: {page_id}")
-    for match in _MARKDOWN_LINK.finditer(projected):
-        target = match.group("target").strip()
-        normalized_target = target.removeprefix("/").removeprefix("./")
-        if normalized_target.startswith(("wiki/private/", "sources/", "private/")):
-            raise WoonError(f"public projection body has a private source link: {page_id}")
-        if target.startswith(("https://", "http://", "/", "#", "mailto:")):
+    projected = []
+    for is_code, part in _fenced_markdown_parts(body):
+        if is_code:
+            projected.append(part)
             continue
-        raise WoonError(f"public projection body has a local Markdown link: {page_id}")
-    return projected.rstrip() + "\n"
+        prose = _WIKILINK.sub(replace, part)
+        if _ANY_WIKILINK.search(prose):
+            raise WoonError(
+                f"public projection body contains an unresolved Obsidian link: {page_id}"
+            )
+        for match in _MARKDOWN_LINK.finditer(prose):
+            target = match.group("target").strip()
+            normalized_target = target.removeprefix("/").removeprefix("./")
+            if normalized_target.startswith(("wiki/private/", "sources/", "private/")):
+                raise WoonError(f"public projection body has a private source link: {page_id}")
+            if target.startswith(("https://", "http://", "/", "#", "mailto:")):
+                continue
+            raise WoonError(f"public projection body has a local Markdown link: {page_id}")
+        projected.append(prose)
+    return "".join(projected).rstrip() + "\n"
+
+
+def _fenced_markdown_parts(body: str) -> Iterator[tuple[bool, str]]:
+    """Separate fenced literals without changing their bytes or interpreting links."""
+    offset = 0
+    for opening in _CODE_FENCE.finditer(body):
+        if opening.start() < offset:
+            continue
+        marker = opening.group("marker")
+        if marker[0] == "`" and "`" in opening.group("info"):
+            continue
+        closing = re.compile(
+            rf"(?m)^ {{0,3}}{re.escape(marker[0])}{{{len(marker)},}}[ \t]*(?:\n|$)"
+        ).search(body, opening.end())
+        end = closing.end() if closing else len(body)
+        yield False, body[offset : opening.start()]
+        yield True, body[opening.start() : end]
+        offset = end
+    yield False, body[offset:]
 
 
 def _jekyll_heading_fragment(anchor: str) -> str:
@@ -887,8 +916,9 @@ def _insert_reader_toc(body: str) -> str:
 
 
 def _assert_safe_projected_content(page_id: str, content: str) -> None:
+    prose = "".join(part for is_code, part in _fenced_markdown_parts(content) if not is_code)
     for label, pattern in _PRIVATE_CONTENT:
-        if pattern.search(content):
+        if pattern.search(prose if label == "Obsidian wikilink" else content):
             raise WoonError(f"public projection output contains prohibited {label}: {page_id}")
 
 
