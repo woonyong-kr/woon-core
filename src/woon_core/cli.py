@@ -293,6 +293,7 @@ Usage:
   woon knowledge schedule-apply --candidate <local-JSON>
     [--vault <path>]
   woon version
+  woon knowledge workflow <run|status|cancel|undo|mcp> [--vault <path>]
 """
 
 RESEARCH_INTAKE_USAGE = """usage: woon knowledge research-intake-plan --purpose <text>
@@ -596,6 +597,11 @@ def _run_knowledge(arguments: list[str], output: TextIO) -> None:
     if not arguments:
         raise WoonError("usage: woon knowledge <index|search|get|audit|history|compile|evaluate>")
     command, *raw_options = arguments
+    if command == "workflow":
+        from woon_core.knowledge.workflow_cli import run_workflow_command
+
+        run_workflow_command(raw_options, output)
+        return
     if command == "vault-tool":
         _run_vault_tool(raw_options, output)
         return

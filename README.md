@@ -19,16 +19,31 @@
 - Docling 기반 local-only 문서 변환, deterministic 정제와 terminal resolution receipt
 - source·claim·page spec에서 receipt가 있는 LLM Wiki를 결정론적으로 컴파일
 - 교체 가능한 document, search, history port와 local stdio MCP
+- 선택한 기존 Markdown 노트에 원자료를 통합하고 별도 검토·revision 확인·되돌리기를 제공하는 독립 workflow
 
 ## 설치
 
 Python 3.12 이상과 `uv`를 사용한다. GitHub 저장소에서 CLI와 MCP를 설치한다.
 
 ```bash
-uv tool install git+https://github.com/woonyong-kr/woon-core.git
+uv tool install git+https://github.com/woonyong-choi/woon-core.git@v0.6.0
 ```
 
 개발 checkout에서는 `uv sync --all-extras --dev`를 사용한다.
+
+일반 Obsidian 노트는 개인 Woon registry 없이 `woon knowledge workflow`로 처리한다.
+사용자의 native Codex 또는 Claude CLI 로그인과 명시적으로 선택한 Vault·노트·원자료가
+필요하다. UI와 설치 방법, 지원 범위는
+[Woon Knowledge 플러그인](https://github.com/woonyong-choi/woon-knowledge-plugin)을 따른다.
+PDF에는 `documents` extra와 로컬 Docling 모델 캐시가 추가로 필요하다.
+해시 일치와 모델 검토 통과는 내용의 정확도나 사용자 재수정 감소를 보장하지 않는다.
+
+```bash
+woon knowledge workflow --help
+woon knowledge workflow run --vault /path/to/vault --request request.json
+woon knowledge workflow status --vault /path/to/vault --job example-1
+woon knowledge workflow undo --vault /path/to/vault --job example-1
+```
 
 ## 사용법
 
